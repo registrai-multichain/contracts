@@ -1,0 +1,9 @@
+# Foundry
+cache/
+out/
+broadcast/
+
+# Local config
+.env
+.env.local
+.DS_Store

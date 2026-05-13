@@ -1,0 +1,57 @@
+{
+  "chainId": 5042002,
+  "rpc": "https://rpc.testnet.arc-node.thecanteenapp.com",
+  "explorer": "https://testnet.arcscan.app",
+  "deployedAt": "2026-05-13",
+  "deployer": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
+  "treasury": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
+  "feeBps": { "creator": 40, "agent": 20, "treasury": 10, "total": 70 },
+  "contracts": {
+    "USDC": "0x3600000000000000000000000000000000000000",
+    "EURC": "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+    "Registry": "0xa7db7FA00193baC5315335899b008A013FAFf384",
+    "Attestation": "0x9F1B338326cfb4389e70AEb5685ed5491E60aBE5",
+    "Dispute": "0x96E46513955ECb09eEECca36ee04A18D79785D11",
+    "Markets": "0xabB8Ad614dacF8F402Ad15EC07B85f300899C8BF",
+    "MarketsEURC": "0x3d2A1B77475aaB7E2e074C4Aa0b51c764831D669"
+  },
+  "warsawFeed": {
+    "feedId": "0x264ba3f6ecc15c546f3d12c5ca428cd85eec37cd3d54747df2dba99a9263caff",
+    "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
+    "methodologyHashPlaceholder": "0xe82ab18fead19b7bf78f93f4d08d6c2fe0f566a9e8f01d4999cb3c2ccba40504",
+    "minBondUsdc": 10,
+    "disputeWindowSec": 86400,
+    "resolver": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
+    "firstAttestation": {
+      "id": "0xcaee48c615092250c89cf6b109941108831162e453165dd44a7e05b96d774f0b",
+      "value": 17312,
+      "txHash": "0x08b1e9a136f33ded54faf2ad06f72d86968262be254f26b2a879f1aa2e3609f5"
+    }
+  },
+  "markets": [
+    {
+      "id": "0x54370ef416a62a56653ec1e657ec572b87b6c00becedf66295d33791bfa97561",
+      "collateral": "USDC",
+      "threshold": 18000,
+      "comparator": "GreaterThan",
+      "expiryDays": 80,
+      "liquidityUsdc": 8
+    },
+    {
+      "id": "0x0913710c97d2fda317b715d62f471f27d4c1c4a26ecfcb3875cd96f52f7b7382",
+      "collateral": "USDC",
+      "threshold": 17000,
+      "comparator": "LessThan",
+      "expiryDays": 50,
+      "liquidityUsdc": 8
+    },
+    {
+      "id": "0x073ffdfd123264e215976dfb8e95799fde741f1ed4afff8394e5026ea8512719",
+      "collateral": "USDC",
+      "threshold": 17500,
+      "comparator": "GreaterOrEqual",
+      "expiryDays": 140,
+      "liquidityUsdc": 8
+    }
+  ]
+}
