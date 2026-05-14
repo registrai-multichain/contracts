@@ -90,6 +90,100 @@ contract MarketsTest is Test {
         // 50/50 odds at creation
         assertEq(markets.priceOf(mid, Markets.Outcome.Yes), 0.5e18);
         assertEq(markets.priceOf(mid, Markets.Outcome.No), 0.5e18);
+        // Creator received initial LP shares equal to their seed
+        assertEq(markets.lpShares(mid, marketCreator), 1000e6);
+        assertEq(markets.totalLpShares(mid), 1000e6);
+    }
+
+    // --- LP shares ---
+
+    function test_addLiquidity_preservesOdds() public {
+        bytes32 mid = _createMarket(17_000, block.timestamp + 7 days, 1000e6);
+        // Move odds first
+        vm.startPrank(alice);
+        usdc.approve(address(markets), 200e6);
+        markets.buy(mid, Markets.Outcome.Yes, 200e6, 0);
+        vm.stopPrank();
+
+        uint256 priceYesBefore = markets.priceOf(mid, Markets.Outcome.Yes);
+
+        // Bob adds liquidity at the new odds
+        vm.startPrank(bob);
+        usdc.approve(address(markets), 500e6);
+        uint256 shares = markets.addLiquidity(mid, 500e6);
+        vm.stopPrank();
+
+        // Odds preserved (the whole point of proportional add)
+        assertApproxEqAbs(
+            markets.priceOf(mid, Markets.Outcome.Yes),
+            priceYesBefore,
+            1e15 // within 0.001 percentage point
+        );
+        // Bob got LP shares + the leftover outcome tokens
+        assertGt(shares, 0);
+        assertEq(markets.lpShares(mid, bob), shares);
+        assertGt(markets.yesBalance(mid, bob), 0);
+        assertGt(markets.noBalance(mid, bob), 0);
+        // The side the pool has more of, Bob receives less of (the pool
+        // already has enough YES, so it absorbs more YES and gives Bob less)
+        if (markets.getMarket(mid).yesReserve > markets.getMarket(mid).noReserve) {
+            assertLt(markets.yesBalance(mid, bob), markets.noBalance(mid, bob));
+        }
+    }
+
+    function test_claimLP_proportional() public {
+        // Creator seeds 1000, Bob adds 500 — both YES wins.
+        bytes32 mid = _createMarket(17_000, block.timestamp + 2 days, 1000e6);
+        vm.startPrank(bob);
+        usdc.approve(address(markets), 500e6);
+        markets.addLiquidity(mid, 500e6);
+        vm.stopPrank();
+
+        // Some trading happens (no need for it to matter to the math here)
+        vm.startPrank(alice);
+        usdc.approve(address(markets), 100e6);
+        markets.buy(mid, Markets.Outcome.No, 100e6, 0);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 1 days);
+        _attest(17_500); // YES wins
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        markets.resolve(mid);
+
+        uint256 creatorBefore = usdc.balanceOf(marketCreator);
+        uint256 bobBefore = usdc.balanceOf(bob);
+
+        vm.prank(marketCreator);
+        uint256 creatorPayout = markets.claimLP(mid);
+        vm.prank(bob);
+        uint256 bobPayout = markets.claimLP(mid);
+
+        // Creator had 1000e6 of 1500e6 total LP shares (~66.67%)
+        // Bob had 500e6 of 1500e6 (~33.33%)
+        // Together they should claim the full LP pot at resolution.
+        assertGt(creatorPayout, 0);
+        assertGt(bobPayout, 0);
+        // Creator received ~2x Bob (proportional)
+        assertApproxEqRel(creatorPayout, bobPayout * 2, 0.02e18); // within 2%
+        assertEq(usdc.balanceOf(marketCreator), creatorBefore + creatorPayout);
+        assertEq(usdc.balanceOf(bob), bobBefore + bobPayout);
+    }
+
+    function test_claimLP_revertsBeforeResolve() public {
+        bytes32 mid = _createMarket(17_000, block.timestamp + 7 days, 1000e6);
+        vm.prank(marketCreator);
+        vm.expectRevert(Markets.NotResolvedYet.selector);
+        markets.claimLP(mid);
+    }
+
+    function test_addLiquidity_revertsAfterExpiry() public {
+        bytes32 mid = _createMarket(17_000, block.timestamp + 1 days, 1000e6);
+        vm.warp(block.timestamp + 1 days);
+        vm.startPrank(bob);
+        usdc.approve(address(markets), 100e6);
+        vm.expectRevert(Markets.MarketExpired.selector);
+        markets.addLiquidity(mid, 100e6);
+        vm.stopPrank();
     }
 
     function test_create_revertsBadExpiry() public {

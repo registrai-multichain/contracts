@@ -76,6 +76,14 @@ contract Markets {
     /// @notice Cumulative fee earnings per recipient — useful for dashboards.
     mapping(address => uint256) public feeEarnings;
 
+    /// @notice LP shares per market and per LP. Initial creator gets shares
+    /// equal to their seed liquidity; subsequent LPs get proportional shares.
+    mapping(bytes32 => mapping(address => uint256)) public lpShares;
+    mapping(bytes32 => uint256) public totalLpShares;
+    /// @notice Snapshot of the winning reserve at resolution time, so LPs claim
+    /// against a fixed pot rather than racing each other's redeems.
+    mapping(bytes32 => uint256) public lpPotAtResolution;
+
     event MarketCreated(
         bytes32 indexed marketId,
         address indexed creator,
@@ -109,6 +117,13 @@ contract Markets {
         uint256 agentFee,
         uint256 treasuryFee
     );
+    event LiquidityAdded(
+        bytes32 indexed marketId,
+        address indexed lp,
+        uint256 amount,
+        uint256 sharesMinted
+    );
+    event LPClaimed(bytes32 indexed marketId, address indexed lp, uint256 payout);
 
     error MarketExists();
     error MarketMissing();
@@ -125,6 +140,9 @@ contract Markets {
     error AttestationNotFinalized();
     error AgentNotRegistered();
     error BadTreasury();
+    error NoLPShares();
+    error NotResolvedYet();
+    error AmountTooLow();
 
     constructor(Attestation attestation_, Registry registry_, IERC20 usdc, address treasury_) {
         if (treasury_ == address(0)) revert BadTreasury();
@@ -182,7 +200,66 @@ contract Markets {
             createdAt: block.timestamp
         });
 
+        // Creator gets initial LP shares equal to their seed. This entitles
+        // them to a proportional slice of the winning reserve at resolution
+        // (independent of the creator-fee they earn on every trade).
+        lpShares[marketId][msg.sender] = liquidity;
+        totalLpShares[marketId] = liquidity;
+
         emit MarketCreated(marketId, msg.sender, feedId, agent, threshold, comparator, expiry, liquidity);
+        emit LiquidityAdded(marketId, msg.sender, liquidity, liquidity);
+    }
+
+    /// @notice Add liquidity to an existing market while preserving its
+    ///         current odds — the Polymarket-style FPMM pattern.
+    /// @dev    `amount` USDC mints `amount` complete sets. The pool absorbs
+    ///         them in proportion to its current y:n ratio (so price doesn't
+    ///         drift), and the LP receives the residual YES + NO outcome
+    ///         shares. LP also gets pool shares proportional to liquidity
+    ///         added, measured against the pool's "complete-set backing"
+    ///         (= min(yesReserve, noReserve)).
+    function addLiquidity(bytes32 marketId, uint256 amount) external returns (uint256 sharesMinted) {
+        if (amount == 0) revert AmountTooLow();
+        Market storage m = _markets[marketId];
+        if (m.createdAt == 0) revert MarketMissing();
+        if (m.phase != Phase.Trading) revert NotTrading();
+        if (block.timestamp >= m.expiry) revert MarketExpired();
+
+        USDC.safeTransferFrom(msg.sender, address(this), amount);
+
+        uint256 y = m.yesReserve;
+        uint256 n = m.noReserve;
+        uint256 total = y + n;
+
+        // Pool absorbs proportionally to its current ratio. Each USDC mints
+        // 1 YES + 1 NO; pool keeps a slice of each, user receives the rest.
+        uint256 yesToPool = (amount * y) / total;
+        uint256 noToPool = (amount * n) / total;
+        // Floor rounding: residual goes back to user. Sum = amount * (y+n)/total = amount (no overshoot).
+
+        uint256 yesToUser = amount - yesToPool;
+        uint256 noToUser = amount - noToPool;
+
+        m.yesReserve = y + yesToPool;
+        m.noReserve = n + noToPool;
+        yesBalance[marketId][msg.sender] += yesToUser;
+        noBalance[marketId][msg.sender] += noToUser;
+
+        // LP shares proportional to amount vs the pool's complete-set backing
+        // pre-add. min(y, n) is the number of complete sets the pool can back
+        // (the rarer side is the bottleneck). Falls back to amount if first LP.
+        uint256 backing = y < n ? y : n;
+        if (totalLpShares[marketId] == 0 || backing == 0) {
+            sharesMinted = amount;
+        } else {
+            sharesMinted = (amount * totalLpShares[marketId]) / backing;
+        }
+        if (sharesMinted == 0) revert AmountTooLow();
+
+        lpShares[marketId][msg.sender] += sharesMinted;
+        totalLpShares[marketId] += sharesMinted;
+
+        emit LiquidityAdded(marketId, msg.sender, amount, sharesMinted);
     }
 
     // --- Trading ---
@@ -350,6 +427,15 @@ contract Markets {
         bool yesWon = _evaluate(value, m.threshold, m.comparator);
         m.yesWon = yesWon;
         m.phase = Phase.Resolved;
+
+        // Snapshot the LP pot at resolution: the winning-side reserve is what
+        // LPs proportionally claim. Frozen here so user redemptions can't
+        // drain it before LPs withdraw. Note: user redemptions debit user
+        // balances and the matching reserve, so a stale snapshot would be
+        // wrong. Solution: track LP claims separately and account for them
+        // against the snapshot, not the live reserve.
+        lpPotAtResolution[marketId] = yesWon ? m.yesReserve : m.noReserve;
+
         emit Resolved(marketId, yesWon, value);
     }
 
@@ -361,6 +447,9 @@ contract Markets {
     }
 
     /// @notice After resolution, holders of the winning outcome redeem 1 USDC per share.
+    /// @dev    User outcome balances are separate from pool reserves — burning
+    ///         user shares doesn't touch yesReserve/noReserve. The reserves
+    ///         remain as the LP-claimable pot (snapshotted at resolve()).
     function redeem(bytes32 marketId) external returns (uint256 payout) {
         Market storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
@@ -377,6 +466,27 @@ contract Markets {
 
         USDC.safeTransfer(msg.sender, payout);
         emit Redeemed(marketId, msg.sender, payout);
+    }
+
+    /// @notice After resolution, LPs claim their proportional share of the
+    ///         winning-side reserve, snapshotted at resolve() time. Each LP
+    ///         claims independently against the original total — we don't
+    ///         decrement totalLpShares so the math is path-independent.
+    function claimLP(bytes32 marketId) external returns (uint256 payout) {
+        Market storage m = _markets[marketId];
+        if (m.createdAt == 0) revert MarketMissing();
+        if (m.phase != Phase.Resolved) revert NotResolvedYet();
+
+        uint256 myShares = lpShares[marketId][msg.sender];
+        if (myShares == 0) revert NoLPShares();
+
+        // Use the snapshot taken at resolution + the original totalLpShares.
+        // The lpShares[user] = 0 below prevents double-claim.
+        payout = (myShares * lpPotAtResolution[marketId]) / totalLpShares[marketId];
+        lpShares[marketId][msg.sender] = 0;
+
+        if (payout > 0) USDC.safeTransfer(msg.sender, payout);
+        emit LPClaimed(marketId, msg.sender, payout);
     }
 
     // --- Views ---
