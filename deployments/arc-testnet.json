@@ -15,49 +15,108 @@
     "Markets": "0xcaB9aB405F89AC701c3CAcCF110bF94f3A10cD86",
     "MarketsEURC": "0x3e456845aa2747a617EBe91Cd04e74752D890833"
   },
-  "warsawFeed": {
-    "feedId": "0xf4968db834c4e03f9c2e10bb883fe74f84c850cfacac058a1b520a8d8fa37c0b",
-    "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
-    "methodologyHashPlaceholder": "0xe82ab18fead19b7bf78f93f4d08d6c2fe0f566a9e8f01d4999cb3c2ccba40504",
-    "minBondUsdc": 10,
-    "disputeWindowSec": 86400,
-    "resolver": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
-    "firstAttestation": {
-      "id": "0x60552fde6f2c073a2e7adf0720f14ce09b668a4658e6bd771da7b002e9b6b328",
-      "value": 17312,
-      "txHash": "0x60552fde6f2c073a2e7adf0720f14ce09b668a4658e6bd771da7b002e9b6b328"
+  "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
+  "feeds": [
+    {
+      "id": "0xf4968db834c4e03f9c2e10bb883fe74f84c850cfacac058a1b520a8d8fa37c0b",
+      "symbol": "WARSAW_RESI_PLN_SQM",
+      "name": "Warsaw residential",
+      "description": "Warsaw average residential price per square meter, secondary sale market",
+      "unit": "PLN/sqm",
+      "decimals": 0,
+      "displayDivisor": 1,
+      "methodologyHashPlaceholder": "0xe82ab18fead19b7bf78f93f4d08d6c2fe0f566a9e8f01d4999cb3c2ccba40504",
+      "methodologyDoc": "/methodology/warsaw-resi-v1.md"
+    },
+    {
+      "id": "0x82f8fdde492becda94f8fa721adf86a7b843786875889b428197afb17a4e84f4",
+      "symbol": "POLAND_CPI_YOY_BPS",
+      "name": "Polish CPI Y/Y",
+      "description": "Polish Consumer Price Index, year-over-year, in basis points",
+      "unit": "bps",
+      "decimals": 2,
+      "displayDivisor": 100,
+      "methodologyHashPlaceholder": "0x17bd4d6bac34238ff5c64deb38f1a8461a9fe0fc5293812fde37d8bff1066dd3",
+      "methodologyDoc": "/methodology/polish-cpi-v1.md"
+    },
+    {
+      "id": "0xf2cc4c84c9ee4b2caeb72c77b9c9d4576da152ab8ccdbc02dedc0e611d3cf0bd",
+      "symbol": "ECB_MAIN_REFI_BPS",
+      "name": "ECB main refi rate",
+      "description": "ECB main refinancing operations rate, in basis points",
+      "unit": "bps",
+      "decimals": 2,
+      "displayDivisor": 100,
+      "methodologyHashPlaceholder": "0x43c61ec56211d8ef3decfefd39cd3322dfab3c3313ded4da624a4d293d0bc9c0",
+      "methodologyDoc": "/methodology/ecb-rate-v1.md"
     }
-  },
+  ],
   "markets": [
     {
       "id": "0xf772846d9e7a9044bc061e45a26b4e887040a30888fcdffeb8f7a13763f9f604",
+      "feedId": "0xf4968db834c4e03f9c2e10bb883fe74f84c850cfacac058a1b520a8d8fa37c0b",
       "collateral": "USDC",
       "threshold": 18000,
       "comparator": "GreaterThan",
       "expiryDays": 80,
       "initialSeedUsdc": 5,
-      "lpAddedUsdc": 5,
-      "totalLiquidityUsdc": 10
+      "lpAddedUsdc": 5
     },
     {
       "id": "0xfc859f75aed881985b11b6e1f80d6939cb000b8de1bf0aabda563c17d7a1955e",
+      "feedId": "0xf4968db834c4e03f9c2e10bb883fe74f84c850cfacac058a1b520a8d8fa37c0b",
       "collateral": "USDC",
       "threshold": 17000,
       "comparator": "LessThan",
       "expiryDays": 50,
       "initialSeedUsdc": 5,
-      "lpAddedUsdc": 5,
-      "totalLiquidityUsdc": 10
+      "lpAddedUsdc": 5
     },
     {
       "id": "0x0f0759df600278b16abf508380fc508f5d73cf427bea09656f3014ef02e4b2db",
+      "feedId": "0xf4968db834c4e03f9c2e10bb883fe74f84c850cfacac058a1b520a8d8fa37c0b",
       "collateral": "USDC",
       "threshold": 17500,
       "comparator": "GreaterOrEqual",
       "expiryDays": 140,
       "initialSeedUsdc": 5,
-      "lpAddedUsdc": 5,
-      "totalLiquidityUsdc": 10
+      "lpAddedUsdc": 5
+    },
+    {
+      "id": "0x356d4ade7b44881b46759fe577138766c2263b68c4b7ea6a1ba91a36b0ce3381",
+      "feedId": "0x82f8fdde492becda94f8fa721adf86a7b843786875889b428197afb17a4e84f4",
+      "collateral": "USDC",
+      "threshold": 450,
+      "comparator": "GreaterThan",
+      "expiryDays": 30,
+      "initialSeedUsdc": 5
+    },
+    {
+      "id": "0xe6e373bed03061a5d9ccbf5ef9f08f322033f1338e5a72e6437184644aade535",
+      "feedId": "0x82f8fdde492becda94f8fa721adf86a7b843786875889b428197afb17a4e84f4",
+      "collateral": "USDC",
+      "threshold": 350,
+      "comparator": "LessThan",
+      "expiryDays": 60,
+      "initialSeedUsdc": 5
+    },
+    {
+      "id": "0x50aba04fc82cfb7db2fff037e02f1c9a0d636db51da5f90cba549d32d05f6c2a",
+      "feedId": "0xf2cc4c84c9ee4b2caeb72c77b9c9d4576da152ab8ccdbc02dedc0e611d3cf0bd",
+      "collateral": "USDC",
+      "threshold": 250,
+      "comparator": "LessOrEqual",
+      "expiryDays": 45,
+      "initialSeedUsdc": 5
+    },
+    {
+      "id": "0xebb95e0f817b404b2472bcaf3d17172e71a276d3f43bea0cb91d270ed4104dd0",
+      "feedId": "0xf2cc4c84c9ee4b2caeb72c77b9c9d4576da152ab8ccdbc02dedc0e611d3cf0bd",
+      "collateral": "USDC",
+      "threshold": 300,
+      "comparator": "GreaterOrEqual",
+      "expiryDays": 90,
+      "initialSeedUsdc": 5
     }
   ]
 }
