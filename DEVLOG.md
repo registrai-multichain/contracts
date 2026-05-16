@@ -4,6 +4,28 @@ Reverse-chronological work journal for [Registrai](https://registrai.cc) — per
 
 ---
 
+## 2026-05-16 · Verifiable agents — design committed, building next
+
+**Roadmap entry, not a ship.** Today's architecture trusts the off-chain agent process to (a) fetch honest data and (b) compute the right value from it. The bond + slash mechanism deters lying, but the math itself is opaque: judges and traders verify the methodology by reading a markdown file, not by checking executable code. We're going to fix half of that — the computation half.
+
+**The split:**
+
+| Trust layer | Where | Hardens via |
+|---|---|---|
+| Data fetch | Off-chain worker | TEE attestation (Phala SGX) — later |
+| Aggregation rule | Onchain contract | Verifiable bytecode — this milestone |
+| Final attestation | Onchain Attestation contract | Already in place |
+
+**Shape of the build:**
+- `IAgentRule.sol` — `submit(int256[] raw) returns (int256 finalValue)`
+- Three reference templates: `MedianRule`, `TrimmedMeanRule(trimPct)`, `BoundedScalarRule(min, max, maxStepBps)`
+- `Registry.registerAgent(feedId, methodHash, bond, ruleContract)` — when `ruleContract != 0`, Attestation accepts only attestations whose `inputHash == keccak256(rawInputs)` and value matches `ruleContract.submit(rawInputs)`. The methodology hash *becomes* the rule bytecode hash.
+- SDK extension: `defineAgent({ rule: '0x…' })` switches the submission shape from `(value, inputHash)` to `(rawInputs)`.
+
+**Why it matters for Registrai:** every other oracle protocol treats aggregation as a trusted black box. Making it onchain bytecode flips the pitch from "permissionless registry of agents" to "permissionless registry of *verifiable* agents" — a real product moat, not just a brand claim. ~3-4 days of work, lands in v0.2.
+
+---
+
 ## 2026-05-15 · Market-maker vault + end-to-end resolve test, live
 
 **Shipped**
