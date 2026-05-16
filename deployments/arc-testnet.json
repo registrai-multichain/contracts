@@ -16,7 +16,10 @@
     "MarketsEURC": "0x3e456845aa2747a617EBe91Cd04e74752D890833",
     "MarketMakerVault": "0x79F09d46dA4cA607f8805930778fBfFDAad0E9D8",
     "MedianRule": "0x415fb74629d8eab51b7991679cec6cb71f3fb997",
-    "TrimmedMeanRule10": "0x772a40fee7b51542cf09c8c26c9e7b786d162a70"
+    "TrimmedMeanRule10": "0x772a40fee7b51542cf09c8c26c9e7b786d162a70",
+    "Registry_v1_1": "0x4e074806ce7b8bcee27c14fd446d924179aa919e",
+    "Attestation_v1_1": "0xf0caf69125bd17717c4804edce61bbdacd52ac60",
+    "Dispute_v1_1": "0xea05b57ca431b2972a48218af1be0a07fc69a864"
   },
   "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
   "feeds": [
@@ -52,6 +55,19 @@
       "displayDivisor": 100,
       "methodologyHashPlaceholder": "0x43c61ec56211d8ef3decfefd39cd3322dfab3c3313ded4da624a4d293d0bc9c0",
       "methodologyDoc": "/methodology/ecb-rate-v1.md"
+    },
+    {
+      "id": "0x89453b87d3965a0f8132a29414ad3ed0b1950ee743cfcf6d85cfea8038d8ac5a",
+      "symbol": "WARSAW_RESI_MEDIAN_VERIFIABLE",
+      "name": "Warsaw residential · verifiable",
+      "description": "Median of recent Otodom listings, computed onchain via MedianRule",
+      "unit": "PLN/sqm",
+      "decimals": 0,
+      "displayDivisor": 1,
+      "registryVersion": "1.1",
+      "rule": "0x415fb74629d8eab51b7991679cec6cb71f3fb997",
+      "methodologyHashPlaceholder": "0xe33a128296c8d0016557b6b2be4d51b690d85153ce547c9520f24c3ed345d8c9",
+      "methodologyDoc": "/methodology/warsaw-resi-median-v1.md"
     }
   ],
   "markets": [
