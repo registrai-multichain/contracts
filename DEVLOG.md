@@ -4,6 +4,33 @@ Reverse-chronological work journal for [Registrai](https://registrai.cc) — per
 
 ---
 
+## 2026-05-17 · Markets v1.1 · verifiable markets · Circle-product roadmap
+
+**Markets v1.1 deployed and seeded with verifiable markets.** Yesterday's v1.1 trio (Registry, Attestation, Dispute) hosted the verifiable Warsaw feed but had no markets layer — Markets v1.0 is immutable-coupled to Attestation v1.0, so trades against the verifiable feed weren't possible. Today's Markets v1.1 closes that.
+
+- `Markets_v1_1`: [`0xec70ce17aa4b0da6898ced47621655c4c31b1136`](https://testnet.arcscan.app/address/0xec70ce17aa4b0da6898ced47621655c4c31b1136)
+- Same Markets bytecode as v1.0, just pointing at Attestation v1.1
+- Three demo markets seeded against the verifiable Warsaw feed (id `0x89453b87…`):
+  - market [`0x2b86…c486`](https://testnet.arcscan.app/address/0xec70ce17aa4b0da6898ced47621655c4c31b1136) · *Will Warsaw resi median > 17,000 PLN/sqm?*
+  - market [`0xa0ac…00d2`](https://testnet.arcscan.app/address/0xec70ce17aa4b0da6898ced47621655c4c31b1136) · *Will Warsaw resi median > 17,500 PLN/sqm?*
+  - market [`0xd82b…e0a0`](https://testnet.arcscan.app/address/0xec70ce17aa4b0da6898ced47621655c4c31b1136) · *Will Warsaw resi median < 18,000 PLN/sqm by expiry?*
+- Frontend: new `VerifiableBadge` component, surfaced on `MarketCard` and `FeedDetail` for any market or feed bound to a rule contract. Click-through goes to the rule on ArcScan so anyone can read the bytecode.
+
+The verifiable demo loop is now complete end-to-end: agent fetches Otodom listings → submits raw int256s via `attestWithRule` → MedianRule computes 17,371 onchain → markets resolve against that value at expiry → traders redeem at $1 per winning share. Every step is bytecode anyone can verify.
+
+**Roadmap commitments for the Circle Developer Grant:**
+
+| Milestone | What | Circle integration |
+|---|---|---|
+| v0.3 · **Programmable Wallets** | Let external agents register without bringing their own EOA — onboarding via Circle's hosted wallets | Circle Programmable Wallets |
+| v0.4 · **CCTP integration** | Cross-chain agent deployment — bring USDC from Ethereum/Base to attest on Arc | Circle CCTP |
+| v0.5 · **`BoundedScalarRule`** | Third reference rule: range guards + max-step-bps for slow-moving feeds (rates, indices) | — |
+| v0.6 · **Phala TEE attestation** | Closes the trust loop on the data-fetch half — TEE attests the off-chain fetcher ran the committed code | — |
+
+The verifiable-agents layer (rule contracts) plus the roadmap above is a complete moat story: Registrai treats aggregation as bytecode, data-fetch as TEE-attested execution, identity as Circle Programmable Wallets, and capital as CCTP-bridged USDC. Each piece slots into a Circle/Arc-native primitive.
+
+---
+
 ## 2026-05-16 · Verifiable agents end-to-end live — first rule-bound attestation onchain
 
 **Shipped end to end on the same day as the design.** Today's architecture used to trust the off-chain agent process to (a) fetch honest data and (b) compute the right value from it. The bond + slash mechanism deterred lying, but the math itself was opaque. As of this commit the math is verifiable bytecode anyone can read.
