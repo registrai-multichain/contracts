@@ -4,9 +4,27 @@ Reverse-chronological work journal for [Registrai](https://registrai.cc) — per
 
 ---
 
-## 2026-05-16 · Verifiable agents — design committed, building next
+## 2026-05-16 · Verifiable agents shipped — rule contracts live
 
-**Roadmap entry, not a ship.** Today's architecture trusts the off-chain agent process to (a) fetch honest data and (b) compute the right value from it. The bond + slash mechanism deters lying, but the math itself is opaque: judges and traders verify the methodology by reading a markdown file, not by checking executable code. We're going to fix half of that — the computation half.
+**Shipped end to end on the same day as the design.** Today's architecture used to trust the off-chain agent process to (a) fetch honest data and (b) compute the right value from it. The bond + slash mechanism deterred lying, but the math itself was opaque. As of this commit the math is verifiable bytecode anyone can read.
+
+**What landed today:**
+
+- `IAgentRule.sol` + reference implementations `MedianRule` and `TrimmedMeanRule(1000)` deployed to Arc testnet:
+  - MedianRule: [`0x415fb74629d8eab51b7991679cec6cb71f3fb997`](https://testnet.arcscan.app/address/0x415fb74629d8eab51b7991679cec6cb71f3fb997)
+  - TrimmedMeanRule (10% per tail): [`0x772a40fee7b51542cf09c8c26c9e7b786d162a70`](https://testnet.arcscan.app/address/0x772a40fee7b51542cf09c8c26c9e7b786d162a70)
+- `Registry.registerAgentWithRule(...)` parallel to `registerAgent` — backward compatible; existing agents unchanged
+- `Attestation.attestWithRule(feedId, int256[] rawInputs)` reads the agent's bound rule, computes the value via `rule.submit(rawInputs)`, stores the result, and emits an `Attested` event with `inputHash = keccak256(abi.encode(rawInputs))` — anyone watching the chain can re-derive the input vector and re-call the rule to confirm
+- 25 new contract tests (including a 256-run fuzz over MedianRule). Full suite **86/86 green**
+- `@registrai/agent-sdk@0.2.0` adds the rule-bound path. `defineAgent({ rule: '0x…' })` switches `run()`'s return shape from `{ value, inputHash }` to `{ rawInputs }`; SDK calls `attestWithRule` under the hood and never computes the final value off-chain in this path
+- `/agents/create` on the site gained a rule picker: none / Median / Trimmed Mean 10% / Custom address. Success panel hands back a pre-filled SDK snippet for the chosen rule. Card 02 on the landing page stays `beta`.
+
+**The invariant the protocol now guarantees** for any rule-bound agent: pull `inputHash` from the `Attested` event → reconstruct `rawInputs` from the attest tx calldata → re-call `rule.submit(rawInputs)` yourself → confirm the stored `value` matches. Aggregation math is no longer trust-by-markdown.
+
+**What's next on this milestone:**
+- BoundedScalarRule (range guards + max-step-bps) — round 2
+- Migrate at least one first-party agent (Warsaw resi or Polish CPI) to use the new path, so the dashboard shows a "verifiable" badge on a live feed
+- Phala TEE attestation for the data-fetch half — that closes the trust loop end to end
 
 **The split:**
 
