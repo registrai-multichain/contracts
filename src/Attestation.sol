@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Registry} from "./Registry.sol";
+import {IAgentRule} from "./rules/IAgentRule.sol";
 
 /// @title Attestation
 /// @notice Stores attestations from registered agents and exposes read functions.
@@ -51,6 +52,8 @@ contract Attestation {
     error AttestationMissing();
     error NotAuthorized();
     error AlreadyWired();
+    error AgentHasRule();
+    error AgentHasNoRule();
 
     constructor(Registry registry_) {
         REGISTRY = registry_;
@@ -65,21 +68,47 @@ contract Attestation {
     }
 
     function attest(bytes32 feedId, int256 value, bytes32 inputHash) external returns (bytes32 attestationId) {
+        // Plain attestation path — agent posts the value directly. Disallowed
+        // when the agent is bound to a rule contract; use attestWithRule then.
+        if (REGISTRY.ruleOf(feedId, msg.sender) != address(0)) revert AgentHasRule();
+        return _record(feedId, msg.sender, value, inputHash);
+    }
+
+    /// @notice Verifiable-agent attestation. Agent must be registered via
+    /// `Registry.registerAgentWithRule`. The submitted `rawInputs` are passed
+    /// to the bound rule contract; its deterministic output is the recorded
+    /// value, and `inputHash = keccak256(abi.encode(rawInputs))` so disputes
+    /// can re-derive the exact input vector.
+    function attestWithRule(bytes32 feedId, int256[] calldata rawInputs)
+        external
+        returns (bytes32 attestationId)
+    {
+        address rule = REGISTRY.ruleOf(feedId, msg.sender);
+        if (rule == address(0)) revert AgentHasNoRule();
+        int256 value = IAgentRule(rule).submit(rawInputs);
+        bytes32 inputHash = keccak256(abi.encode(rawInputs));
+        return _record(feedId, msg.sender, value, inputHash);
+    }
+
+    function _record(bytes32 feedId, address agent, int256 value, bytes32 inputHash)
+        internal
+        returns (bytes32 attestationId)
+    {
         Registry.Feed memory f = REGISTRY.getFeed(feedId);
         if (!f.exists) revert FeedMissing();
 
-        Registry.Agent memory a = REGISTRY.getAgent(feedId, msg.sender);
+        Registry.Agent memory a = REGISTRY.getAgent(feedId, agent);
         if (!a.active) revert AgentInactive();
         // Must keep enough free bond to back every outstanding attestation. A new attestation
         // requires at least `minBond` available so a challenger can match it.
         if (a.bond - a.lockedBond < f.minBond) revert InsufficientAvailableBond();
 
-        attestationId = keccak256(abi.encode(feedId, msg.sender, block.timestamp, value, inputHash));
+        attestationId = keccak256(abi.encode(feedId, agent, block.timestamp, value, inputHash));
         if (_attestations[attestationId].timestamp != 0) revert DuplicateAttestation();
 
         _attestations[attestationId] = AttestationData({
             feedId: feedId,
-            agent: msg.sender,
+            agent: agent,
             value: value,
             timestamp: block.timestamp,
             inputHash: inputHash,
@@ -87,12 +116,12 @@ contract Attestation {
             status: DisputeStatus.None,
             finalizedAt: block.timestamp + f.disputeWindow
         });
-        _history[feedId][msg.sender].push(attestationId);
-        _latestValidPlusOne[feedId][msg.sender] = _history[feedId][msg.sender].length;
+        _history[feedId][agent].push(attestationId);
+        _latestValidPlusOne[feedId][agent] = _history[feedId][agent].length;
 
-        REGISTRY.recordAttestation(feedId, msg.sender);
+        REGISTRY.recordAttestation(feedId, agent);
 
-        emit Attested(attestationId, feedId, msg.sender, value, inputHash, block.timestamp + f.disputeWindow);
+        emit Attested(attestationId, feedId, agent, value, inputHash, block.timestamp + f.disputeWindow);
     }
 
     // --- Privileged: Dispute ---

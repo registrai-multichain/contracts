@@ -42,6 +42,11 @@ contract Registry {
 
     mapping(bytes32 => Feed) internal _feeds;
     mapping(bytes32 => mapping(address => Agent)) internal _agents;
+    /// @notice Optional onchain rule contract per (feedId, agent). When non-zero,
+    /// the Attestation contract enforces value == rule.submit(rawInputs).
+    /// Agents registered via `registerAgent` (no rule) leave this at address(0)
+    /// and continue to post values directly.
+    mapping(bytes32 => mapping(address => address)) public ruleOf;
 
     address public attestation;
     address public dispute;
@@ -57,6 +62,7 @@ contract Registry {
         address resolver
     );
     event AgentRegistered(bytes32 indexed feedId, address indexed agent, bytes32 methodologyHash, uint256 bond);
+    event RuleBound(bytes32 indexed feedId, address indexed agent, address indexed rule);
     event BondToppedUp(bytes32 indexed feedId, address indexed agent, uint256 amount, uint256 newBond);
     event BondWithdrawn(bytes32 indexed feedId, address indexed agent, uint256 amount);
     event BondLocked(bytes32 indexed feedId, address indexed agent, uint256 amount, uint256 totalLocked);
@@ -120,6 +126,29 @@ contract Registry {
     }
 
     function registerAgent(bytes32 feedId, bytes32 agentMethodologyHash, uint256 bondAmount) external {
+        _register(feedId, agentMethodologyHash, bondAmount, address(0));
+    }
+
+    /// @notice Register an agent whose attestations are gated by an onchain rule
+    /// contract. Once set, Attestation.attestWithRule(feedId, rawInputs) is the
+    /// only attestation path for this agent; the value is recomputed from raw
+    /// inputs and cannot be spoofed.
+    function registerAgentWithRule(
+        bytes32 feedId,
+        bytes32 agentMethodologyHash,
+        uint256 bondAmount,
+        address ruleContract
+    ) external {
+        if (ruleContract == address(0)) revert NotAuthorized();
+        _register(feedId, agentMethodologyHash, bondAmount, ruleContract);
+    }
+
+    function _register(
+        bytes32 feedId,
+        bytes32 agentMethodologyHash,
+        uint256 bondAmount,
+        address ruleContract
+    ) internal {
         Feed memory f = _feeds[feedId];
         if (!f.exists) revert FeedMissing();
         if (bondAmount < f.minBond) revert BondTooLow();
@@ -133,6 +162,10 @@ contract Registry {
         a.bond = bondAmount;
         a.registeredAt = block.timestamp;
         a.active = true;
+        if (ruleContract != address(0)) {
+            ruleOf[feedId][msg.sender] = ruleContract;
+            emit RuleBound(feedId, msg.sender, ruleContract);
+        }
 
         emit AgentRegistered(feedId, msg.sender, agentMethodologyHash, bondAmount);
     }
