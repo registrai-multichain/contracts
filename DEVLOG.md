@@ -4,7 +4,7 @@ Reverse-chronological work journal for [Registrai](https://registrai.cc) — per
 
 ---
 
-## 2026-05-16 · Verifiable agents shipped — rule contracts live
+## 2026-05-16 · Verifiable agents end-to-end live — first rule-bound attestation onchain
 
 **Shipped end to end on the same day as the design.** Today's architecture used to trust the off-chain agent process to (a) fetch honest data and (b) compute the right value from it. The bond + slash mechanism deterred lying, but the math itself was opaque. As of this commit the math is verifiable bytecode anyone can read.
 
@@ -21,10 +21,27 @@ Reverse-chronological work journal for [Registrai](https://registrai.cc) — per
 
 **The invariant the protocol now guarantees** for any rule-bound agent: pull `inputHash` from the `Attested` event → reconstruct `rawInputs` from the attest tx calldata → re-call `rule.submit(rawInputs)` yourself → confirm the stored `value` matches. Aggregation math is no longer trust-by-markdown.
 
+**Then deployed v1.1 of the Registry/Attestation/Dispute trio** alongside v1.0 to host rule-bound agents:
+- `Registry_v1_1`: [`0x4e074806ce7b8bcee27c14fd446d924179aa919e`](https://testnet.arcscan.app/address/0x4e074806ce7b8bcee27c14fd446d924179aa919e)
+- `Attestation_v1_1`: [`0xf0caf69125bd17717c4804edce61bbdacd52ac60`](https://testnet.arcscan.app/address/0xf0caf69125bd17717c4804edce61bbdacd52ac60)
+- `Dispute_v1_1`: [`0xea05b57ca431b2972a48218af1be0a07fc69a864`](https://testnet.arcscan.app/address/0xea05b57ca431b2972a48218af1be0a07fc69a864)
+
+v1.0 keeps running for the 3 existing first-party agents and 7 markets — nothing breaks. Markets v1.0's immutable coupling to Attestation v1.0 means markets-against-v1.1-feeds are a follow-up (Markets v1.1, next milestone).
+
+**Migrated Warsaw resi to verifiable.** New feed `WARSAW_RESI_MEDIAN_VERIFIABLE` (id `0x89453b87…`) registered on v1.1 with MedianRule bound. New agent module `agents/warsaw-verifiable.ts` deployed in the worker on the same daily 14:00 UTC cron. The agent fetches Otodom listings (148 today), trims outliers, caps at 128, submits raw int256 prices via `attestWithRule` — the contract computes the median onchain.
+
+**First live verifiable attestation:**
+- tx: [`0xce87ee21b461cf40f452d6a0cce63ebaca04c87d2558ed6367a7ee83cbb487b4`](https://testnet.arcscan.app/tx/0xce87ee21b461cf40f452d6a0cce63ebaca04c87d2558ed6367a7ee83cbb487b4)
+- 148 fetched → 134 retained after 5% trim → 128 inputs to MedianRule
+- onchain median: **17,371 PLN/sqm**
+- inputHash committed; anyone can re-derive rawInputs from calldata and re-call `MedianRule.submit` to reproduce 17,371 byte-for-byte
+
+The verifiable Warsaw feed *intentionally drops* the NBP-anchor calibration the v1.0 feed used. v1.0 anchored its final value to a Polish-government published figure — which moved the trust off-chain (you had to trust the calibration math + the government number). v1.1 trusts the market median itself, computed onchain from raw listings. Different methodology, different feed, both live.
+
 **What's next on this milestone:**
-- BoundedScalarRule (range guards + max-step-bps) — round 2
-- Migrate at least one first-party agent (Warsaw resi or Polish CPI) to use the new path, so the dashboard shows a "verifiable" badge on a live feed
-- Phala TEE attestation for the data-fetch half — that closes the trust loop end to end
+- Markets v1.1 deploy → markets can resolve against verifiable feeds
+- `BoundedScalarRule(min, max, maxStepBps)` — third reference rule
+- Phala TEE attestation for the data-fetch half — closes the trust loop end to end
 
 **The split:**
 
