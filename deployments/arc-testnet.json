@@ -5,7 +5,12 @@
   "deployedAt": "2026-05-14",
   "deployer": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
   "treasury": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
-  "feeBps": { "creator": 40, "agent": 20, "treasury": 10, "total": 70 },
+  "feeBps": {
+    "creator": 40,
+    "agent": 20,
+    "treasury": 10,
+    "total": 70
+  },
   "contracts": {
     "USDC": "0x3600000000000000000000000000000000000000",
     "EURC": "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
@@ -60,7 +65,7 @@
     {
       "id": "0x89453b87d3965a0f8132a29414ad3ed0b1950ee743cfcf6d85cfea8038d8ac5a",
       "symbol": "WARSAW_RESI_MEDIAN_VERIFIABLE",
-      "name": "Warsaw residential · verifiable",
+      "name": "Warsaw residential \u00b7 verifiable",
       "description": "Median of recent Otodom listings, computed onchain via MedianRule",
       "unit": "PLN/sqm",
       "decimals": 0,
@@ -167,6 +172,24 @@
       "verifiable": true,
       "collateral": "USDC",
       "threshold": 18000,
+      "comparator": "LessThan",
+      "expiryDays": 60,
+      "initialSeedUsdc": 5
+    },
+    {
+      "id": "0xd32c3c9d694e62e0ac3a9aa717bcb64ea7de489016e8ad99bdf3a62a7620e36c",
+      "feedId": "0x82f8fdde492becda94f8fa721adf86a7b843786875889b428197afb17a4e84f4",
+      "collateral": "USDC",
+      "threshold": 400,
+      "comparator": "GreaterThan",
+      "expiryDays": 45,
+      "initialSeedUsdc": 5
+    },
+    {
+      "id": "0xe3813a7225852519e1b70a6ecdf8bda8178c0aa0f2d85cd505d00f57113df24a",
+      "feedId": "0xf2cc4c84c9ee4b2caeb72c77b9c9d4576da152ab8ccdbc02dedc0e611d3cf0bd",
+      "collateral": "USDC",
+      "threshold": 275,
       "comparator": "LessThan",
       "expiryDays": 60,
       "initialSeedUsdc": 5
