@@ -18,16 +18,17 @@ Reverse-chronological work journal for [Registrai](https://registrai.cc) — per
 
 The verifiable demo loop is now complete end-to-end: agent fetches Otodom listings → submits raw int256s via `attestWithRule` → MedianRule computes 17,371 onchain → markets resolve against that value at expiry → traders redeem at $1 per winning share. Every step is bytecode anyone can verify.
 
-**Roadmap commitments for the Circle Developer Grant:**
+**Roadmap commitments for the Circle Developer Grant (re-prioritised against the May 14, 2026 relaunch — Circle named *prediction markets*, *stablecoin FX*, and *agentic economic activity* as priority verticals):**
 
-| Milestone | What | Circle integration |
+| Milestone | What | Circle vertical / product |
 |---|---|---|
-| v0.3 · **Programmable Wallets** | Let external agents register without bringing their own EOA — onboarding via Circle's hosted wallets | Circle Programmable Wallets |
-| v0.4 · **CCTP integration** | Cross-chain agent deployment — bring USDC from Ethereum/Base to attest on Arc | Circle CCTP |
-| v0.5 · **`BoundedScalarRule`** | Third reference rule: range guards + max-step-bps for slow-moving feeds (rates, indices) | — |
-| v0.6 · **Phala TEE attestation** | Closes the trust loop on the data-fetch half — TEE attests the off-chain fetcher ran the committed code | — |
+| v0.3 · **Long-tail FX feeds** | Verifiable NGN/USDC, BRL/USDC, IDR/USDC, TRY/USDC, PHP/USDC, KES/USDC rate feeds. Same architecture as the macro feeds: agent fetches from public source, submits raw inputs to a rule contract, FX rate computed onchain. Closes the loop on *stablecoin FX* by giving the Arc ecosystem its first **verifiable** local-currency feeds — onchain math, not a black-box quoter. | Stablecoin FX (priority vertical) |
+| v0.4 · **Programmable Wallets** | Let external agents register without bringing their own EOA — onboarding via Circle's hosted wallets. Lowers the friction floor to one signed message. | Circle Programmable Wallets |
+| v0.5 · **CCTP integration** | Cross-chain agent deployment — bring USDC from Ethereum or Base to attest on Arc. Same agent works across chains; capital follows. | Circle CCTP |
+| v0.6 · **`BoundedScalarRule`** | Third reference rule: range guards + max-step-bps for slow-moving feeds (rate decisions, indices, capital ratios). Catches degenerate attestations onchain before they finalize. | — |
+| v0.7 · **Phala TEE attestation** | Closes the trust loop on the data-fetch half — TEE attests the off-chain fetcher ran the exact committed code. The methodology becomes verifiable end-to-end: fetch is TEE-bytecode, aggregation is rule-contract-bytecode. | — |
 
-The verifiable-agents layer (rule contracts) plus the roadmap above is a complete moat story: Registrai treats aggregation as bytecode, data-fetch as TEE-attested execution, identity as Circle Programmable Wallets, and capital as CCTP-bridged USDC. Each piece slots into a Circle/Arc-native primitive.
+**Complete moat story** with this stack: Registrai treats aggregation as bytecode, data-fetch as TEE-attested execution, identity as Circle Programmable Wallets, and capital as CCTP-bridged USDC. Each piece slots into a Circle/Arc-native primitive. Long-tail FX feeds make the protocol immediately useful to existing Arc-native FX products (AgoraFX, others) without forcing them to build their own oracle plumbing.
 
 ---
 
