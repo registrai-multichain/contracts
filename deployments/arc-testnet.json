@@ -25,7 +25,8 @@
     "Registry_v1_1": "0x4e074806ce7b8bcee27c14fd446d924179aa919e",
     "Attestation_v1_1": "0xf0caf69125bd17717c4804edce61bbdacd52ac60",
     "Dispute_v1_1": "0xea05b57ca431b2972a48218af1be0a07fc69a864",
-    "Markets_v1_1": "0xec70ce17aa4b0da6898ced47621655c4c31b1136"
+    "Markets_v1_1": "0xec70ce17aa4b0da6898ced47621655c4c31b1136",
+    "AgentIdentity": "0xd53922ed7f6fac01d4abb52288b45e26683cf92d"
   },
   "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
   "feeds": [
