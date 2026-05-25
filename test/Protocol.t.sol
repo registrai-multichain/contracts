@@ -14,7 +14,11 @@ contract ProtocolTest is Test {
     Dispute dispute;
 
     address creator = makeAddr("creator");
-    address agent = makeAddr("agent");
+    // v2 rule: feed creator and agent are the same wallet. Tests reflect that
+    // by aliasing agent to creator. A separate non-creator wallet is used
+    // by test_registerAgent_revertsOnNonCreator to verify the guard.
+    address agent = creator;
+    address nonCreator = makeAddr("nonCreator");
     address resolver = makeAddr("resolver");
     address challenger = makeAddr("challenger");
     address challenger2 = makeAddr("challenger2");
@@ -33,6 +37,7 @@ contract ProtocolTest is Test {
         attestation.wire(address(dispute));
 
         usdc.mint(agent, 10_000e6);
+        usdc.mint(nonCreator, 10_000e6);
         usdc.mint(challenger, 10_000e6);
         usdc.mint(challenger2, 10_000e6);
     }
@@ -125,6 +130,15 @@ contract ProtocolTest is Test {
         usdc.approve(address(registry), low);
         vm.expectRevert(Registry.BondTooLow.selector);
         registry.registerAgent(feedId, AGENT_METHODOLOGY, low);
+        vm.stopPrank();
+    }
+
+    function test_registerAgent_revertsOnNonCreator() public {
+        bytes32 feedId = _createFeed();
+        vm.startPrank(nonCreator);
+        usdc.approve(address(registry), MIN_BOND);
+        vm.expectRevert(Registry.NotFeedCreator.selector);
+        registry.registerAgent(feedId, AGENT_METHODOLOGY, MIN_BOND);
         vm.stopPrank();
     }
 

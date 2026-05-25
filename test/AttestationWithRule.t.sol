@@ -23,7 +23,8 @@ contract AttestationWithRuleTest is Test {
     MedianRule medianRule;
     TrimmedMeanRule trimRule;
 
-    address creator = makeAddr("creator");
+    // v2 rule: feed creator and agent are the same wallet. We have two agents
+    // for the rule-vs-plain distinction, each creating their own feed.
     address agent = makeAddr("agent");
     address agentPlain = makeAddr("agentPlain");
     address resolver = makeAddr("resolver");
@@ -32,7 +33,8 @@ contract AttestationWithRuleTest is Test {
     uint256 constant DISPUTE_WINDOW = 1 days;
     uint256 constant MIN_BOND = 100e6;
 
-    bytes32 feedId;
+    bytes32 feedId;       // created by `agent`, used for rule-bound flow
+    bytes32 feedIdPlain;  // created by `agentPlain`, used for plain flow
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -47,9 +49,13 @@ contract AttestationWithRuleTest is Test {
         usdc.mint(agent, 1_000e6);
         usdc.mint(agentPlain, 1_000e6);
 
-        vm.prank(creator);
+        vm.prank(agent);
         feedId = registry.createFeed(
             "Test feed", METHODOLOGY, MIN_BOND, DISPUTE_WINDOW, resolver
+        );
+        vm.prank(agentPlain);
+        feedIdPlain = registry.createFeed(
+            "Test feed plain", METHODOLOGY, MIN_BOND, DISPUTE_WINDOW, resolver
         );
     }
 
@@ -114,23 +120,23 @@ contract AttestationWithRuleTest is Test {
     function test_attestWithRule_blockedForPlainAgent() public {
         vm.startPrank(agentPlain);
         usdc.approve(address(registry), MIN_BOND);
-        registry.registerAgent(feedId, METHODOLOGY, MIN_BOND);
+        registry.registerAgent(feedIdPlain, METHODOLOGY, MIN_BOND);
 
         int256[] memory raw = new int256[](3);
         raw[0] = 1; raw[1] = 2; raw[2] = 3;
         vm.expectRevert(Attestation.AgentHasNoRule.selector);
-        attestation.attestWithRule(feedId, raw);
+        attestation.attestWithRule(feedIdPlain, raw);
         vm.stopPrank();
     }
 
     function test_plainAttest_stillWorksForPlainAgent() public {
         vm.startPrank(agentPlain);
         usdc.approve(address(registry), MIN_BOND);
-        registry.registerAgent(feedId, METHODOLOGY, MIN_BOND);
-        attestation.attest(feedId, 17500, keccak256("inputs"));
+        registry.registerAgent(feedIdPlain, METHODOLOGY, MIN_BOND);
+        attestation.attest(feedIdPlain, 17500, keccak256("inputs"));
         vm.stopPrank();
 
-        (int256 value, , ) = attestation.latestValue(feedId, agentPlain);
+        (int256 value, , ) = attestation.latestValue(feedIdPlain, agentPlain);
         assertEq(value, 17500);
     }
 

@@ -16,7 +16,8 @@ contract MarketsTest is Test {
     Markets markets;
 
     address creator = makeAddr("creator");
-    address agent = makeAddr("agent");
+    // v2 rule: feed creator and agent are the same wallet.
+    address agent = creator;
     address resolver = makeAddr("resolver");
     address marketCreator = makeAddr("marketCreator");
     address alice = makeAddr("alice");

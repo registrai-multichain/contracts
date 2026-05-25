@@ -3,6 +3,8 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IRegistraiPoints} from "./IRegistraiPoints.sol";
+import {PointsValues} from "./PointsValues.sol";
 
 /// @title Registry
 /// @notice Feed creation, agent registration, and bond accounting for the agent-oracle protocol.
@@ -51,7 +53,10 @@ contract Registry {
     address public attestation;
     address public dispute;
     address public immutable DEPLOYER;
+    IRegistraiPoints public points;
+    bool public pointsSet;
 
+    event PointsContractSet(address indexed oldPoints, address indexed newPoints);
     event FeedCreated(
         bytes32 indexed feedId,
         address indexed creator,
@@ -82,6 +87,7 @@ contract Registry {
     error BondLockedByDispute();
     error NotAuthorized();
     error AlreadyWired();
+    error NotFeedCreator();
 
     constructor(IERC20 usdc) {
         USDC = usdc;
@@ -95,6 +101,15 @@ contract Registry {
         if (attestation_ == address(0) || dispute_ == address(0)) revert NotAuthorized();
         attestation = attestation_;
         dispute = dispute_;
+    }
+
+    /// @notice One-shot: wire the points contract. Deployer-only, callable only once.
+    function setPoints(address points_) external {
+        if (msg.sender != DEPLOYER) revert NotAuthorized();
+        if (pointsSet) revert AlreadyWired();
+        pointsSet = true;
+        emit PointsContractSet(address(0), points_);
+        points = IRegistraiPoints(points_);
     }
 
     function createFeed(
@@ -151,6 +166,11 @@ contract Registry {
     ) internal {
         Feed memory f = _feeds[feedId];
         if (!f.exists) revert FeedMissing();
+        // v2: feed creator and agent must be the same wallet. Couples data-spec
+        // and data-quality responsibility to one accountable party — no
+        // Case B (someone else attesting against your feed). The agent bond
+        // is then both the spec-author's and the data-runner's skin in the game.
+        if (msg.sender != f.creator) revert NotFeedCreator();
         if (bondAmount < f.minBond) revert BondTooLow();
 
         Agent storage a = _agents[feedId][msg.sender];
@@ -168,6 +188,12 @@ contract Registry {
         }
 
         emit AgentRegistered(feedId, msg.sender, agentMethodologyHash, bondAmount);
+
+        if (address(points) != address(0)) {
+            uint256 pts = PointsValues.POINTS_REGISTER +
+                (ruleContract != address(0) ? PointsValues.POINTS_REGISTER_RULE_BONUS : 0);
+            try points.awardFlat(msg.sender, pts, "register") {} catch {}
+        }
     }
 
     /// @notice Top up an existing agent's bond. Cannot reactivate a slashed or withdrawn agent.

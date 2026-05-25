@@ -4,8 +4,11 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Attestation} from "./Attestation.sol";
 import {Registry} from "./Registry.sol";
+import {IRegistraiPoints} from "./IRegistraiPoints.sol";
+import {PointsValues} from "./PointsValues.sol";
 
 /// @title Markets
 /// @notice Binary prediction markets resolved by Registrai attestations.
@@ -13,7 +16,7 @@ import {Registry} from "./Registry.sol";
 ///      Trading uses a constant-product market maker over YES/NO shares,
 ///      with the well-known Polymarket-style "buy via complete-set mint,
 ///      sell via complete-set burn" formulation.
-contract Markets {
+contract Markets is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     enum Comparator {
@@ -55,6 +58,9 @@ contract Markets {
     IERC20 public immutable USDC;
     /// @notice Where the protocol's share of trading fees accrues.
     address public immutable TREASURY;
+    address public immutable DEPLOYER;
+    IRegistraiPoints public points;
+    bool public pointsSet;
 
     uint256 public constant MIN_LIQUIDITY = 5e6; // 5 USDC — testnet floor
 
@@ -84,6 +90,7 @@ contract Markets {
     /// against a fixed pot rather than racing each other's redeems.
     mapping(bytes32 => uint256) public lpPotAtResolution;
 
+    event PointsContractSet(address indexed oldPoints, address indexed newPoints);
     event MarketCreated(
         bytes32 indexed marketId,
         address indexed creator,
@@ -143,6 +150,8 @@ contract Markets {
     error NoLPShares();
     error NotResolvedYet();
     error AmountTooLow();
+    error NotAuthorized();
+    error AlreadyWired();
 
     constructor(Attestation attestation_, Registry registry_, IERC20 usdc, address treasury_) {
         if (treasury_ == address(0)) revert BadTreasury();
@@ -150,6 +159,16 @@ contract Markets {
         REGISTRY = registry_;
         USDC = usdc;
         TREASURY = treasury_;
+        DEPLOYER = msg.sender;
+    }
+
+    /// @notice One-shot: wire the points contract. Deployer-only, callable only once.
+    function setPoints(address points_) external {
+        if (msg.sender != DEPLOYER) revert NotAuthorized();
+        if (pointsSet) revert AlreadyWired();
+        pointsSet = true;
+        emit PointsContractSet(address(0), points_);
+        points = IRegistraiPoints(points_);
     }
 
     // --- Market lifecycle ---
@@ -168,7 +187,7 @@ contract Markets {
         Comparator comparator,
         uint256 expiry,
         uint256 liquidity
-    ) external returns (bytes32 marketId) {
+    ) external nonReentrant returns (bytes32 marketId) {
         if (expiry <= block.timestamp) revert BadExpiry();
         if (liquidity < MIN_LIQUIDITY) revert LiquidityTooLow();
         // A market is only resolvable if its agent is actively bonded on the feed.
@@ -208,6 +227,10 @@ contract Markets {
 
         emit MarketCreated(marketId, msg.sender, feedId, agent, threshold, comparator, expiry, liquidity);
         emit LiquidityAdded(marketId, msg.sender, liquidity, liquidity);
+
+        if (address(points) != address(0)) {
+            try points.awardFlat(msg.sender, PointsValues.POINTS_CREATE_MARKET, "create_market") {} catch {}
+        }
     }
 
     /// @notice Add liquidity to an existing market while preserving its
@@ -218,7 +241,7 @@ contract Markets {
     ///         shares. LP also gets pool shares proportional to liquidity
     ///         added, measured against the pool's "complete-set backing"
     ///         (= min(yesReserve, noReserve)).
-    function addLiquidity(bytes32 marketId, uint256 amount) external returns (uint256 sharesMinted) {
+    function addLiquidity(bytes32 marketId, uint256 amount) external nonReentrant returns (uint256 sharesMinted) {
         if (amount == 0) revert AmountTooLow();
         Market storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
@@ -267,6 +290,7 @@ contract Markets {
     /// @notice Buy YES or NO shares with USDC. Reverts if shares received are below minSharesOut.
     function buy(bytes32 marketId, Outcome outcome, uint256 collateralIn, uint256 minSharesOut)
         external
+        nonReentrant
         returns (uint256 sharesOut)
     {
         Market storage m = _markets[marketId];
@@ -302,12 +326,18 @@ contract Markets {
 
         if (sharesOut < minSharesOut) revert SlippageExceeded();
         emit Bought(marketId, msg.sender, outcome, collateralIn, sharesOut);
+
+        // Use effectiveIn (post-fee) so points reflect actual AMM exposure, not gross input.
+        if (address(points) != address(0)) {
+            try points.awardTrade(msg.sender, effectiveIn) {} catch {}
+        }
     }
 
     /// @notice Sell YES or NO shares back to the pool for USDC.
     /// @dev Solves the constant-product invariant for collateralOut given sharesIn.
     function sell(bytes32 marketId, Outcome outcome, uint256 sharesIn, uint256 minCollateralOut)
         external
+        nonReentrant
         returns (uint256 collateralOut)
     {
         Market storage m = _markets[marketId];
@@ -364,6 +394,11 @@ contract Markets {
 
         USDC.safeTransfer(msg.sender, collateralOut);
         emit Sold(marketId, msg.sender, outcome, sharesIn, collateralOut);
+
+        // Use grossOut (pre-fee) to match the buy-side convention of effective AMM exposure.
+        if (address(points) != address(0)) {
+            try points.awardTrade(msg.sender, grossOut) {} catch {}
+        }
     }
 
     // --- Fees ---
@@ -410,7 +445,7 @@ contract Markets {
 
     /// @notice After expiry, anyone can resolve by reading the attestation that
     ///         was valid at the expiry timestamp.
-    function resolve(bytes32 marketId) external {
+    function resolve(bytes32 marketId) external nonReentrant {
         Market storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
         if (m.phase == Phase.Resolved) revert AlreadyResolved();
@@ -437,6 +472,12 @@ contract Markets {
         lpPotAtResolution[marketId] = yesWon ? m.yesReserve : m.noReserve;
 
         emit Resolved(marketId, yesWon, value);
+
+        // Award resolve points to the oracle agent (the economic actor who made
+        // resolution possible), not the keeper who called this function.
+        if (address(points) != address(0)) {
+            try points.awardFlat(m.agent, PointsValues.POINTS_RESOLVE, "resolve") {} catch {}
+        }
     }
 
     function _evaluate(int256 value, int256 threshold, Comparator c) internal pure returns (bool) {
@@ -450,7 +491,7 @@ contract Markets {
     /// @dev    User outcome balances are separate from pool reserves — burning
     ///         user shares doesn't touch yesReserve/noReserve. The reserves
     ///         remain as the LP-claimable pot (snapshotted at resolve()).
-    function redeem(bytes32 marketId) external returns (uint256 payout) {
+    function redeem(bytes32 marketId) external nonReentrant returns (uint256 payout) {
         Market storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
         if (m.phase != Phase.Resolved) revert NotResolved();
@@ -472,7 +513,7 @@ contract Markets {
     ///         winning-side reserve, snapshotted at resolve() time. Each LP
     ///         claims independently against the original total — we don't
     ///         decrement totalLpShares so the math is path-independent.
-    function claimLP(bytes32 marketId) external returns (uint256 payout) {
+    function claimLP(bytes32 marketId) external nonReentrant returns (uint256 payout) {
         Market storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
         if (m.phase != Phase.Resolved) revert NotResolvedYet();
