@@ -26,7 +26,13 @@
     "Attestation_v1_1": "0xf0caf69125bd17717c4804edce61bbdacd52ac60",
     "Dispute_v1_1": "0xea05b57ca431b2972a48218af1be0a07fc69a864",
     "Markets_v1_1": "0xec70ce17aa4b0da6898ced47621655c4c31b1136",
-    "AgentIdentity": "0xd53922ed7f6fac01d4abb52288b45e26683cf92d"
+    "AgentIdentity": "0xd53922ed7f6fac01d4abb52288b45e26683cf92d",
+    "RegistraiPoints": "0xF5897349819B16f4431A61Ad61293C1b31bD3381",
+    "Registry_v2": "0x0529730A961f50997de63ac0aD07f1aEa2dEC0C0",
+    "Attestation_v2": "0x060C61Cc315d9e8Baf2a58719f80C01163Bd6F48",
+    "Dispute_v2": "0x1F78e08f5DdF5dD3fDD0e27097FE5398999Aa738",
+    "Markets_v2": "0xb653c065E4805F4b2558af7AE01e9622D61Ff394",
+    "MarketMakerVault_v2": "0x13c7069F7f1526b160E885e201087caD6c67Ed47"
   },
   "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
   "feeds": [
