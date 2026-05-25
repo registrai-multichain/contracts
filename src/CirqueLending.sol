@@ -449,13 +449,8 @@ contract CirqueLending is ReentrancyGuard {
         return (shareAmount * _totalPoolValueUSDC()) / totalShares;
     }
 
-    // ─────────────────────────── Admin ────────────────────────────
-
-    /// @notice Owner-only escape hatch for the alpha period. Lets the
-    /// deployer pull USDC out without going through supply/withdraw
-    /// share accounting — only intended for migrations and bug recovery.
-    /// Power expires post-audit.
-    function adminWithdrawUSDC(uint256 amount) external onlyOwner {
-        USDC.safeTransfer(OWNER, amount);
-    }
+    // No admin escape hatch. The treasury supplies USDC via supplyUSDC()
+    // like any other LP and withdraws via withdrawUSDC() like any other LP.
+    // Removing the privileged adminWithdrawUSDC eliminates the centralized
+    // pool-drain risk identified during internal audit.
 }

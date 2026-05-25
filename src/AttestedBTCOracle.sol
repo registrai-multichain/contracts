@@ -30,7 +30,13 @@ contract AttestedBTCOracle is IBTCPriceOracle {
     /// @notice How deep to walk history when looking for a valid attestation.
     /// Bounds gas in pathological cases (long history of disputes). In
     /// normal operation the latest attestation is the answer in one step.
-    uint256 public constant MAX_LOOKBACK = 16;
+    /// @notice Lookback depth when searching for a valid (non-pending,
+    /// non-invalid) attestation. Bumped from 16 → 100 to provide more
+    /// headroom against pending-dispute DoS scenarios. Each dispute requires
+    /// a counter-bond, so 100 disputes locking up bonds is economically
+    /// expensive for an attacker; but the lookback ceiling keeps gas bounded
+    /// in the pathological case.
+    uint256 public constant MAX_LOOKBACK = 100;
 
     error NoValidAttestation();
     error NegativePrice();

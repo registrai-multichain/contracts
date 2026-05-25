@@ -32,7 +32,10 @@
     "Attestation_v2": "0x060C61Cc315d9e8Baf2a58719f80C01163Bd6F48",
     "Dispute_v2": "0x1F78e08f5DdF5dD3fDD0e27097FE5398999Aa738",
     "Markets_v2": "0xb653c065E4805F4b2558af7AE01e9622D61Ff394",
-    "MarketMakerVault_v2": "0x13c7069F7f1526b160E885e201087caD6c67Ed47"
+    "MarketMakerVault_v2": "0x13c7069F7f1526b160E885e201087caD6c67Ed47",
+    "CirqueLending": "0x1045edf68502091ef751ade2f1dc0d12cdc059dc",
+    "AttestedBTCOracle": "0x83f3e3d6e9cc18579de577d92df1e23cc27057a1",
+    "cirBTC": "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF"
   },
   "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
   "feeds": [
