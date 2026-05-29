@@ -68,14 +68,18 @@ contract DeployCirqueLending is Script {
             btcAgent
         );
 
-        // 2. Lending contract. Interest accrues to USDC suppliers via
-        //    share appreciation; no treasury wallet needed in v0.5 alpha.
+        // 2. Lending contract. Interest accrues to USDC suppliers via share
+        //    appreciation. The treasury address receives forfeited leveraged
+        //    positions on liquidation (swept via sweepToTreasury) — it has no
+        //    privilege over supplier funds.
+        address treasury = vm.envOr("TREASURY", msg.sender);
         lending = new CirqueLending(
             IERC20(cirbtc),
             IERC20(usdc),
             Markets(payable(markets)),
             IBTCPriceOracle(address(oracle)),
-            msg.sender // owner — admin escape hatch only
+            msg.sender, // owner
+            treasury
         );
 
         vm.stopBroadcast();

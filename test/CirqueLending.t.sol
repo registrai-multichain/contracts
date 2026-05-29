@@ -65,7 +65,8 @@ contract CirqueLendingTest is Test {
             IERC20(address(usdc)),
             MARKETS,
             IBTCPriceOracle(address(oracle)),
-            owner
+            owner,
+            address(0xBEEF) // treasury (unused by these non-leveraged tests)
         );
 
         // Mint balances.
@@ -166,7 +167,7 @@ contract CirqueLendingTest is Test {
         uint256 health = lending.borrow(1e8, 300e6);
         vm.stopPrank();
 
-        (uint256 col, uint256 prin, , bool active) = lending.loans(alice);
+        (uint256 col, uint256 prin, , bool active, , ,) = lending.loans(alice);
         assertEq(col, 1e8);
         assertEq(prin, 300e6);
         assertTrue(active);
@@ -254,7 +255,7 @@ contract CirqueLendingTest is Test {
         lending.repay();
         vm.stopPrank();
 
-        ( , , , bool active) = lending.loans(alice);
+        ( , , , bool active, , ,) = lending.loans(alice);
         assertFalse(active);
         assertEq(cirbtc.balanceOf(alice), 5e8);
         assertEq(lending.totalBorrowedPrincipal(), 0);
@@ -327,7 +328,7 @@ contract CirqueLendingTest is Test {
         assertEq(liqGot + aliceRefund, 1e8); // collateral fully accounted
 
         // Loan cleared.
-        ( , , , bool active) = lending.loans(alice);
+        ( , , , bool active, , ,) = lending.loans(alice);
         assertFalse(active);
     }
 

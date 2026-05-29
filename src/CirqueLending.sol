@@ -95,9 +95,27 @@ contract CirqueLending is ReentrancyGuard {
         uint256 principal;      // USDC borrowed (6 decimals)
         uint256 borrowedAt;     // timestamp when interest accrual started
         bool active;
+        // Leveraged position (v0.5 beta). Zero/false for a plain borrow.
+        bytes32 marketId;       // 0 = plain loan; set = leveraged bet
+        bool betYes;            // true = YES outcome, false = NO outcome
+        uint256 betShares;      // YES/NO shares this contract holds for the user
     }
     /// @notice At most one active loan per user in v0.5 alpha.
     mapping(address => Loan) public loans;
+
+    /// @notice Where forfeited leveraged positions are routed on liquidation.
+    /// Shares can't be transferred (Markets balances are non-transferable
+    /// internal ledgers), so on liquidation we TAG the shares as treasury-owned
+    /// here; sweepToTreasury() later sells/redeems them and sends USDC to TREASURY.
+    address public immutable TREASURY;
+    mapping(bytes32 => uint256) public treasuryYesShares; // marketId => shares
+    mapping(bytes32 => uint256) public treasuryNoShares;
+
+    /// @notice True once this contract has redeemed its full winning-share
+    /// balance for a resolved market. Winning shares redeem at exactly 1 USDC
+    /// each, so after the single all-or-nothing redeem, each claimant (loan or
+    /// treasury) draws USDC equal to their share count from the escrowed pot.
+    mapping(bytes32 => bool) public marketRedeemed;
 
     /// @notice Per-supplier share balance. Receipts are virtual (not ERC-20).
     mapping(address => uint256) public shares;
@@ -135,6 +153,28 @@ contract CirqueLending is ReentrancyGuard {
         uint256 collateralSeized,
         uint256 collateralRefunded
     );
+    event LeveragedBet(
+        address indexed user,
+        bytes32 indexed marketId,
+        bool betYes,
+        uint256 collateral,
+        uint256 principal,
+        uint256 sharesOut
+    );
+    event PositionClosed(
+        address indexed user,
+        bytes32 indexed marketId,
+        uint256 proceeds,
+        uint256 owed,
+        uint256 toUser
+    );
+    event PositionForfeitedToTreasury(
+        address indexed user,
+        bytes32 indexed marketId,
+        bool betYes,
+        uint256 shares
+    );
+    event TreasurySwept(bytes32 indexed marketId, bool betYes, uint256 shares, uint256 usdcToTreasury);
 
     // ─────────────────────── Errors ───────────────────────
 
@@ -149,6 +189,11 @@ contract CirqueLending is ReentrancyGuard {
     error NotLiquidatable();
     error OracleStale();
     error NotOwner();
+    error NoLeveragedPosition();
+    error HasLeveragedPosition();
+    error MarketNotResolved();
+    error MarketStillTrading();
+    error NothingToSweep();
 
     modifier onlyOwner() {
         if (msg.sender != OWNER) revert NotOwner();
@@ -160,13 +205,15 @@ contract CirqueLending is ReentrancyGuard {
         IERC20 usdc,
         Markets markets,
         IBTCPriceOracle oracle,
-        address owner
+        address owner,
+        address treasury
     ) {
         CIRBTC = cirbtc;
         USDC = usdc;
         MARKETS = markets;
         ORACLE = oracle;
         OWNER = owner;
+        TREASURY = treasury;
         lastAccrualAt = block.timestamp;
     }
 
@@ -255,7 +302,10 @@ contract CirqueLending is ReentrancyGuard {
             collateral: collateralAmount,
             principal: usdcAmount,
             borrowedAt: block.timestamp,
-            active: true
+            active: true,
+            marketId: bytes32(0),
+            betYes: false,
+            betShares: 0
         });
         totalBorrowedPrincipal += usdcAmount;
 
@@ -272,6 +322,10 @@ contract CirqueLending is ReentrancyGuard {
     function repay() external nonReentrant {
         Loan memory loan = loans[msg.sender];
         if (!loan.active) revert NoActiveLoan();
+        // A leveraged loan's principal is sitting in a market position, not
+        // the borrower's wallet — it must be unwound via closePosition (while
+        // trading) or redeemAtExpiry (once resolved), not plain repay.
+        if (loan.marketId != bytes32(0)) revert HasLeveragedPosition();
 
         _rollAccrual();
 
@@ -325,6 +379,20 @@ contract CirqueLending is ReentrancyGuard {
             refund = loan.collateral - seize;
         }
 
+        // If this is a leveraged loan, the held market position is forfeited
+        // to the treasury (4b). Shares stay in this contract's Markets balance;
+        // we just tag them as treasury-owned. sweepToTreasury() disposes later.
+        // This closes the moral-hazard hole where a bettor could let cirBTC be
+        // liquidated yet keep a winning bet.
+        if (loan.marketId != bytes32(0) && loan.betShares > 0) {
+            if (loan.betYes) {
+                treasuryYesShares[loan.marketId] += loan.betShares;
+            } else {
+                treasuryNoShares[loan.marketId] += loan.betShares;
+            }
+            emit PositionForfeitedToTreasury(borrower, loan.marketId, loan.betYes, loan.betShares);
+        }
+
         delete loans[borrower];
         totalBorrowedPrincipal -= loan.principal;
         // Same as repay(): _rollAccrual added `interest` as placeholder;
@@ -343,6 +411,131 @@ contract CirqueLending is ReentrancyGuard {
         }
 
         emit Liquidated(borrower, msg.sender, owed, seize, refund);
+    }
+
+    // ──────────────────── Leveraged bets (v0.5 beta) ────────────────────
+
+    /// @notice Lock cirBTC, borrow USDC, and buy YES/NO shares on a Registrai
+    /// market — all in one transaction. The borrowed USDC never touches the
+    /// borrower's wallet; it goes straight into the market buy. Shares are held
+    /// by this contract on the borrower's behalf and unwound via closePosition
+    /// (while trading) or redeemAtExpiry (once resolved).
+    function leverageAndBet(
+        uint256 collateralAmount,
+        uint256 usdcToBorrow,
+        bytes32 marketId,
+        bool betYes,
+        uint256 minSharesOut
+    ) external nonReentrant returns (uint256 openingHealthBps, uint256 sharesOut) {
+        if (collateralAmount == 0 || usdcToBorrow == 0) revert ZeroAmount();
+        if (collateralAmount > MAX_COLLATERAL_PER_USER) revert CollateralCapExceeded();
+        if (loans[msg.sender].active) revert ActiveLoanExists();
+        if (USDC.balanceOf(address(this)) < usdcToBorrow) revert InsufficientUSDCLiquidity();
+
+        _rollAccrual();
+
+        CIRBTC.safeTransferFrom(msg.sender, address(this), collateralAmount);
+
+        loans[msg.sender] = Loan({
+            collateral: collateralAmount,
+            principal: usdcToBorrow,
+            borrowedAt: block.timestamp,
+            active: true,
+            marketId: marketId,
+            betYes: betYes,
+            betShares: 0
+        });
+        totalBorrowedPrincipal += usdcToBorrow;
+
+        openingHealthBps = _healthBps(loans[msg.sender]);
+        if (openingHealthBps > MAX_LTV_BPS) revert LTVTooHigh();
+
+        // Buy shares with the borrowed USDC. Markets pulls USDC from this
+        // contract (not the borrower) and credits shares to this contract.
+        USDC.forceApprove(address(MARKETS), usdcToBorrow);
+        Markets.Outcome outcome = betYes ? Markets.Outcome.Yes : Markets.Outcome.No;
+        sharesOut = MARKETS.buy(marketId, outcome, usdcToBorrow, minSharesOut);
+
+        loans[msg.sender].betShares = sharesOut;
+
+        emit LeveragedBet(msg.sender, marketId, betYes, collateralAmount, usdcToBorrow, sharesOut);
+    }
+
+    /// @notice Close a leveraged position while its market is still trading:
+    /// sell the shares back to the AMM and settle the loan from the proceeds.
+    /// `minProceeds` guards against AMM slippage.
+    function closePosition(uint256 minProceeds) external nonReentrant {
+        Loan memory loan = loans[msg.sender];
+        if (!loan.active) revert NoActiveLoan();
+        if (loan.marketId == bytes32(0)) revert NoLeveragedPosition();
+
+        _rollAccrual();
+
+        Markets.Outcome outcome = loan.betYes ? Markets.Outcome.Yes : Markets.Outcome.No;
+        uint256 proceeds = MARKETS.sell(loan.marketId, outcome, loan.betShares, minProceeds);
+
+        _settle(msg.sender, loan, proceeds);
+    }
+
+    /// @notice Settle a leveraged position after its market has resolved. If
+    /// the bet won, redeem the winning shares (1 USDC each) and settle the loan
+    /// from the payout. If it lost, the shares are worthless and the borrower
+    /// covers the full debt from their wallet to reclaim their cirBTC.
+    function redeemAtExpiry() external nonReentrant {
+        Loan memory loan = loans[msg.sender];
+        if (!loan.active) revert NoActiveLoan();
+        if (loan.marketId == bytes32(0)) revert NoLeveragedPosition();
+
+        Markets.Market memory m = MARKETS.getMarket(loan.marketId);
+        if (m.phase != Markets.Phase.Resolved) revert MarketNotResolved();
+
+        _rollAccrual();
+
+        uint256 proceeds = 0;
+        bool won = (m.yesWon == loan.betYes);
+        if (won && loan.betShares > 0) {
+            _ensureRedeemed(loan.marketId);
+            // Winning shares are worth exactly 1 USDC each.
+            proceeds = loan.betShares;
+        }
+
+        _settle(msg.sender, loan, proceeds);
+    }
+
+    /// @notice Dispose of a leveraged position that was forfeited to the
+    /// treasury on liquidation. Permissionless — proceeds always route to the
+    /// fixed TREASURY address, so no privilege is needed to call it. Sells if
+    /// the market is still trading; redeems if it has resolved.
+    function sweepToTreasury(bytes32 marketId, bool betYes) external nonReentrant {
+        uint256 positionShares = betYes ? treasuryYesShares[marketId] : treasuryNoShares[marketId];
+        if (positionShares == 0) revert NothingToSweep();
+
+        Markets.Market memory m = MARKETS.getMarket(marketId);
+        Markets.Outcome outcome = betYes ? Markets.Outcome.Yes : Markets.Outcome.No;
+
+        // Clear the ledger first (reentrancy-safe: state before external calls).
+        if (betYes) {
+            treasuryYesShares[marketId] = 0;
+        } else {
+            treasuryNoShares[marketId] = 0;
+        }
+
+        uint256 usdcToTreasury = 0;
+        if (m.phase == Markets.Phase.Trading) {
+            usdcToTreasury = MARKETS.sell(marketId, outcome, positionShares, 0);
+            USDC.safeTransfer(TREASURY, usdcToTreasury);
+        } else {
+            // Resolved.
+            bool won = (m.yesWon == betYes);
+            if (won) {
+                _ensureRedeemed(marketId);
+                usdcToTreasury = positionShares; // 1 USDC per winning share
+                USDC.safeTransfer(TREASURY, usdcToTreasury);
+            }
+            // If lost, shares are worthless — nothing to transfer.
+        }
+
+        emit TreasurySwept(marketId, betYes, positionShares, usdcToTreasury);
     }
 
     // ───────────────────────── View helpers ───────────────────────
@@ -379,6 +572,49 @@ contract CirqueLending is ReentrancyGuard {
     }
 
     // ─────────────────────────── Internals ────────────────────────
+
+    /// @dev Settle a leveraged loan from `proceeds` USDC (already held by this
+    /// contract from a sell or redeem). The pool recovers principal + interest;
+    /// any excess goes to the borrower, any shortfall is pulled from them. The
+    /// cirBTC collateral is always returned. Mirrors repay()'s pool-value
+    /// invariant: idle += owed, totalBorrowedPrincipal -= principal,
+    /// accruedInterest -= interest → net pool-value change of zero.
+    function _settle(address borrower, Loan memory loan, uint256 proceeds) internal {
+        uint256 interest = _interestOwed(loan);
+        uint256 owed = loan.principal + interest;
+
+        delete loans[borrower];
+        totalBorrowedPrincipal -= loan.principal;
+        if (interest > accruedInterestUSDC) {
+            accruedInterestUSDC = 0;
+        } else {
+            accruedInterestUSDC -= interest;
+        }
+
+        uint256 toUser;
+        if (proceeds >= owed) {
+            // Winning/breakeven bet: pool keeps `owed`, borrower gets the rest.
+            toUser = proceeds - owed;
+            if (toUser > 0) USDC.safeTransfer(borrower, toUser);
+        } else {
+            // Losing bet: borrower covers the shortfall from their wallet.
+            USDC.safeTransferFrom(borrower, address(this), owed - proceeds);
+        }
+
+        CIRBTC.safeTransfer(borrower, loan.collateral);
+
+        emit PositionClosed(borrower, loan.marketId, proceeds, owed, toUser);
+    }
+
+    /// @dev Redeem this contract's entire winning-share balance for a resolved
+    /// market into USDC, exactly once. Winning shares pay 1 USDC each, so after
+    /// the single all-or-nothing Markets.redeem, each claimant draws USDC equal
+    /// to their tracked share count.
+    function _ensureRedeemed(bytes32 marketId) internal {
+        if (marketRedeemed[marketId]) return;
+        marketRedeemed[marketId] = true;
+        MARKETS.redeem(marketId);
+    }
 
     /// @dev Roll accrued borrower interest forward into the accruedInterestUSDC
     /// counter. Called before every state-changing op so share-price reflects
