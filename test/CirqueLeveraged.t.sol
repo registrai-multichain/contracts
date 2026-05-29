@@ -284,4 +284,109 @@ contract CirqueLeveragedTest is Test {
         vm.expectRevert(CirqueLending.NothingToSweep.selector);
         lending.sweepToTreasury(mid, true);
     }
+
+    function test_sweep_whileTrading_reverts() public {
+        // Forfeited positions can only be swept after resolution (no thin-AMM
+        // forced sell). Set up a forfeit, then try to sweep while still trading.
+        bytes32 mid = _market(17_000, block.timestamp + 30 days);
+        vm.startPrank(alice);
+        cirbtc.approve(address(lending), 5e6);
+        lending.leverageAndBet(5e6, 900e6, mid, true, 0);
+        vm.stopPrank();
+        oracle.setPrice(18_000e18);
+        vm.startPrank(liquidator);
+        usdc.approve(address(lending), 30_000e6);
+        lending.liquidate(alice);
+        vm.stopPrank();
+
+        vm.expectRevert(CirqueLending.MarketNotResolved.selector);
+        lending.sweepToTreasury(mid, true); // market still trading
+    }
+
+    // ─── Regression: multi-claimant redeem must not over-credit suppliers
+    //     or strand a second winner (the redeemPot escrow fix). ───
+    function test_multiClaimant_redeem_noOverdrawNoStrand() public {
+        address bob2 = makeAddr("bob2");
+        cirbtc.mint(bob2, 5e8);
+        usdc.mint(bob2, 100_000e6);
+
+        uint256 expiry = block.timestamp + 2 days;
+        bytes32 mid = _market(17_000, expiry);
+
+        // Two bettors, same market, both YES.
+        vm.startPrank(alice);
+        cirbtc.approve(address(lending), 1e8);
+        ( , uint256 sA) = lending.leverageAndBet(1e8, 200e6, mid, true, 0);
+        vm.stopPrank();
+        vm.startPrank(bob2);
+        cirbtc.approve(address(lending), 1e8);
+        ( , uint256 sB) = lending.leverageAndBet(1e8, 200e6, mid, true, 0);
+        vm.stopPrank();
+
+        _resolve(mid, 17_500, expiry); // YES wins; both win
+
+        // Claimant 1 (alice) redeems — this pulls BOTH winners' USDC into the
+        // contract. The pot must keep bob2's slice escrowed (out of pool value).
+        vm.prank(alice);
+        lending.redeemAtExpiry();
+        assertEq(lending.redeemPot(mid), sB);
+        assertEq(lending.totalRedeemPot(), sB);
+
+        // A supplier withdraws in the window. With the fix, pool value excludes
+        // bob2's escrowed winning USDC, so lola can't overdraw it.
+        uint256 lolaShares = lending.shares(lola);
+        vm.prank(lola);
+        lending.withdrawUSDC(lolaShares / 2);
+
+        // Claimant 2 (bob2) must still be fully paid — not stranded.
+        uint256 bob2Before = usdc.balanceOf(bob2);
+        uint256 owedB = 200e6 + lending.interestOwed(bob2); // principal + accrued
+        vm.prank(bob2);
+        lending.redeemAtExpiry();
+        // bob2's winning shares (sB) − owed = profit, paid in full from the
+        // escrow that alice's redeem pulled in (proves no stranding).
+        assertGt(usdc.balanceOf(bob2), bob2Before);
+        assertEq(usdc.balanceOf(bob2) - bob2Before, sB - owedB);
+
+        // Escrow fully drained.
+        assertEq(lending.redeemPot(mid), 0);
+        assertEq(lending.totalRedeemPot(), 0);
+    }
+
+    // ─── Regression: borrower not trapped if a market expires but never
+    //     resolves (agent inactive). Escape hatch settles + forfeits. ───
+    function test_redeemAtExpiry_deadZone_escapeHatch() public {
+        uint256 expiry = block.timestamp + 2 days;
+        bytes32 mid = _market(17_000, expiry);
+        vm.startPrank(alice);
+        cirbtc.approve(address(lending), 1e8);
+        ( , uint256 sharesOut) = lending.leverageAndBet(1e8, 200e6, mid, true, 0);
+        vm.stopPrank();
+
+        // Warp past expiry WITHOUT ever attesting/resolving → stuck dead zone.
+        vm.warp(expiry + 1);
+
+        uint256 cirBefore = cirbtc.balanceOf(alice);
+        vm.startPrank(alice);
+        usdc.approve(address(lending), 500e6); // cover owed from wallet
+        lending.redeemAtExpiry();
+        vm.stopPrank();
+
+        // cirBTC reclaimed, loan cleared, position forfeited to treasury.
+        assertEq(cirbtc.balanceOf(alice) - cirBefore, 1e8);
+        ( , , , bool active, , ,) = lending.loans(alice);
+        assertFalse(active);
+        assertEq(lending.treasuryYesShares(mid), sharesOut);
+    }
+
+    function test_redeemAtExpiry_beforeExpiry_reverts() public {
+        bytes32 mid = _market(17_000, block.timestamp + 30 days);
+        vm.startPrank(alice);
+        cirbtc.approve(address(lending), 1e8);
+        lending.leverageAndBet(1e8, 200e6, mid, true, 0);
+        // Market live, not resolved → must use closePosition, not redeem.
+        vm.expectRevert(CirqueLending.MarketStillTrading.selector);
+        lending.redeemAtExpiry();
+        vm.stopPrank();
+    }
 }

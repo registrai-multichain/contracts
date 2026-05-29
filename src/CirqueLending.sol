@@ -112,10 +112,18 @@ contract CirqueLending is ReentrancyGuard {
     mapping(bytes32 => uint256) public treasuryNoShares;
 
     /// @notice True once this contract has redeemed its full winning-share
-    /// balance for a resolved market. Winning shares redeem at exactly 1 USDC
-    /// each, so after the single all-or-nothing redeem, each claimant (loan or
-    /// treasury) draws USDC equal to their share count from the escrowed pot.
+    /// balance for a resolved market. Markets.redeem is all-or-nothing on the
+    /// contract's whole balance, so the first claimant redeems everything into
+    /// the per-market escrow `redeemPot`; each claimant then draws its own
+    /// USDC from the pot (winning shares pay exactly 1 USDC each).
     mapping(bytes32 => bool) public marketRedeemed;
+    /// @notice Per-market USDC escrowed from a redeem, awaiting claim by the
+    /// winning loans + treasury-forfeited positions on that market.
+    mapping(bytes32 => uint256) public redeemPot;
+    /// @notice Sum of all redeemPot balances. This USDC sits in the contract's
+    /// token balance but belongs to bettors/treasury, NOT suppliers — so it is
+    /// excluded from pool value to keep supplier share-price honest.
+    uint256 public totalRedeemPot;
 
     /// @notice Per-supplier share balance. Receipts are virtual (not ERC-20).
     mapping(address => uint256) public shares;
@@ -380,18 +388,9 @@ contract CirqueLending is ReentrancyGuard {
         }
 
         // If this is a leveraged loan, the held market position is forfeited
-        // to the treasury (4b). Shares stay in this contract's Markets balance;
-        // we just tag them as treasury-owned. sweepToTreasury() disposes later.
-        // This closes the moral-hazard hole where a bettor could let cirBTC be
-        // liquidated yet keep a winning bet.
-        if (loan.marketId != bytes32(0) && loan.betShares > 0) {
-            if (loan.betYes) {
-                treasuryYesShares[loan.marketId] += loan.betShares;
-            } else {
-                treasuryNoShares[loan.marketId] += loan.betShares;
-            }
-            emit PositionForfeitedToTreasury(borrower, loan.marketId, loan.betYes, loan.betShares);
-        }
+        // to the treasury (4b) — closes the moral-hazard hole where a bettor
+        // could let cirBTC be liquidated yet keep a winning bet.
+        _forfeitToTreasury(borrower, loan);
 
         delete loans[borrower];
         totalBorrowedPrincipal -= loan.principal;
@@ -455,6 +454,9 @@ contract CirqueLending is ReentrancyGuard {
         USDC.forceApprove(address(MARKETS), usdcToBorrow);
         Markets.Outcome outcome = betYes ? Markets.Outcome.Yes : Markets.Outcome.No;
         sharesOut = MARKETS.buy(marketId, outcome, usdcToBorrow, minSharesOut);
+        // Defense-in-depth: clear any residual allowance (buy consumes exactly
+        // usdcToBorrow, so this is normally already zero).
+        USDC.forceApprove(address(MARKETS), 0);
 
         loans[msg.sender].betShares = sharesOut;
 
@@ -487,7 +489,21 @@ contract CirqueLending is ReentrancyGuard {
         if (loan.marketId == bytes32(0)) revert NoLeveragedPosition();
 
         Markets.Market memory m = MARKETS.getMarket(loan.marketId);
-        if (m.phase != Markets.Phase.Resolved) revert MarketNotResolved();
+
+        if (m.phase != Markets.Phase.Resolved) {
+            // Escape hatch: if the market is past expiry but stuck unresolved
+            // (e.g. the agent went inactive and never attested), the shares are
+            // untradeable and unredeemable — but the borrower must not be
+            // permanently trapped. Let them settle the debt from their wallet,
+            // forfeit the now-dead position to the treasury (which can sweep it
+            // if the market ever resolves), and reclaim their cirBTC. While the
+            // market is still live (before expiry), closePosition is the path.
+            if (block.timestamp < m.expiry) revert MarketStillTrading();
+            _rollAccrual();
+            _forfeitToTreasury(msg.sender, loan);
+            _settle(msg.sender, loan, 0);
+            return;
+        }
 
         _rollAccrual();
 
@@ -495,25 +511,33 @@ contract CirqueLending is ReentrancyGuard {
         bool won = (m.yesWon == loan.betYes);
         if (won && loan.betShares > 0) {
             _ensureRedeemed(loan.marketId);
-            // Winning shares are worth exactly 1 USDC each.
+            // Winning shares pay exactly 1 USDC each; draw this loan's slice
+            // out of the per-market redeem escrow.
             proceeds = loan.betShares;
+            _drawFromPot(loan.marketId, proceeds);
         }
 
         _settle(msg.sender, loan, proceeds);
     }
 
-    /// @notice Dispose of a leveraged position that was forfeited to the
-    /// treasury on liquidation. Permissionless — proceeds always route to the
-    /// fixed TREASURY address, so no privilege is needed to call it. Sells if
-    /// the market is still trading; redeems if it has resolved.
+    /// @notice Dispose of a leveraged position forfeited to the treasury on
+    /// liquidation. Permissionless — proceeds always route to the fixed
+    /// TREASURY address, so calling it confers no privilege.
+    ///
+    /// Only callable once the market has RESOLVED. We deliberately do NOT sell
+    /// forfeited shares while the market is still trading: a thin-AMM forced
+    /// sell with no slippage bound would be MEV-sandwichable at the treasury's
+    /// expense, and redeeming a winning share at its full 1 USDC after
+    /// resolution is strictly better value than an early sell. Forfeited
+    /// positions simply wait for resolution.
     function sweepToTreasury(bytes32 marketId, bool betYes) external nonReentrant {
         uint256 positionShares = betYes ? treasuryYesShares[marketId] : treasuryNoShares[marketId];
         if (positionShares == 0) revert NothingToSweep();
 
         Markets.Market memory m = MARKETS.getMarket(marketId);
-        Markets.Outcome outcome = betYes ? Markets.Outcome.Yes : Markets.Outcome.No;
+        if (m.phase != Markets.Phase.Resolved) revert MarketNotResolved();
 
-        // Clear the ledger first (reentrancy-safe: state before external calls).
+        // Clear the ledger first (state before external calls).
         if (betYes) {
             treasuryYesShares[marketId] = 0;
         } else {
@@ -521,19 +545,14 @@ contract CirqueLending is ReentrancyGuard {
         }
 
         uint256 usdcToTreasury = 0;
-        if (m.phase == Markets.Phase.Trading) {
-            usdcToTreasury = MARKETS.sell(marketId, outcome, positionShares, 0);
+        bool won = (m.yesWon == betYes);
+        if (won) {
+            _ensureRedeemed(marketId);
+            usdcToTreasury = positionShares; // 1 USDC per winning share
+            _drawFromPot(marketId, usdcToTreasury);
             USDC.safeTransfer(TREASURY, usdcToTreasury);
-        } else {
-            // Resolved.
-            bool won = (m.yesWon == betYes);
-            if (won) {
-                _ensureRedeemed(marketId);
-                usdcToTreasury = positionShares; // 1 USDC per winning share
-                USDC.safeTransfer(TREASURY, usdcToTreasury);
-            }
-            // If lost, shares are worthless — nothing to transfer.
         }
+        // If lost, shares are worthless — nothing to transfer.
 
         emit TreasurySwept(marketId, betYes, positionShares, usdcToTreasury);
     }
@@ -606,6 +625,20 @@ contract CirqueLending is ReentrancyGuard {
         emit PositionClosed(borrower, loan.marketId, proceeds, owed, toUser);
     }
 
+    /// @dev Tag a leveraged loan's market shares as treasury-owned. Shares
+    /// can't be transferred (Markets balances are non-transferable), so they
+    /// stay in this contract's Markets balance and sweepToTreasury() disposes
+    /// of them after resolution. No-op for a plain loan.
+    function _forfeitToTreasury(address borrower, Loan memory loan) internal {
+        if (loan.marketId == bytes32(0) || loan.betShares == 0) return;
+        if (loan.betYes) {
+            treasuryYesShares[loan.marketId] += loan.betShares;
+        } else {
+            treasuryNoShares[loan.marketId] += loan.betShares;
+        }
+        emit PositionForfeitedToTreasury(borrower, loan.marketId, loan.betYes, loan.betShares);
+    }
+
     /// @dev Redeem this contract's entire winning-share balance for a resolved
     /// market into USDC, exactly once. Winning shares pay 1 USDC each, so after
     /// the single all-or-nothing Markets.redeem, each claimant draws USDC equal
@@ -613,7 +646,17 @@ contract CirqueLending is ReentrancyGuard {
     function _ensureRedeemed(bytes32 marketId) internal {
         if (marketRedeemed[marketId]) return;
         marketRedeemed[marketId] = true;
-        MARKETS.redeem(marketId);
+        uint256 got = MARKETS.redeem(marketId);
+        redeemPot[marketId] = got;
+        totalRedeemPot += got;
+    }
+
+    /// @dev Release `amount` of a market's redeemed USDC from escrow into the
+    /// general flow (so a claimant — a loan's settle or a treasury sweep — can
+    /// take it). Underflows-revert if a claim exceeds the pot, a safe failure.
+    function _drawFromPot(bytes32 marketId, uint256 amount) internal {
+        redeemPot[marketId] -= amount;
+        totalRedeemPot -= amount;
     }
 
     /// @dev Roll accrued borrower interest forward into the accruedInterestUSDC
@@ -660,9 +703,13 @@ contract CirqueLending is ReentrancyGuard {
     }
 
     /// @dev Live USDC-equivalent value of the pool: idle balance + outstanding
-    /// principal + accrued (unpaid) interest. Updated on every roll.
+    /// principal + accrued (unpaid) interest, MINUS escrowed redeem proceeds
+    /// (which sit in the token balance but belong to bettors/treasury, not
+    /// suppliers). A leveraged loan's principal is still counted via
+    /// totalBorrowedPrincipal until the loan settles, so excluding the full
+    /// redeemPot is correct — the pool's claim is the principal, not the bet.
     function _totalPoolValueUSDC() internal view returns (uint256) {
-        return USDC.balanceOf(address(this)) + totalBorrowedPrincipal + accruedInterestUSDC;
+        return USDC.balanceOf(address(this)) + totalBorrowedPrincipal + accruedInterestUSDC - totalRedeemPot;
     }
 
     /// @dev Same as _totalPoolValueUSDC but with `withdrawAmount` already
