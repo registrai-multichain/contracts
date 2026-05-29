@@ -1,6 +1,6 @@
 {
   "chainId": 5042002,
-  "rpc": "https://rpc.testnet.arc-node.thecanteenapp.com",
+  "rpc": "https://rpc.testnet.arc.network",
   "explorer": "https://testnet.arcscan.app",
   "deployedAt": "2026-05-14",
   "deployer": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
