@@ -1,0 +1,246 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {Test} from "forge-std/Test.sol";
+import {Registry} from "../src/Registry.sol";
+import {Attestation} from "../src/Attestation.sol";
+import {Dispute} from "../src/Dispute.sol";
+import {MarketsV3} from "../src/MarketsV3.sol";
+import {Markets} from "../src/Markets.sol";
+import {CirqueBetLending} from "../src/CirqueBetLending.sol";
+import {MockUSDC} from "./MockUSDC.sol";
+
+contract CirqueBetLendingTest is Test {
+    MockUSDC usdc;
+    Registry registry;
+    Attestation attestation;
+    Dispute dispute;
+    MarketsV3 markets;
+    CirqueBetLending lending;
+
+    address creator = makeAddr("creator");
+    address agent = creator;
+    address resolver = makeAddr("resolver");
+    address mm = makeAddr("mm");
+    address alice = makeAddr("alice");   // borrower (holds a bet)
+    address lola = makeAddr("lola");     // USDC supplier
+    address liquidator = makeAddr("liquidator");
+
+    bytes32 constant METH = keccak256("m");
+    uint256 constant DW = 1 days;
+    uint256 constant MIN_BOND = 100e6;
+    bytes32 feedId;
+
+    function setUp() public {
+        vm.warp(1_700_000_000);
+        usdc = new MockUSDC();
+        registry = new Registry(usdc);
+        attestation = new Attestation(registry);
+        dispute = new Dispute(registry, attestation, usdc);
+        markets = new MarketsV3(attestation, registry, usdc, makeAddr("treasury"));
+        registry.wire(address(attestation), address(dispute));
+        attestation.wire(address(dispute));
+
+        lending = new CirqueBetLending(usdc, markets, address(this));
+
+        usdc.mint(agent, 10_000e6);
+        usdc.mint(mm, 1_000_000e6);
+        usdc.mint(alice, 100_000e6);
+        usdc.mint(lola, 1_000_000e6);
+        usdc.mint(liquidator, 100_000e6);
+
+        vm.prank(creator);
+        feedId = registry.createFeed("f", METH, MIN_BOND, DW, resolver);
+        vm.startPrank(agent);
+        usdc.approve(address(registry), MIN_BOND);
+        registry.registerAgent(feedId, METH, MIN_BOND);
+        vm.stopPrank();
+
+        // Supplier seeds 1,000 USDC.
+        vm.startPrank(lola);
+        usdc.approve(address(lending), 1_000e6);
+        lending.supplyUSDC(1_000e6);
+        vm.stopPrank();
+    }
+
+    function _market(uint256 expiry) internal returns (bytes32 mid) {
+        vm.startPrank(mm);
+        usdc.approve(address(markets), 1_000e6);
+        mid = markets.createMarket(feedId, agent, 17_000, Markets.Comparator.GreaterThan, expiry, 1_000e6);
+        vm.stopPrank();
+    }
+
+    // Alice buys a YES position and approves the lending contract as operator.
+    function _aliceHoldsBet(bytes32 mid, uint256 spend) internal returns (uint256 sh) {
+        vm.startPrank(alice);
+        usdc.approve(address(markets), spend);
+        sh = markets.buy(mid, Markets.Outcome.Yes, spend, 0);
+        markets.setShareOperator(address(lending), true);
+        vm.stopPrank();
+    }
+
+    // ── borrow against a held bet ──
+    function test_borrowAgainstBet_locksPositionLendsUSDC() public {
+        bytes32 mid = _market(block.timestamp + 30 days);
+        uint256 sh = _aliceHoldsBet(mid, 200e6);
+
+        uint256 markV = lending.maxBorrow(mid, true, sh) * 2; // mark = 2× maxBorrow (50% LTV)
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2; // borrow well under max
+        assertGt(markV, 0);
+
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        uint256 health = lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        // collateral now held by lending contract, not alice
+        assertEq(markets.yesBalance(mid, address(lending)), sh);
+        assertEq(markets.yesBalance(mid, alice), 0);
+        // USDC delivered
+        assertEq(usdc.balanceOf(alice) - aliceUsdcBefore, borrow);
+        // health < 50% (we borrowed half the max)
+        assertLt(health, lending.MAX_LTV_BPS());
+
+        (bytes32 lm,, uint256 ls, uint256 lp,, bool active) = lending.loans(alice);
+        assertEq(lm, mid); assertEq(ls, sh); assertEq(lp, borrow); assertTrue(active);
+    }
+
+    function test_borrow_aboveMaxLtv_reverts() public {
+        bytes32 mid = _market(block.timestamp + 30 days);
+        uint256 sh = _aliceHoldsBet(mid, 200e6);
+        uint256 tooMuch = lending.maxBorrow(mid, true, sh) + 10e6;
+        vm.prank(alice);
+        vm.expectRevert(CirqueBetLending.LTVTooHigh.selector);
+        lending.borrowAgainstBet(mid, true, sh, tooMuch);
+    }
+
+    function test_borrow_inForceCloseWindow_reverts() public {
+        bytes32 mid = _market(block.timestamp + 1 hours); // expiry < FORCE_CLOSE_WINDOW away
+        uint256 sh = _aliceHoldsBet(mid, 200e6);
+        vm.prank(alice);
+        vm.expectRevert(CirqueBetLending.MarketResolvedOrExpired.selector);
+        lending.borrowAgainstBet(mid, true, sh, 10e6);
+    }
+
+    // ── repay returns the position ──
+    function test_repay_returnsPosition() public {
+        bytes32 mid = _market(block.timestamp + 30 days);
+        uint256 sh = _aliceHoldsBet(mid, 200e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2;
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        vm.warp(block.timestamp + 30 days); // accrue interest
+        uint256 owed = borrow + lending.interestOwed(alice);
+        vm.startPrank(alice);
+        usdc.approve(address(lending), owed);
+        lending.repayBet();
+        vm.stopPrank();
+
+        assertEq(markets.yesBalance(mid, alice), sh); // got it back
+        (,,,,, bool active) = lending.loans(alice);
+        assertFalse(active);
+    }
+
+    // ── health-based liquidation when the mark drops ──
+    function test_liquidate_whenMarkDrops() public {
+        bytes32 mid = _market(block.timestamp + 30 days);
+        uint256 sh = _aliceHoldsBet(mid, 200e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh); // borrow at exactly 50% LTV
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        // Push YES price down: a big NO buy moves the mark against alice's YES.
+        vm.startPrank(mm);
+        usdc.approve(address(markets), 800e6);
+        markets.buy(mid, Markets.Outcome.No, 800e6, 0);
+        vm.stopPrank();
+
+        // Health should now breach the 60% threshold.
+        assertGt(lending.healthBps(alice), lending.LIQ_LTV_BPS());
+
+        uint256 owed = borrow + lending.interestOwed(alice);
+        vm.startPrank(liquidator);
+        usdc.approve(address(lending), owed + 1e6);
+        lending.liquidateBet(alice);
+        vm.stopPrank();
+
+        // Liquidator got the position; loan cleared.
+        assertEq(markets.yesBalance(mid, liquidator), sh);
+        (,,,,, bool active) = lending.loans(alice);
+        assertFalse(active);
+    }
+
+    function test_liquidate_healthyLoan_reverts() public {
+        bytes32 mid = _market(block.timestamp + 30 days);
+        uint256 sh = _aliceHoldsBet(mid, 200e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2; // safe
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        vm.startPrank(liquidator);
+        usdc.approve(address(lending), 1_000e6);
+        vm.expectRevert(CirqueBetLending.NotLiquidatable.selector);
+        lending.liquidateBet(alice);
+        vm.stopPrank();
+    }
+
+    // ── THE CLIFF GUARD: force-liquidatable in the expiry window regardless
+    //    of health, so no position survives into resolution ──
+    function test_forceLiquidate_inExpiryWindow_evenIfHealthy() public {
+        uint256 expiry = block.timestamp + 30 days;
+        bytes32 mid = _market(expiry);
+        uint256 sh = _aliceHoldsBet(mid, 200e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2; // very healthy
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        // Healthy right now — normal liquidation must fail.
+        vm.startPrank(liquidator);
+        usdc.approve(address(lending), 1_000e6);
+        vm.expectRevert(CirqueBetLending.NotLiquidatable.selector);
+        lending.liquidateBet(alice);
+        vm.stopPrank();
+
+        // Warp into the force-close window (< 2h before expiry). Now anyone
+        // can liquidate regardless of health — the cliff guard.
+        vm.warp(expiry - 1 hours);
+        vm.startPrank(liquidator);
+        usdc.approve(address(lending), 1_000e6);
+        lending.liquidateBet(alice);
+        vm.stopPrank();
+
+        assertEq(markets.yesBalance(mid, liquidator), sh);
+        (,,,,, bool active) = lending.loans(alice);
+        assertFalse(active);
+    }
+
+    // ── pool invariant: supplier yield after a repay ──
+    function test_supplierEarnsYield() public {
+        bytes32 mid = _market(block.timestamp + 60 days);
+        uint256 sh = _aliceHoldsBet(mid, 200e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2;
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        vm.warp(block.timestamp + 365 days);
+        uint256 owed = borrow + lending.interestOwed(alice);
+        vm.startPrank(alice);
+        usdc.approve(address(lending), owed);
+        lending.repayBet();
+        vm.stopPrank();
+
+        // Lola's claim grew by the interest (she's the only supplier).
+        assertGt(lending.balanceOfUSDC(lola), 1_000e6);
+    }
+
+    function test_doubleBorrow_reverts() public {
+        bytes32 mid = _market(block.timestamp + 30 days);
+        uint256 sh = _aliceHoldsBet(mid, 200e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 4;
+        vm.startPrank(alice);
+        lending.borrowAgainstBet(mid, true, sh / 2, borrow);
+        vm.expectRevert(CirqueBetLending.ActiveLoanExists.selector);
+        lending.borrowAgainstBet(mid, true, sh / 4, borrow);
+        vm.stopPrank();
+    }
+}
