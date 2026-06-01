@@ -97,7 +97,12 @@ contract CirqueBetFuzzTest is Test {
 
         // Attacker buys a YES position (the collateral).
         usdc.mint(attacker, posSpend + (manipBps * seedLiq) / 10_000 + 10e6);
-        uint256 attackerSpentTotal = posSpend; // track all USDC attacker puts in
+        // Snapshot the attacker's liquid USDC the instant before they act. The
+        // core invariant below is that this can only go DOWN: a manipulate →
+        // over-borrow → default round-trip must not let them walk away with more
+        // cash than they started with (they forfeit the pledged collateral on
+        // default, so any net USDC gain would be extracted supplier value).
+        uint256 attackerStartBal = usdc.balanceOf(attacker);
         vm.startPrank(attacker);
         usdc.approve(address(markets), type(uint256).max);
         uint256 yesShares = markets.buy(mid, Markets.Outcome.Yes, posSpend, 0);
@@ -107,7 +112,6 @@ contract CirqueBetFuzzTest is Test {
         uint256 manipSpend = (manipBps * seedLiq) / 10_000;
         uint256 noShares = 0;
         if (manipSpend > 0) {
-            attackerSpentTotal += manipSpend;
             noShares = markets.buy(mid, Markets.Outcome.No, manipSpend, 0);
         }
 
@@ -129,22 +133,37 @@ contract CirqueBetFuzzTest is Test {
         vm.stopPrank();
 
         if (borrowed) {
-            // Attacker defaults. A liquidator closes the position: pays owed,
-            // takes the collateral. Fund the liquidator and let them act.
+            // Attacker defaults. A RATIONAL liquidator only acts when the live
+            // collateral covers what they must pay (owed) — they will NOT pay
+            // owed for sub-owed collateral. This models the real incentive
+            // rather than an altruistic backstop that masks losses.
             (, , , uint256 principal, , ,) = lending.loans(attacker);
             uint256 owed = principal + lending.interestOwed(attacker);
-            usdc.mint(liquidator, owed + 1e6);
-            vm.startPrank(liquidator);
-            usdc.approve(address(lending), owed + 1e6);
-            // Liquidate (health may or may not breach; if not, this is the
-            // borrower's own risk, but the pool invariant must still hold via
-            // the eventual repay/liquidation path — we attempt it).
-            try lending.liquidateBet(attacker) {} catch {}
-            vm.stopPrank();
+            uint256 cv = lending.collateralValueUSDC(attacker);
+            if (cv >= owed) {
+                usdc.mint(liquidator, owed + 1e6);
+                vm.startPrank(liquidator);
+                usdc.approve(address(lending), owed + 1e6);
+                try lending.liquidateBet(attacker) {} catch {}
+                vm.stopPrank();
+            }
         }
 
-        // THE INVARIANT: the honest pool's USDC value never dropped. The
-        // attacker cannot have extracted supplier funds.
+        // PRIMARY INVARIANT: the manipulate→borrow→default round-trip is not
+        // profitable. The attacker forfeited the pledged collateral, so if they
+        // ended with MORE liquid USDC than they started with, they extracted
+        // supplier funds. (Holds even when no liquidator acts — it's about what
+        // the attacker could borrow vs. what they irreversibly gave up.)
+        assertLe(
+            usdc.balanceOf(attacker),
+            attackerStartBal,
+            "ATTACKER PROFITED: manipulation extracted supplier value"
+        );
+
+        // SECONDARY: with a rational liquidator, the pool's accounted value is
+        // not dragged below where it started by the attack itself (any residual
+        // is bounded, honest lending loss recognized via writeOffBadDebt — not
+        // tested here since this market never resolves).
         uint256 poolValueAfter = lending.totalPoolValueUSDC();
         assertGe(
             poolValueAfter,

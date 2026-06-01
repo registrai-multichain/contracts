@@ -20,15 +20,33 @@ import {Markets} from "./Markets.sol";
 ///   $0 at expiry — a discontinuity. You cannot margin-call a binary option:
 ///   by the time the oracle says "NO won", YES collateral is already worthless,
 ///   so a post-resolution liquidation can't protect the pool.
-///   Solution: positions MUST be closed or liquidated BEFORE the market
-///   expires. We mark collateral at the continuous AMM mid-price while trading,
-///   liquidate on health breach, and let ANYONE force-liquidate in the final
-///   window before expiry regardless of health. A loan can never survive into
-///   resolution, so the pool is never exposed to the cliff.
+///   Approach: mark collateral at the continuous depth-capped AMM mark while
+///   trading, liquidate on health breach, and let ANYONE force-liquidate in the
+///   final window before expiry regardless of health.
 ///
-/// ⚠️ STATUS: v0.7 RESEARCH — NOT YET DEPLOYED. The CRITICAL is mitigated +
-///   fuzz-validated and both HIGHs are now fixed; one MEDIUM cluster remains
-///   before this can hold real funds, and it still needs a re-review.
+///   HONEST LIMIT (do not overstate this): the 5% bonus makes force-close
+///   self-executing only for IN-THE-MONEY positions (live collateral value >
+///   owed×1.05). A position that has gone OUT-OF-THE-MONEY before expiry has no
+///   profitable liquidator — paying `owed` for sub-`owed` collateral is a loss —
+///   so it is NOT closed, it resolves, and the pool absorbs the shortfall. The
+///   cliff guard does not ELIMINATE that loss; it BOUNDS it and makes it
+///   HONEST: (1) origination LTV ≤ 40% and the depth cap (principal ≤ ~4% of
+///   the opposite reserve) keep the per-loan loss small and the per-user cap
+///   (1,000 USDC) caps it absolutely; (2) writeOffBadDebt realizes the loss
+///   immediately and socializes it pro-rata, so no late withdrawer escapes it.
+///   This is ordinary under-collateralized-lending risk on a volatile binary
+///   asset, bounded by design — not an eliminated risk.
+///
+/// ⚠️ STATUS: v0.9 RESEARCH — NOT YET DEPLOYED. CRITICAL mitigated +
+///   fuzz-validated; both HIGHs fixed; MEDIUM cluster addressed. A full
+///   re-review surfaced one economic-model HIGH (cliff loss on out-of-the-money
+///   loans is bounded, not eliminated — see "HONEST LIMIT" above) and two
+///   MEDIUMs (a keeper foot-gun and a share-inflation vector); all are now
+///   fixed and a verification pass on those fixes is clean (idleUSDC accounting,
+///   resolved-loser routing, bounded-loss invariants all confirmed). No
+///   fund-drain-at-rest. Per-user cap (1,000 USDC), 40% LTV, depth cap and a
+///   running keeper bound the residual risk. A professional audit is still
+///   warranted before this holds real funds; do not deploy until then.
 ///
 ///   1. [CRITICAL — MITIGATED] Spot AMM-mark manipulation. Collateral was
 ///      marked at priceOf (instantaneous AMM mid); on a thin CPMM a borrower
@@ -43,15 +61,17 @@ import {Markets} from "./Markets.sol";
 ///      runs — 0 pool drains. Manipulation actually LOWERS the borrow limit
 ///      (spiking the mark shrinks the opposite reserve the cap keys off), so
 ///      the attack is net-negative.
-///   2. [HIGH — FIXED] Force-close is permissionless but was UNINCENTIVISED — a
-///      loan could strand past expiry if no liquidator acted. FIX: the
-///      liquidator now receives shares worth (owed × 1.05) — the LIQ_BONUS_BPS
-///      is a real, share-denominated reward that makes force-close
-///      self-executing, plus an explicit Resolved-phase branch (_sharesForValue
-///      redeems winners 1:1 / writes off losers) instead of relying on
-///      meaningless post-resolution priceOf. A funded keeper (worker cron) is
-///      still recommended belt-and-suspenders, but the incentive no longer
-///      depends on altruism.
+///   2. [HIGH — ADDRESSED, with an honest residual] Force-close was
+///      UNINCENTIVISED. FIX: the liquidator receives shares worth (owed × 1.05)
+///      — a real, share-denominated reward that makes force-close
+///      self-executing FOR IN-THE-MONEY POSITIONS. RESIDUAL (re-review): for
+///      OUT-OF-THE-MONEY positions the bonus cannot make liquidation profitable,
+///      so the pool absorbs a bounded shortfall at resolution (see "HONEST
+///      LIMIT" above) — this is the one economic-model HIGH and is bounded by
+///      LTV + depth cap + per-user cap + writeOffBadDebt, not eliminated. The
+///      keeper (agent/src/bet-keeper.ts) writes off resolved-losers for free
+///      and force-closes only profitable positions; it never liquidates at a
+///      loss.
 ///   3. [HIGH — FIXED] Liquidator used to take the WHOLE position for `owed` —
 ///      in the force window this let a healthy borrower's upside be seized.
 ///      FIX: liquidation is now SPLIT — the liquidator gets only the shares
@@ -66,17 +86,34 @@ import {Markets} from "./Markets.sol";
 ///      test_forceLiquidate_inExpiryWindow_evenIfHealthy,
 ///      test_liquidation_paysBonus_returnsSurplus, and
 ///      test_liquidator_cannotManipulateSpot_toStealSurplus.
-///   4. [MEDIUM — OPEN] Pool value is bad-debt-blind; interest realize-vs-
-///      accrue can diverge; supplier withdraw could be gamed.
+///   4. [MEDIUM — ADDRESSED] Pool value was bad-debt-blind. ROOT CAUSE: a
+///      resolved-LOSER loan (collateral worth $0, no liquidator will pay owed)
+///      kept its principal counted in pool value, letting a late withdrawer
+///      exit at an inflated share price and dump the loss on the rest. FIX:
+///      permissionless writeOffBadDebt removes the lost principal the moment
+///      the loss exists, socializing it pro-rata and closing the withdraw race;
+///      the keeper polls isWriteOffable. Interest realize-vs-accrue reconciles
+///      (every mutating entrypoint rolls first, accrual is linear, subtractions
+///      are underflow-clamped) and liquidation is value-neutral to the pool
+///      (liquidator pays full owed in cash), so there is no discrete jump to
+///      game on the supply side.
 ///   5. [MEDIUM — addressed in MarketsV3 docs] operator approval is
 ///      unlimited/all-markets — scope risk documented on setShareOperator.
+///   6. [MEDIUM — FIXED, re-review] liquidateBet accepted a resolved-LOSER loan,
+///      letting a naive keeper pay full `owed` for $0 collateral (a donation to
+///      the pool, a loss to the caller). FIX: liquidateBet now reverts
+///      UseWriteOff on resolved-losers and routes them to writeOffBadDebt.
+///   7. [MEDIUM — FIXED, re-review] first-depositor / ERC4626 share-inflation:
+///      pool value read USDC.balanceOf(this), so a direct token donation could
+///      skew the share price and grief a later supplier. FIX: pool value now
+///      reads an INTERNAL idleUSDC accumulator updated on every USDC flow, so a
+///      donation cannot move the share price. (test_donationCannotInflateShares)
 ///
 ///   The depth-cap (finding 1) is the load-bearing safety result and is the
 ///   answer to "how do we make binary-bet collateral safe." Findings 2-3 were
-///   liquidation-incentive/fairness work (now fixed via the share-denominated
-///   bonus + split liquidation), not a fund-drain at rest. DO NOT deploy or
-///   wire to the frontend until the MEDIUM cluster is resolved and the whole
-///   contract is re-reviewed.
+///   liquidation-incentive/fairness work (split liquidation off a fixed mark).
+///   No fund-drain-at-rest. DO NOT deploy or wire to the frontend until a
+///   further review pass on this v0.9 is clean.
 ///
 /// v0.6 alpha design intent (TESTNET ONLY — DO NOT USE WITH REAL FUNDS):
 ///   - Collateral: YES or NO shares on a MarketsV3 market.
@@ -151,6 +188,14 @@ contract CirqueBetLending is ReentrancyGuard {
     uint256 public totalBorrowedPrincipal;
     uint256 public accruedInterestUSDC;
     uint256 public lastAccrualAt;
+    /// @notice Cumulative principal written off as bad debt (transparency only).
+    /// A non-zero value means suppliers absorbed a loss via reduced pool value.
+    uint256 public totalBadDebtRealizedUSDC;
+    /// @notice Idle USDC tracked by INTERNAL accounting, not USDC.balanceOf.
+    /// Pool value reads this so a direct token donation cannot inflate the
+    /// share price (the classic first-depositor / ERC4626 inflation attack).
+    /// Updated on every supply/withdraw/borrow/repay/liquidate USDC flow.
+    uint256 public idleUSDC;
 
     // ─────────────────────────── Events ───────────────────────────
 
@@ -171,6 +216,7 @@ contract CirqueBetLending is ReentrancyGuard {
         uint256 sharesSeized,
         bool forced
     );
+    event BadDebtWrittenOff(address indexed user, uint256 principal, uint256 interest);
 
     // ─────────────────────── Errors ───────────────────────
 
@@ -186,6 +232,8 @@ contract CirqueBetLending is ReentrancyGuard {
     error MarketGone();
     error PoolTooShallow();
     error NotOwner();
+    error NotWriteOffable();
+    error UseWriteOff();
 
     modifier onlyOwner() {
         if (msg.sender != OWNER) revert NotOwner();
@@ -213,6 +261,7 @@ contract CirqueBetLending is ReentrancyGuard {
         if (sharesMinted == 0) revert ZeroAmount();
         shares[msg.sender] += sharesMinted;
         totalShares += sharesMinted;
+        idleUSDC += amount;
         USDC.safeTransferFrom(msg.sender, address(this), amount);
         emit Supplied(msg.sender, amount, sharesMinted);
     }
@@ -221,16 +270,19 @@ contract CirqueBetLending is ReentrancyGuard {
         if (shareAmount == 0) revert ZeroAmount();
         if (shareAmount > shares[msg.sender]) revert InsufficientShares();
         _rollAccrual();
-        usdcOut = (shareAmount * _totalPoolValueUSDC()) / totalShares;
+        uint256 pv = _totalPoolValueUSDC();
+        usdcOut = (shareAmount * pv) / totalShares;
         if (usdcOut == 0) revert ZeroAmount();
-        if (USDC.balanceOf(address(this)) < usdcOut) revert InsufficientUSDCLiquidity();
+        if (idleUSDC < usdcOut) revert InsufficientUSDCLiquidity();
         shares[msg.sender] -= shareAmount;
         totalShares -= shareAmount;
-        // Realize this withdrawer's slice of accrued interest out of the counter.
-        uint256 pv = _totalPoolValueUSDC();
+        // Realize this withdrawer's pro-rata slice of accrued (uncollected)
+        // interest out of the counter so remaining suppliers don't double-count
+        // it when borrowers later repay. Clamped against underflow.
         uint256 interestShare = pv == 0 ? 0 : (usdcOut * accruedInterestUSDC) / pv;
         if (interestShare > accruedInterestUSDC) interestShare = accruedInterestUSDC;
         accruedInterestUSDC -= interestShare;
+        idleUSDC -= usdcOut;
         USDC.safeTransfer(msg.sender, usdcOut);
         emit Withdrew(msg.sender, shareAmount, usdcOut);
     }
@@ -249,7 +301,7 @@ contract CirqueBetLending is ReentrancyGuard {
         if (collateralShares == 0 || usdcAmount == 0) revert ZeroAmount();
         if (usdcAmount > MAX_BORROW_PER_USER) revert BorrowCapExceeded();
         if (loans[msg.sender].active) revert ActiveLoanExists();
-        if (USDC.balanceOf(address(this)) < usdcAmount) revert InsufficientUSDCLiquidity();
+        if (idleUSDC < usdcAmount) revert InsufficientUSDCLiquidity();
 
         // Market must be live with room before expiry — never lend into the
         // force-close window (the position couldn't be safely held).
@@ -285,6 +337,7 @@ contract CirqueBetLending is ReentrancyGuard {
         openingHealthBps = _healthBps(loans[msg.sender]);
         if (openingHealthBps > MAX_LTV_BPS) revert LTVTooHigh();
 
+        idleUSDC -= usdcAmount;
         USDC.safeTransfer(msg.sender, usdcAmount);
         emit BetBorrowed(msg.sender, marketId, betYes, collateralShares, usdcAmount);
     }
@@ -301,6 +354,7 @@ contract CirqueBetLending is ReentrancyGuard {
         delete loans[msg.sender];
         totalBorrowedPrincipal -= loan.principal;
         accruedInterestUSDC = interest > accruedInterestUSDC ? 0 : accruedInterestUSDC - interest;
+        idleUSDC += owed;
 
         USDC.safeTransferFrom(msg.sender, address(this), owed);
 
@@ -336,6 +390,11 @@ contract CirqueBetLending is ReentrancyGuard {
 
         Markets.Market memory m = MARKETS.getMarket(loan.marketId);
         bool resolved = m.phase == Markets.Phase.Resolved;
+        // A resolved-LOSER position is worth $0 — liquidating it means paying
+        // full `owed` in cash for worthless shares, a pure loss to the caller.
+        // Route it to the (free, permissionless) writeOffBadDebt path instead,
+        // so an automated keeper can never be tricked into donating `owed`.
+        if (resolved && m.yesWon != loan.betYes) revert UseWriteOff();
         bool forced = block.timestamp + FORCE_CLOSE_WINDOW >= m.expiry || resolved;
         if (!forced && _healthBps(loan) <= LIQ_LTV_BPS) revert NotLiquidatable();
 
@@ -345,6 +404,7 @@ contract CirqueBetLending is ReentrancyGuard {
         delete loans[borrower];
         totalBorrowedPrincipal -= loan.principal;
         accruedInterestUSDC = interest > accruedInterestUSDC ? 0 : accruedInterestUSDC - interest;
+        idleUSDC += owed;
 
         USDC.safeTransferFrom(msg.sender, address(this), owed);
 
@@ -379,6 +439,61 @@ contract CirqueBetLending is ReentrancyGuard {
         }
 
         emit BetLiquidated(borrower, msg.sender, owed, liquidatorShares, forced);
+    }
+
+    /// @notice Realize an unrecoverable loan as bad debt, socializing the loss
+    /// across suppliers via a reduced pool value. Permissionless (it only
+    /// recognizes a loss that already exists — there is nothing to extract).
+    ///
+    /// WHY THIS EXISTS (MEDIUM finding #4 — bad-debt-blind pool value):
+    /// `_totalPoolValueUSDC` counts `totalBorrowedPrincipal` at FACE value. For
+    /// every healthy/winning/in-the-money loan that is fine — the depth cap,
+    /// force-close window and keeper guarantee it is liquidated for full `owed`
+    /// in cash before resolution, so principal is genuinely recoverable. The
+    /// one exception is a loan whose market RESOLVES and whose side LOSES: the
+    /// collateral is now worth exactly $0, so no liquidator will ever pay `owed`
+    /// to seize it, yet the principal keeps counting as pool value. Left
+    /// unaddressed, that phantom value lets a late withdrawer exit at an
+    /// inflated share price and dump the loss on the remaining suppliers.
+    ///
+    /// This function writes the lost principal out of `totalBorrowedPrincipal`
+    /// (and drops its accrued interest), so the pool value immediately and
+    /// honestly reflects the loss for ALL suppliers pro-rata — closing the
+    /// withdraw-race surface. The keeper calls it as soon as such a loss exists.
+    ///
+    /// Only resolved-LOSER loans qualify. Trading loans must go through normal
+    /// liquidation; resolved-WINNER loans are valuable and a liquidator will
+    /// profitably close them (pay `owed`, redeem shares at $1).
+    function writeOffBadDebt(address borrower) external nonReentrant {
+        Loan memory loan = loans[borrower];
+        if (!loan.active) revert NoActiveLoan();
+        if (!_isWriteOffable(loan)) revert NotWriteOffable();
+        _rollAccrual();
+
+        uint256 interest = _interestOwed(loan);
+        delete loans[borrower];
+        totalBorrowedPrincipal -= loan.principal;
+        accruedInterestUSDC = interest > accruedInterestUSDC ? 0 : accruedInterestUSDC - interest;
+        totalBadDebtRealizedUSDC += loan.principal;
+
+        // The worthless collateral simply remains in this contract (redeemable
+        // for $0). We stop counting the lost principal; the loss is socialized
+        // across suppliers, who bore the lending risk.
+        emit BadDebtWrittenOff(borrower, loan.principal, interest);
+    }
+
+    function _isWriteOffable(Loan memory loan) internal view returns (bool) {
+        Markets.Market memory m = MARKETS.getMarket(loan.marketId);
+        // Resolved AND the borrower's side lost → collateral worth $0.
+        return m.phase == Markets.Phase.Resolved && (m.yesWon != loan.betYes);
+    }
+
+    /// @notice True if `borrower`'s loan is unrecoverable and should be written
+    /// off (the keeper polls this alongside force-close liquidations).
+    function isWriteOffable(address borrower) external view returns (bool) {
+        Loan memory loan = loans[borrower];
+        if (!loan.active) return false;
+        return _isWriteOffable(loan);
     }
 
     /// @dev How many of the loan's shares the liquidator receives for a reward
@@ -436,7 +551,7 @@ contract CirqueBetLending is ReentrancyGuard {
     }
 
     function availableUSDC() external view returns (uint256) {
-        return USDC.balanceOf(address(this));
+        return idleUSDC;
     }
 
     function totalPoolValueUSDC() external view returns (uint256) {
@@ -496,7 +611,16 @@ contract CirqueBetLending is ReentrancyGuard {
         lastAccrualAt = block.timestamp;
     }
 
+    /// @dev Pool value = idle cash + principal out on loan + interest accrued
+    /// but not yet collected. Idle cash is the INTERNAL `idleUSDC` accumulator,
+    /// never `USDC.balanceOf(this)` — a direct token donation must not be able
+    /// to inflate the share price (first-depositor / ERC4626 inflation attack).
+    /// `totalBorrowedPrincipal` is counted at face value; this is correct
+    /// because every recoverable loan is liquidated for full `owed` in cash
+    /// before resolution, and the ONE unrecoverable case — a resolved-loser
+    /// loan — is removed from `totalBorrowedPrincipal` by writeOffBadDebt the
+    /// moment the loss exists. So this figure carries no phantom value.
     function _totalPoolValueUSDC() internal view returns (uint256) {
-        return USDC.balanceOf(address(this)) + totalBorrowedPrincipal + accruedInterestUSDC;
+        return idleUSDC + totalBorrowedPrincipal + accruedInterestUSDC;
     }
 }

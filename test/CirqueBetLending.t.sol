@@ -82,6 +82,17 @@ contract CirqueBetLendingTest is Test {
         vm.stopPrank();
     }
 
+    // Resolve `mid` against `attestValue`: attest near expiry, warp past expiry
+    // + dispute window, then resolve. value < 17_000 → NO wins (YES loses).
+    function _resolve(bytes32 mid, int256 attestValue) internal {
+        Markets.Market memory m = markets.getMarket(mid);
+        vm.warp(m.expiry - 1);
+        vm.prank(agent);
+        attestation.attest(feedId, attestValue, keccak256(abi.encode(attestValue, block.timestamp)));
+        vm.warp(m.expiry + DW + 1);
+        markets.resolve(mid);
+    }
+
     // ── borrow against a held bet ──
     function test_borrowAgainstBet_locksPositionLendsUSDC() public {
         bytes32 mid = _market(block.timestamp + 30 days);
@@ -333,5 +344,179 @@ contract CirqueBetLendingTest is Test {
         vm.expectRevert(CirqueBetLending.ActiveLoanExists.selector);
         lending.borrowAgainstBet(mid, true, sh / 4, borrow);
         vm.stopPrank();
+    }
+
+    // ── MEDIUM #4: bad-debt write-off socializes the loss and closes the
+    //    withdraw race. A YES loan whose market resolves NO is unrecoverable. ──
+    function test_writeOffBadDebt_socializesLoss() public {
+        bytes32 mid = _market(block.timestamp + 2 days);
+        uint256 sh = _aliceHoldsBet(mid, 2_000e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2;
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        // Market resolves NO → alice's YES collateral is worth $0 and no
+        // liquidator will ever pay `owed` for it. Phantom value until written off.
+        _resolve(mid, 16_500); // below 17_000 threshold → NO wins
+        assertTrue(lending.isWriteOffable(alice));
+
+        uint256 poolBefore = lending.totalPoolValueUSDC();
+        uint256 lolaBefore = lending.balanceOfUSDC(lola);
+
+        // Anyone can write it off (permissionless — only realizes an existing loss).
+        lending.writeOffBadDebt(alice);
+
+        // Loss is recognized: pool value drops by the lost principal, the
+        // supplier's claim shrinks pro-rata, and the loan is closed.
+        assertEq(lending.totalBadDebtRealizedUSDC(), borrow);
+        assertEq(lending.totalPoolValueUSDC(), poolBefore - borrow);
+        assertLt(lending.balanceOfUSDC(lola), lolaBefore);
+        (,,,,, bool active,) = lending.loans(alice);
+        assertFalse(active);
+        assertFalse(lending.isWriteOffable(alice));
+    }
+
+    function test_writeOff_tradingLoan_reverts() public {
+        bytes32 mid = _market(block.timestamp + 30 days);
+        uint256 sh = _aliceHoldsBet(mid, 2_000e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2;
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        assertFalse(lending.isWriteOffable(alice));
+        vm.expectRevert(CirqueBetLending.NotWriteOffable.selector);
+        lending.writeOffBadDebt(alice);
+    }
+
+    function test_writeOff_resolvedWinner_reverts() public {
+        bytes32 mid = _market(block.timestamp + 2 days);
+        uint256 sh = _aliceHoldsBet(mid, 2_000e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2;
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        // Market resolves YES → alice's side WON; collateral is valuable, a
+        // liquidator will profitably close it. Not write-off-able.
+        _resolve(mid, 17_500); // above threshold → YES wins
+        assertFalse(lending.isWriteOffable(alice));
+        vm.expectRevert(CirqueBetLending.NotWriteOffable.selector);
+        lending.writeOffBadDebt(alice);
+    }
+
+    // ── re-review MEDIUM: liquidateBet must NOT accept a resolved-loser (it
+    //    would make the caller pay full owed for $0 collateral). Route to
+    //    writeOffBadDebt instead — protects an automated keeper. ──
+    function test_liquidate_resolvedLoser_reverts_useWriteOff() public {
+        bytes32 mid = _market(block.timestamp + 2 days);
+        uint256 sh = _aliceHoldsBet(mid, 2_000e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2;
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        _resolve(mid, 16_500); // NO wins → alice's YES is worthless
+
+        vm.startPrank(liquidator);
+        usdc.approve(address(lending), type(uint256).max);
+        vm.expectRevert(CirqueBetLending.UseWriteOff.selector);
+        lending.liquidateBet(alice);
+        vm.stopPrank();
+
+        // The correct path closes it for free.
+        lending.writeOffBadDebt(alice);
+        (,,,,, bool active,) = lending.loans(alice);
+        assertFalse(active);
+    }
+
+    // ── re-review MEDIUM: a direct USDC donation must not inflate the share
+    //    price (first-depositor / ERC4626 inflation). Pool value reads the
+    //    internal idleUSDC accumulator, not the token balance. ──
+    function test_donationCannotInflateShares() public {
+        // lola already supplied 50_000e6 in setUp → totalShares > 0.
+        uint256 pvBefore = lending.totalPoolValueUSDC();
+        uint256 lolaClaimBefore = lending.balanceOfUSDC(lola);
+
+        // Attacker donates USDC directly to the contract.
+        usdc.mint(address(this), 100_000e6);
+        usdc.transfer(address(lending), 100_000e6);
+
+        // Pool value and lola's claim are UNCHANGED — the donation is invisible
+        // to the accounting, so it cannot skew the share price.
+        assertEq(lending.totalPoolValueUSDC(), pvBefore);
+        assertEq(lending.balanceOfUSDC(lola), lolaClaimBefore);
+
+        // A new supplier of the same size gets ~the same claim as lola (fair),
+        // not a haircut from a skewed share price.
+        address newSup = makeAddr("newSup");
+        usdc.mint(newSup, 50_000e6);
+        vm.startPrank(newSup);
+        usdc.approve(address(lending), 50_000e6);
+        lending.supplyUSDC(50_000e6);
+        vm.stopPrank();
+        assertApproxEqAbs(lending.balanceOfUSDC(newSup), lending.balanceOfUSDC(lola), 1e6);
+    }
+
+    // ── re-review hardening: the core idleUSDC invariant — accounted idle must
+    //    never exceed the real token balance — across a full lifecycle, and a
+    //    withdraw that exceeds idle liquidity must revert (not over-pay). ──
+    function test_idleUSDC_neverExceedsBalance_andLiquidityGate() public {
+        bytes32 mid = _market(block.timestamp + 30 days);
+        uint256 sh = _aliceHoldsBet(mid, 2_000e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh);
+        assertLe(lending.availableUSDC(), usdc.balanceOf(address(lending)));
+
+        // Borrow drains idle by `borrow`.
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+        assertLe(lending.availableUSDC(), usdc.balanceOf(address(lending)));
+
+        // A donation inflates the raw balance but NOT idle — invariant holds
+        // strictly now.
+        usdc.mint(address(this), 10_000e6);
+        usdc.transfer(address(lending), 10_000e6);
+        assertLt(lending.availableUSDC(), usdc.balanceOf(address(lending)));
+
+        // lola cannot withdraw more than idle even though the raw balance
+        // (incl. the donation) is larger — the gate keys off accounted idle.
+        uint256 lolaShares = lending.shares(lola);
+        vm.prank(lola);
+        vm.expectRevert(CirqueBetLending.InsufficientUSDCLiquidity.selector);
+        lending.withdrawUSDC(lolaShares);
+
+        // Repay restores idle; invariant still holds.
+        uint256 owed = borrow + lending.interestOwed(alice);
+        vm.startPrank(alice);
+        usdc.approve(address(lending), owed);
+        lending.repayBet();
+        vm.stopPrank();
+        assertLe(lending.availableUSDC(), usdc.balanceOf(address(lending)));
+    }
+
+    // ── re-review coverage: a resolved-WINNER position liquidates normally
+    //    through liquidateBet (forced=resolved), exercising the 1:1 payout
+    //    branch of _liquidatorShareCut. ──
+    function test_liquidate_resolvedWinner_viaLiquidateBet() public {
+        bytes32 mid = _market(block.timestamp + 2 days);
+        uint256 sh = _aliceHoldsBet(mid, 2_000e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2;
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        _resolve(mid, 17_500); // YES wins → alice's collateral redeems 1:1
+        uint256 owed = borrow + lending.interestOwed(alice);
+
+        vm.startPrank(liquidator);
+        usdc.approve(address(lending), owed + 1e6);
+        lending.liquidateBet(alice); // resolved ⇒ forced, winner ⇒ valuable
+        vm.stopPrank();
+
+        // Liquidator got a positive (1:1-valued) cut; surplus returned to alice;
+        // nothing stranded; loan closed.
+        uint256 liqGot = markets.yesBalance(mid, liquidator);
+        uint256 aliceGot = markets.yesBalance(mid, alice);
+        assertGt(liqGot, 0);
+        assertEq(liqGot + aliceGot, sh);
+        assertEq(markets.yesBalance(mid, address(lending)), 0);
+        (,,,,, bool active,) = lending.loans(alice);
+        assertFalse(active);
     }
 }
