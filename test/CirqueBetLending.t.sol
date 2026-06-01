@@ -44,7 +44,7 @@ contract CirqueBetLendingTest is Test {
         lending = new CirqueBetLending(usdc, markets, address(this));
 
         usdc.mint(agent, 10_000e6);
-        usdc.mint(mm, 1_000_000e6);
+        usdc.mint(mm, 5_000_000e6);
         usdc.mint(alice, 100_000e6);
         usdc.mint(lola, 1_000_000e6);
         usdc.mint(liquidator, 100_000e6);
@@ -56,17 +56,20 @@ contract CirqueBetLendingTest is Test {
         registry.registerAgent(feedId, METH, MIN_BOND);
         vm.stopPrank();
 
-        // Supplier seeds 1,000 USDC.
+        // Supplier seeds 50,000 USDC (markets are 50k-deep post-gate, so the
+        // pool must be able to fund borrows against them).
         vm.startPrank(lola);
-        usdc.approve(address(lending), 1_000e6);
-        lending.supplyUSDC(1_000e6);
+        usdc.approve(address(lending), 50_000e6);
+        lending.supplyUSDC(50_000e6);
         vm.stopPrank();
     }
 
+    // Seed well above MIN_POOL_DEPTH (1,000 USDC) so both reserves stay
+    // eligible after trading — the depth gate is a borrow-time requirement.
     function _market(uint256 expiry) internal returns (bytes32 mid) {
         vm.startPrank(mm);
-        usdc.approve(address(markets), 1_000e6);
-        mid = markets.createMarket(feedId, agent, 17_000, Markets.Comparator.GreaterThan, expiry, 1_000e6);
+        usdc.approve(address(markets), 50_000e6);
+        mid = markets.createMarket(feedId, agent, 17_000, Markets.Comparator.GreaterThan, expiry, 50_000e6);
         vm.stopPrank();
     }
 
@@ -151,8 +154,8 @@ contract CirqueBetLendingTest is Test {
 
         // Push YES price down: a big NO buy moves the mark against alice's YES.
         vm.startPrank(mm);
-        usdc.approve(address(markets), 800e6);
-        markets.buy(mid, Markets.Outcome.No, 800e6, 0);
+        usdc.approve(address(markets), 80_000e6);
+        markets.buy(mid, Markets.Outcome.No, 80_000e6, 0);
         vm.stopPrank();
 
         // Health should now breach the 60% threshold.
@@ -230,7 +233,7 @@ contract CirqueBetLendingTest is Test {
         vm.stopPrank();
 
         // Lola's claim grew by the interest (she's the only supplier).
-        assertGt(lending.balanceOfUSDC(lola), 1_000e6);
+        assertGt(lending.balanceOfUSDC(lola), 50_000e6);
     }
 
     function test_doubleBorrow_reverts() public {

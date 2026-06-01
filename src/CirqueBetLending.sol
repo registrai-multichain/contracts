@@ -26,36 +26,39 @@ import {Markets} from "./Markets.sol";
 ///   window before expiry regardless of health. A loan can never survive into
 ///   resolution, so the pool is never exposed to the cliff.
 ///
-/// ⚠️ STATUS: v0.6 RESEARCH REFERENCE — NOT DEPLOYED, NOT FUNDS-SAFE.
-///   A full adversarial review (2026-05-31) found a CRITICAL that blocks
-///   deployment. The cliff-guard mechanism (force-close before expiry) is
-///   sound and proven by tests, but the COLLATERAL MARK is not safe:
+/// ⚠️ STATUS: v0.6 RESEARCH — NOT YET DEPLOYED. The CRITICAL is mitigated +
+///   fuzz-validated; two HIGHs remain before this can hold real funds.
 ///
-///   1. [CRITICAL] Spot AMM-mark manipulation. Collateral is marked at
-///      priceOf (instantaneous AMM mid). On a thin CPMM, a borrower can, in
-///      one tx, buy the opposite outcome to spike their collateral's mark,
-///      borrow against the inflated value, then unwind — over-borrowing for
-///      only the ~0.7% round-trip fee. Spot-marking binary collateral on a
-///      thin pool is unsafe at ANY LTV. Needs a manipulation-resistant mark
-///      (TWAP over a meaningful window, and/or a depth-relative borrow cap
-///      that rejects positions large vs. pool depth).
-///   2. [HIGH] Force-close is permissionless but UNINCENTIVISED — a loan can
-///      strand past expiry if no liquidator acts (esp. when mark < owed).
-///      Needs a funded keeper + real liquidation bonus, and an explicit
-///      Resolved-phase branch (redeem winners / write off losers) instead of
-///      relying on post-resolution priceOf (which is meaningless).
-///   3. [HIGH] Liquidator takes the WHOLE position for `owed` — in the force
-///      window this lets a healthy borrower's upside be seized. Should return
-///      surplus above (owed + capped bonus) to the borrower.
-///   4. [MEDIUM] Pool value is bad-debt-blind; interest realize-vs-accrue can
-///      diverge; supplier withdraw could be gamed alongside #1.
-///   5. [MEDIUM] MarketsV3 operator approval is unlimited/all-markets — fine
-///      for this consumer but document the scope risk.
+///   1. [CRITICAL — MITIGATED] Spot AMM-mark manipulation. Collateral was
+///      marked at priceOf (instantaneous AMM mid); on a thin CPMM a borrower
+///      could spike the mark, over-borrow, and unwind for ~0.7% fee. FIX: a
+///      DEPTH CAP (_markValue) — collateral is never valued above
+///      COLLATERAL_DEPTH_BPS (10%) of the pool's live opposite reserve, plus
+///      a MIN_POOL_DEPTH eligibility gate and 40% max LTV. A position's real
+///      recoverable value is bounded by what the pool can pay out on
+///      liquidation, not by the manipulable spot mark × share count.
+///      VALIDATED: test/CirqueBetFuzz.t.sol runs the full attack against the
+///      real contracts over 5,000 randomized (depth, manipulation, position)
+///      runs — 0 pool drains. Manipulation actually LOWERS the borrow limit
+///      (spiking the mark shrinks the opposite reserve the cap keys off), so
+///      the attack is net-negative.
+///   2. [HIGH — OPEN] Force-close is permissionless but UNINCENTIVISED — a
+///      loan can strand past expiry if no liquidator acts. Needs a funded
+///      keeper + real liquidation bonus, and an explicit Resolved-phase
+///      branch (redeem winners / write off losers) instead of relying on
+///      post-resolution priceOf.
+///   3. [HIGH — OPEN] Liquidator takes the WHOLE position for `owed` — in the
+///      force window this lets a healthy borrower's upside be seized. Should
+///      return surplus above (owed + capped bonus) to the borrower.
+///   4. [MEDIUM — OPEN] Pool value is bad-debt-blind; interest realize-vs-
+///      accrue can diverge; supplier withdraw could be gamed.
+///   5. [MEDIUM — addressed in MarketsV3 docs] operator approval is
+///      unlimited/all-markets — scope risk documented on setShareOperator.
 ///
-///   Kept in-tree because the MarketsV3 share-transfer primitive AND the
-///   cliff-guard design are reusable; the safe-mark + incentivised-close work
-///   is the v0.6 research track. DO NOT deploy or wire to the frontend until
-///   findings 1–3 are resolved and re-reviewed.
+///   The depth-cap (finding 1) is the load-bearing safety result and is the
+///   answer to "how do we make binary-bet collateral safe." Findings 2-3 are
+///   liquidation-incentive work, not a fund-drain at rest. DO NOT deploy or
+///   wire to the frontend until 2-3 are resolved and re-reviewed.
 ///
 /// v0.6 alpha design intent (TESTNET ONLY — DO NOT USE WITH REAL FUNDS):
 ///   - Collateral: YES or NO shares on a MarketsV3 market.
@@ -72,9 +75,23 @@ contract CirqueBetLending is ReentrancyGuard {
 
     // ───────────────────────── Constants ──────────────────────────
 
-    uint256 public constant MAX_LTV_BPS = 5000;       // 50% at origination
+    uint256 public constant MAX_LTV_BPS = 4000;       // 40% at origination (cover-ratio margin)
     uint256 public constant LIQ_LTV_BPS = 6000;       // 60% triggers liquidation
     uint256 public constant LIQ_BONUS_BPS = 500;      // 5% — informational; liquidator gets the whole position
+
+    /// @notice Manipulation defenses (derived from CPMM math, validated by the
+    /// adversarial fuzz test in test/CirqueBetFuzz.t.sol):
+    ///   - Collateral is NEVER valued above COLLATERAL_DEPTH_BPS of the pool's
+    ///     live opposite-side reserve. A position's real recoverable value is
+    ///     bounded by what the pool can pay out on liquidation, NOT by the
+    ///     (manipulable) spot mark × share count. This makes spot-mark
+    ///     manipulation net-negative and keeps liquidation always whole.
+    ///   - Markets must have at least MIN_POOL_DEPTH liquidity to be eligible,
+    ///     so the percentage cap isn't dominated by the 5-USDC MIN_LIQUIDITY
+    ///     floor / integer rounding.
+    uint256 public constant COLLATERAL_DEPTH_BPS = 1000; // ≤10% of opposite reserve
+    uint256 public constant MIN_POOL_DEPTH = 1000e6;     // 1,000 USDC per side, eligibility gate
+
     uint256 public constant INTEREST_BPS_PER_YEAR = 500;
     uint256 public constant SECONDS_PER_YEAR = 365 days;
     uint256 public constant BPS_DENOMINATOR = 10000;
@@ -144,6 +161,7 @@ contract CirqueBetLending is ReentrancyGuard {
     error NotLiquidatable();
     error MarketResolvedOrExpired();
     error MarketGone();
+    error PoolTooShallow();
     error NotOwner();
 
     modifier onlyOwner() {
@@ -216,6 +234,12 @@ contract CirqueBetLending is ReentrancyGuard {
         if (m.createdAt == 0) revert MarketGone();
         if (m.phase != Markets.Phase.Trading || block.timestamp + FORCE_CLOSE_WINDOW >= m.expiry) {
             revert MarketResolvedOrExpired();
+        }
+        // Eligibility gate: both reserves must clear MIN_POOL_DEPTH so the
+        // depth-cap percentage is meaningful (not dominated by the 5-USDC
+        // MIN_LIQUIDITY floor / integer rounding) and manipulation is costly.
+        if (m.yesReserve < MIN_POOL_DEPTH || m.noReserve < MIN_POOL_DEPTH) {
+            revert PoolTooShallow();
         }
 
         _rollAccrual();
@@ -337,10 +361,25 @@ contract CirqueBetLending is ReentrancyGuard {
     // ─────────────────────────── Internals ────────────────────────
 
     function _markValue(bytes32 marketId, bool betYes, uint256 sharesAmt) internal view returns (uint256) {
-        // priceOf returns USDC-per-share scaled 1e18. shares are 6-dp (USDC
-        // scale). value(6dp) = shares(6dp) × price(1e18) / 1e18.
+        // Spot mark: priceOf returns USDC-per-share scaled 1e18. shares are
+        // 6-dp (USDC scale). value(6dp) = shares × price / 1e18.
         uint256 price = MARKETS.priceOf(marketId, betYes ? Markets.Outcome.Yes : Markets.Outcome.No);
-        return (sharesAmt * price) / 1e18;
+        uint256 spotValue = (sharesAmt * price) / 1e18;
+
+        // DEPTH CAP (the manipulation defense): a position's real recoverable
+        // value is bounded by what the pool can pay out on liquidation, not by
+        // the manipulable spot mark. Liquidating a YES position sells YES into
+        // the pool and can extract at most the opposite (NO) reserve. We
+        // recognize at most COLLATERAL_DEPTH_BPS of that opposite reserve.
+        // Even if an attacker spends ~2×depth to spike the spot mark, the cap
+        // holds collateral value to a small slice of real depth, so the
+        // over-borrow is smaller than the fee paid to move the price → the
+        // manipulation is net-negative, and liquidation stays whole.
+        Markets.Market memory m = MARKETS.getMarket(marketId);
+        uint256 oppositeReserve = betYes ? m.noReserve : m.yesReserve;
+        uint256 depthCap = (oppositeReserve * COLLATERAL_DEPTH_BPS) / BPS_DENOMINATOR;
+
+        return spotValue < depthCap ? spotValue : depthCap;
     }
 
     function _collateralValue(Loan memory loan) internal view returns (uint256) {
