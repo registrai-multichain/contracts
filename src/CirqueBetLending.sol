@@ -26,8 +26,9 @@ import {Markets} from "./Markets.sol";
 ///   window before expiry regardless of health. A loan can never survive into
 ///   resolution, so the pool is never exposed to the cliff.
 ///
-/// ⚠️ STATUS: v0.6 RESEARCH — NOT YET DEPLOYED. The CRITICAL is mitigated +
-///   fuzz-validated; two HIGHs remain before this can hold real funds.
+/// ⚠️ STATUS: v0.7 RESEARCH — NOT YET DEPLOYED. The CRITICAL is mitigated +
+///   fuzz-validated and both HIGHs are now fixed; one MEDIUM cluster remains
+///   before this can hold real funds, and it still needs a re-review.
 ///
 ///   1. [CRITICAL — MITIGATED] Spot AMM-mark manipulation. Collateral was
 ///      marked at priceOf (instantaneous AMM mid); on a thin CPMM a borrower
@@ -42,23 +43,40 @@ import {Markets} from "./Markets.sol";
 ///      runs — 0 pool drains. Manipulation actually LOWERS the borrow limit
 ///      (spiking the mark shrinks the opposite reserve the cap keys off), so
 ///      the attack is net-negative.
-///   2. [HIGH — OPEN] Force-close is permissionless but UNINCENTIVISED — a
-///      loan can strand past expiry if no liquidator acts. Needs a funded
-///      keeper + real liquidation bonus, and an explicit Resolved-phase
-///      branch (redeem winners / write off losers) instead of relying on
-///      post-resolution priceOf.
-///   3. [HIGH — OPEN] Liquidator takes the WHOLE position for `owed` — in the
-///      force window this lets a healthy borrower's upside be seized. Should
-///      return surplus above (owed + capped bonus) to the borrower.
+///   2. [HIGH — FIXED] Force-close is permissionless but was UNINCENTIVISED — a
+///      loan could strand past expiry if no liquidator acted. FIX: the
+///      liquidator now receives shares worth (owed × 1.05) — the LIQ_BONUS_BPS
+///      is a real, share-denominated reward that makes force-close
+///      self-executing, plus an explicit Resolved-phase branch (_sharesForValue
+///      redeems winners 1:1 / writes off losers) instead of relying on
+///      meaningless post-resolution priceOf. A funded keeper (worker cron) is
+///      still recommended belt-and-suspenders, but the incentive no longer
+///      depends on altruism.
+///   3. [HIGH — FIXED] Liquidator used to take the WHOLE position for `owed` —
+///      in the force window this let a healthy borrower's upside be seized.
+///      FIX: liquidation is now SPLIT — the liquidator gets only the shares
+///      worth (owed × 1.05), and the surplus shares are returned to the
+///      borrower (see liquidateBet). Crucially the split is sized off a FIXED
+///      reference — markValueAtBorrow, the depth-capped value recorded at
+///      origination — NOT live priceOf. A first-cut fix sized it from spot,
+///      which a re-review caught as exploitable: a liquidator could crash the
+///      AMM spot in the same tx to inflate their share count past the whole
+///      position and seize the surplus anyway. Using the origination reference
+///      makes the split unmanipulable within the liquidation tx. Proven by
+///      test_forceLiquidate_inExpiryWindow_evenIfHealthy,
+///      test_liquidation_paysBonus_returnsSurplus, and
+///      test_liquidator_cannotManipulateSpot_toStealSurplus.
 ///   4. [MEDIUM — OPEN] Pool value is bad-debt-blind; interest realize-vs-
 ///      accrue can diverge; supplier withdraw could be gamed.
 ///   5. [MEDIUM — addressed in MarketsV3 docs] operator approval is
 ///      unlimited/all-markets — scope risk documented on setShareOperator.
 ///
 ///   The depth-cap (finding 1) is the load-bearing safety result and is the
-///   answer to "how do we make binary-bet collateral safe." Findings 2-3 are
-///   liquidation-incentive work, not a fund-drain at rest. DO NOT deploy or
-///   wire to the frontend until 2-3 are resolved and re-reviewed.
+///   answer to "how do we make binary-bet collateral safe." Findings 2-3 were
+///   liquidation-incentive/fairness work (now fixed via the share-denominated
+///   bonus + split liquidation), not a fund-drain at rest. DO NOT deploy or
+///   wire to the frontend until the MEDIUM cluster is resolved and the whole
+///   contract is re-reviewed.
 ///
 /// v0.6 alpha design intent (TESTNET ONLY — DO NOT USE WITH REAL FUNDS):
 ///   - Collateral: YES or NO shares on a MarketsV3 market.
@@ -119,6 +137,11 @@ contract CirqueBetLending is ReentrancyGuard {
         uint256 principal;    // USDC borrowed
         uint256 borrowedAt;
         bool active;
+        // Depth-capped mark value of the FULL position at origination. Used to
+        // split collateral on liquidation at a FIXED, manipulation-resistant
+        // reference — never the live AMM spot, which a liquidator could push
+        // down in-tx to over-seize the borrower's surplus.
+        uint256 markValueAtBorrow;
     }
     mapping(address => Loan) public loans;
 
@@ -254,7 +277,8 @@ contract CirqueBetLending is ReentrancyGuard {
             shares: collateralShares,
             principal: usdcAmount,
             borrowedAt: block.timestamp,
-            active: true
+            active: true,
+            markValueAtBorrow: _markValue(marketId, betYes, collateralShares)
         });
         totalBorrowedPrincipal += usdcAmount;
 
@@ -289,15 +313,30 @@ contract CirqueBetLending is ReentrancyGuard {
 
     /// @notice Liquidate a position that is either unhealthy (mark-based LTV >
     /// LIQ_LTV_BPS) OR within FORCE_CLOSE_WINDOW of expiry (the cliff guard —
-    /// regardless of health). Liquidator repays the debt + interest in USDC and
-    /// receives the entire share collateral, which they can sell or redeem.
+    /// regardless of health). The liquidator repays debt + interest in USDC.
+    ///
+    /// FAIRNESS + INCENTIVE (HIGH fixes): the liquidator does NOT seize the
+    /// whole position. They receive only enough shares to cover their payment
+    /// plus a LIQ_BONUS_BPS (5%) reward; the SURPLUS is returned to the
+    /// borrower. So:
+    ///   - a profitable liquidation (collateral worth > owed×1.05) is always
+    ///     attractive — the 5% bonus is the force-close incentive, no keeper
+    ///     subsidy needed for in-the-money positions; and
+    ///   - a healthy borrower force-closed near expiry keeps their upside —
+    ///     they only forfeit owed + a 5% service fee, not the whole bet.
+    ///
+    /// Share valuation: while the market is Trading, value at the AMM mark
+    /// (depth-cap-protected). Once Resolved, value at the ACTUAL payout
+    /// (winning share = 1 USDC, losing = 0) — never the meaningless
+    /// post-resolution priceOf.
     function liquidateBet(address borrower) external nonReentrant {
         Loan memory loan = loans[borrower];
         if (!loan.active) revert NoActiveLoan();
         _rollAccrual();
 
         Markets.Market memory m = MARKETS.getMarket(loan.marketId);
-        bool forced = block.timestamp + FORCE_CLOSE_WINDOW >= m.expiry;
+        bool resolved = m.phase == Markets.Phase.Resolved;
+        bool forced = block.timestamp + FORCE_CLOSE_WINDOW >= m.expiry || resolved;
         if (!forced && _healthBps(loan) <= LIQ_LTV_BPS) revert NotLiquidatable();
 
         uint256 interest = _interestOwed(loan);
@@ -309,12 +348,63 @@ contract CirqueBetLending is ReentrancyGuard {
 
         USDC.safeTransferFrom(msg.sender, address(this), owed);
 
-        // Liquidator takes the whole position (their incentive: it's worth more
-        // than `owed` while health < 100%, and they can ride it to resolution).
+        // Split the collateral: the liquidator gets shares worth (owed + 5%
+        // bonus); the borrower gets the surplus back.
+        //
+        // The valuation reference is FIXED, never the live AMM spot. Sizing the
+        // liquidator's cut from `priceOf` would let the liquidator push the
+        // collateral's spot price down in the same tx (buy the opposite
+        // outcome), inflate their share count past the whole position, and
+        // seize the borrower's surplus for the cost of AMM fees — defeating the
+        // fairness this split exists to provide. Instead:
+        //   • Resolved: winners redeem 1:1 USDC (Markets pays `balance` USDC per
+        //     winning share, no haircut), so `reward` USDC == `reward` shares.
+        //     Losers are worthless → liquidator takes the whole position (the
+        //     accepted bad-debt/backstop case).
+        //   • Trading: use markValueAtBorrow — the depth-capped value recorded
+        //     at origination. It cannot be moved within the liquidation tx, so
+        //     the split is manipulation-proof. shares-for-reward =
+        //     reward × shares / markValueAtBorrow.
         Markets.Outcome outcome = loan.betYes ? Markets.Outcome.Yes : Markets.Outcome.No;
-        MARKETS.transferSharesFrom(loan.marketId, outcome, address(this), msg.sender, loan.shares);
+        uint256 reward = (owed * (BPS_DENOMINATOR + LIQ_BONUS_BPS)) / BPS_DENOMINATOR;
+        uint256 liquidatorShares = _liquidatorShareCut(loan, reward, resolved, m.yesWon);
+        if (liquidatorShares > loan.shares) liquidatorShares = loan.shares;
+        uint256 borrowerShares = loan.shares - liquidatorShares;
 
-        emit BetLiquidated(borrower, msg.sender, owed, loan.shares, forced);
+        if (liquidatorShares > 0) {
+            MARKETS.transferSharesFrom(loan.marketId, outcome, address(this), msg.sender, liquidatorShares);
+        }
+        if (borrowerShares > 0) {
+            MARKETS.transferSharesFrom(loan.marketId, outcome, address(this), borrower, borrowerShares);
+        }
+
+        emit BetLiquidated(borrower, msg.sender, owed, liquidatorShares, forced);
+    }
+
+    /// @dev How many of the loan's shares the liquidator receives for a reward
+    /// of `rewardUSDC`. Uses a FIXED reference (resolution payout, or the
+    /// origination depth-capped mark) so it cannot be manipulated within the
+    /// liquidation tx. The caller clamps the result to `loan.shares`.
+    function _liquidatorShareCut(
+        Loan memory loan,
+        uint256 rewardUSDC,
+        bool resolved,
+        bool yesWon
+    ) internal pure returns (uint256) {
+        if (resolved) {
+            bool won = (yesWon == loan.betYes);
+            // Winning shares redeem 1:1 for USDC (both 6-dp), so shares needed
+            // == rewardUSDC. Losing shares are worthless → no finite count
+            // covers the reward; signal "take all" via max (clamped by caller).
+            return won ? rewardUSDC : type(uint256).max;
+        }
+        // Trading: split against the origination value. value-per-share =
+        // markValueAtBorrow / shares ⇒ shares for `rewardUSDC` =
+        // rewardUSDC × shares / markValueAtBorrow. markValueAtBorrow is taken
+        // at borrow time and never re-reads live spot, so a liquidator cannot
+        // shift it. (markValueAtBorrow ≥ principal/0.4 > 0 by the LTV check at
+        // origination, so the divide is safe.)
+        return (rewardUSDC * loan.shares) / loan.markValueAtBorrow;
     }
 
     // ───────────────────────── Views ───────────────────────

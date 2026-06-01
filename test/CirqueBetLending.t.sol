@@ -103,7 +103,7 @@ contract CirqueBetLendingTest is Test {
         // health < 50% (we borrowed half the max)
         assertLt(health, lending.MAX_LTV_BPS());
 
-        (bytes32 lm,, uint256 ls, uint256 lp,, bool active) = lending.loans(alice);
+        (bytes32 lm,, uint256 ls, uint256 lp,, bool active,) = lending.loans(alice);
         assertEq(lm, mid); assertEq(ls, sh); assertEq(lp, borrow); assertTrue(active);
     }
 
@@ -140,7 +140,7 @@ contract CirqueBetLendingTest is Test {
         vm.stopPrank();
 
         assertEq(markets.yesBalance(mid, alice), sh); // got it back
-        (,,,,, bool active) = lending.loans(alice);
+        (,,,,, bool active,) = lending.loans(alice);
         assertFalse(active);
     }
 
@@ -167,9 +167,15 @@ contract CirqueBetLendingTest is Test {
         lending.liquidateBet(alice);
         vm.stopPrank();
 
-        // Liquidator got the position; loan cleared.
-        assertEq(markets.yesBalance(mid, liquidator), sh);
-        (,,,,, bool active) = lending.loans(alice);
+        // Loan cleared; collateral split between liquidator (≈owed×1.05 worth)
+        // and borrower (surplus). Whole position is accounted for, none stuck
+        // in the lending contract.
+        uint256 liqGot = markets.yesBalance(mid, liquidator);
+        uint256 aliceGot = markets.yesBalance(mid, alice);
+        assertGt(liqGot, 0);
+        assertEq(liqGot + aliceGot, sh);
+        assertEq(markets.yesBalance(mid, address(lending)), 0);
+        (,,,,, bool active,) = lending.loans(alice);
         assertFalse(active);
     }
 
@@ -212,9 +218,91 @@ contract CirqueBetLendingTest is Test {
         lending.liquidateBet(alice);
         vm.stopPrank();
 
-        assertEq(markets.yesBalance(mid, liquidator), sh);
-        (,,,,, bool active) = lending.loans(alice);
+        // FIX #3: a HEALTHY borrower force-closed near expiry keeps their
+        // upside — the liquidator takes only ≈(owed×1.05) worth, the borrower
+        // gets the rest back. Since this loan was very healthy (borrowed half
+        // the max → ~20% LTV), the borrower's surplus should be the majority.
+        uint256 liqGot = markets.yesBalance(mid, liquidator);
+        uint256 aliceGot = markets.yesBalance(mid, alice);
+        assertEq(liqGot + aliceGot, sh);          // whole position accounted for
+        assertGt(aliceGot, liqGot);               // borrower keeps the majority
+        (,,,,, bool active,) = lending.loans(alice);
         assertFalse(active);
+    }
+
+    // ── FIX #2/#3: liquidating an in-the-money position pays the liquidator a
+    //    real bonus (the force-close incentive) and returns surplus to borrower ──
+    function test_liquidation_paysBonus_returnsSurplus() public {
+        bytes32 mid = _market(block.timestamp + 30 days);
+        uint256 sh = _aliceHoldsBet(mid, 2_000e6); // sizeable position
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2; // healthy, ~20% LTV
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        // Force-window liquidation of a healthy, in-the-money position.
+        // (use the mark-drop path to make it liquidatable now)
+        vm.startPrank(mm);
+        usdc.approve(address(markets), 80_000e6);
+        markets.buy(mid, Markets.Outcome.No, 80_000e6, 0);
+        vm.stopPrank();
+        // health breached but collateral still worth more than owed×1.05
+        uint256 owed = borrow + lending.interestOwed(alice);
+
+        vm.startPrank(liquidator);
+        usdc.approve(address(lending), owed + 1e6);
+        lending.liquidateBet(alice);
+        vm.stopPrank();
+
+        // Liquidator received a positive share allocation (their bonus is the
+        // incentive that makes force-close self-executing); borrower got the
+        // surplus; nothing stranded.
+        uint256 liqGot = markets.yesBalance(mid, liquidator);
+        uint256 aliceGot = markets.yesBalance(mid, alice);
+        assertGt(liqGot, 0);
+        assertEq(liqGot + aliceGot, sh);
+        assertEq(markets.yesBalance(mid, address(lending)), 0);
+    }
+
+    // ── REGRESSION (re-review HIGH): a liquidator cannot crash the spot price
+    //    in the same tx to over-seize the borrower's surplus. The split is
+    //    sized off markValueAtBorrow (fixed at origination), not live priceOf,
+    //    so manipulation does not change how many shares the liquidator gets.
+    //    Under the old spot-based sizing the liquidator took the WHOLE position;
+    //    here the borrower keeps essentially the same surplus either way. ──
+    function test_liquidator_cannotManipulateSpot_toStealSurplus() public {
+        uint256 expiry = block.timestamp + 30 days;
+        bytes32 mid = _market(expiry);
+        uint256 sh = _aliceHoldsBet(mid, 2_000e6);
+        uint256 borrow = lending.maxBorrow(mid, true, sh) / 2; // healthy, ~20% LTV
+        vm.prank(alice);
+        lending.borrowAgainstBet(mid, true, sh, borrow);
+
+        // Enter the force-close window (health check bypassed — the path where
+        // the old bug let a liquidator seize a healthy borrower's whole upside).
+        vm.warp(expiry - 1 hours);
+        uint256 owed = borrow + lending.interestOwed(alice); // after accrual
+
+        // Liquidator ATTACKS: dump a large NO buy to crash the YES spot price
+        // toward zero, then immediately force-liquidate.
+        vm.startPrank(liquidator);
+        usdc.approve(address(markets), 90_000e6);
+        markets.buy(mid, Markets.Outcome.No, 90_000e6, 0);
+        // spot YES price is crashed far below its fair ~0.5 (a 4×+ swing — under
+        // the old spot-based sizing this alone gave the liquidator the whole
+        // position, since liquidatorShares = reward × 1e18 / price balloons).
+        assertLt(markets.priceOf(mid, Markets.Outcome.Yes), 0.2e18);
+        usdc.approve(address(lending), owed + 1e6);
+        lending.liquidateBet(alice);
+        vm.stopPrank();
+
+        // The borrower STILL keeps the majority of the position — the crashed
+        // spot did not inflate the liquidator's cut. (Sized off markValueAtBorrow
+        // at ~20% LTV: liquidator ≈ owed×1.05 worth, borrower keeps the rest.)
+        uint256 liqGot = markets.yesBalance(mid, liquidator);
+        uint256 aliceGot = markets.yesBalance(mid, alice);
+        assertEq(liqGot + aliceGot, sh);
+        assertGt(aliceGot, liqGot);                 // borrower keeps the majority
+        assertGt(aliceGot, (sh * 60) / 100);        // and it's a real surplus (>60%)
     }
 
     // ── pool invariant: supplier yield after a repay ──

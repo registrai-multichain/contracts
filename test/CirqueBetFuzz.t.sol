@@ -131,7 +131,7 @@ contract CirqueBetFuzzTest is Test {
         if (borrowed) {
             // Attacker defaults. A liquidator closes the position: pays owed,
             // takes the collateral. Fund the liquidator and let them act.
-            (, , , uint256 principal, , ) = lending.loans(attacker);
+            (, , , uint256 principal, , ,) = lending.loans(attacker);
             uint256 owed = principal + lending.interestOwed(attacker);
             usdc.mint(liquidator, owed + 1e6);
             vm.startPrank(liquidator);
