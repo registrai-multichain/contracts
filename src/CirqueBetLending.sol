@@ -145,7 +145,14 @@ contract CirqueBetLending is ReentrancyGuard {
     ///     so the percentage cap isn't dominated by the 5-USDC MIN_LIQUIDITY
     ///     floor / integer rounding.
     uint256 public constant COLLATERAL_DEPTH_BPS = 1000; // ≤10% of opposite reserve
-    uint256 public constant MIN_POOL_DEPTH = 1000e6;     // 1,000 USDC per side, eligibility gate
+
+    /// @notice Mainnet eligibility floor. The ACTUAL gate is the immutable
+    /// MIN_POOL_DEPTH set at construction — a testnet deployment may scale it
+    /// down to match play-money liquidity WITHOUT weakening the manipulation
+    /// defense, which is ratio-based (COLLATERAL_DEPTH_BPS + MAX_LTV_BPS) and
+    /// independent of the absolute floor. Mainnet deployments MUST pass
+    /// DEFAULT_MIN_POOL_DEPTH (or larger).
+    uint256 public constant DEFAULT_MIN_POOL_DEPTH = 1000e6; // 1,000 USDC per side
 
     uint256 public constant INTEREST_BPS_PER_YEAR = 500;
     uint256 public constant SECONDS_PER_YEAR = 365 days;
@@ -164,6 +171,10 @@ contract CirqueBetLending is ReentrancyGuard {
     IERC20 public immutable USDC;
     MarketsV3 public immutable MARKETS;
     address public immutable OWNER;
+    /// @notice Per-side liquidity a market must have to be borrowable. Set at
+    /// deploy; see DEFAULT_MIN_POOL_DEPTH (mainnet value). Lowering it on
+    /// testnet does not touch the ratio-based manipulation defense.
+    uint256 public immutable MIN_POOL_DEPTH;
 
     // ─────────────────────────── State ────────────────────────────
 
@@ -240,10 +251,12 @@ contract CirqueBetLending is ReentrancyGuard {
         _;
     }
 
-    constructor(IERC20 usdc, MarketsV3 markets, address owner) {
+    constructor(IERC20 usdc, MarketsV3 markets, address owner, uint256 minPoolDepth) {
+        if (minPoolDepth == 0) revert ZeroAmount();
         USDC = usdc;
         MARKETS = markets;
         OWNER = owner;
+        MIN_POOL_DEPTH = minPoolDepth;
         lastAccrualAt = block.timestamp;
     }
 

@@ -51,7 +51,7 @@ contract CirqueBetFuzzTest is Test {
         markets = new MarketsV3(attestation, registry, usdc, makeAddr("treasury"));
         registry.wire(address(attestation), address(dispute));
         attestation.wire(address(dispute));
-        lending = new CirqueBetLending(usdc, markets, address(this));
+        lending = new CirqueBetLending(usdc, markets, address(this), 1000e6);
 
         usdc.mint(agent, 1_000e6);
         vm.prank(creator);

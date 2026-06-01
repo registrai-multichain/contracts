@@ -41,7 +41,7 @@ contract CirqueBetLendingTest is Test {
         registry.wire(address(attestation), address(dispute));
         attestation.wire(address(dispute));
 
-        lending = new CirqueBetLending(usdc, markets, address(this));
+        lending = new CirqueBetLending(usdc, markets, address(this), 1000e6);
 
         usdc.mint(agent, 10_000e6);
         usdc.mint(mm, 5_000_000e6);
