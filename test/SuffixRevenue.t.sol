@@ -123,4 +123,68 @@ contract SuffixRevenueTest is Test {
         assertGt(usdc.balanceOf(bob), before);       // bob ended up ahead
         assertGt(t.aiSpotPrice(), 0.5e6);            // and the buy pushed price up
     }
+
+    // ── (1) froth harvest: above the band, skim the premium into revenue and
+    //    bring the price back to the band top; permissionless + keeper reward ──
+    function test_harvestFroth() public {
+        _seedSenior(alice, 1_000e6);                 // floorPar 1.0 → froth top 1.4
+        _provisionPOL(1_000e6, 1_000e6);             // price 1.0
+
+        // external demand pushes price well above 1.4×FV
+        vm.startPrank(bob);
+        usdc.approve(address(t), 600e6);
+        t.buyAi(600e6, 0);
+        vm.stopPrank();
+        assertGt(t.aiSpotPrice(), t.frothPriceUSDC());
+
+        uint256 feesBefore = t.feesBankUsdc();
+        uint256 keeperBal = usdc.balanceOf(bob);     // bob acts as keeper
+        uint256 premium = t.harvestablePremiumUSDC();
+        assertGt(premium, 0);
+
+        vm.prank(bob);
+        uint256 skimmed = t.harvestFroth(0);         // harvest all of it
+
+        assertEq(skimmed, premium);
+        // price brought down to the band top (within rounding)
+        assertApproxEqAbs(t.aiSpotPrice(), t.frothPriceUSDC(), 2);
+        // keeper got the reward; the rest banked as revenue
+        uint256 reward = (premium * t.KEEPER_REWARD_BPS()) / t.BPS();
+        assertEq(usdc.balanceOf(bob), keeperBal + reward);
+        assertEq(t.feesBankUsdc(), feesBefore + premium - reward);
+    }
+
+    function test_harvest_requiresFroth() public {
+        _seedSenior(alice, 1_000e6);
+        _provisionPOL(1_000e6, 1_000e6);             // price 1.0 < froth top 1.4
+        vm.expectRevert(SuffixTreasury.NotInFrothBand.selector);
+        t.harvestFroth(0);
+    }
+
+    // ── (2) compounding fees deepens POL at a flat price, claim unchanged ──
+    function test_compoundFeesToPOL() public {
+        _provisionPOL(1_000e6, 1_000e6);
+        // generate fees
+        vm.startPrank(alice);
+        usdc.approve(address(t), 200e6);
+        uint256 got = t.buyAi(200e6, 0);
+        senior.approve(address(t), got);
+        t.sellAi(got, 0);
+        vm.stopPrank();
+
+        uint256 fees = t.feesBankUsdc();
+        assertGt(fees, 0);
+        uint256 priceBefore = t.aiSpotPrice();
+        uint256 poolUsdcBefore = t.poolUsdc();
+        uint256 poolAiBefore = t.poolAi();
+        uint256 claimBefore = t.seniorClaimUSDC();
+
+        t.compoundFeesToPOL(fees);
+
+        assertEq(t.feesBankUsdc(), 0);
+        assertGt(t.poolUsdc(), poolUsdcBefore);      // deeper
+        assertGt(t.poolAi(), poolAiBefore);          // deeper
+        assertApproxEqAbs(t.aiSpotPrice(), priceBefore, 2); // price flat
+        assertEq(t.seniorClaimUSDC(), claimBefore);  // pool $ai excluded from claim
+    }
 }

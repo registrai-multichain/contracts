@@ -37,6 +37,8 @@ contract SuffixTreasury is ReentrancyGuard {
     uint256 public constant PAR0 = 1e6;          // 1.00 USDC, 6dp
     uint256 public constant UNIT = 1e6;          // 6dp scaling for token math
     uint256 public constant SWAP_FEE_BPS = 30;   // 0.30% protocol-owned-liquidity fee → revenue
+    uint256 public constant M_FROTH_BPS = 14_000; // froth band top = 1.4 × senior FV (floorPar)
+    uint256 public constant KEEPER_REWARD_BPS = 50; // 0.5% of a harvest paid to the caller
 
     IERC20 public immutable USDC;
     SuffixSenior public immutable senior;
@@ -79,6 +81,8 @@ contract SuffixTreasury is ReentrancyGuard {
     event AiBought(address indexed buyer, uint256 usdcIn, uint256 aiOut, uint256 fee);
     event AiSold(address indexed seller, uint256 aiIn, uint256 usdcOut, uint256 fee);
     event RevenueSkimmed(uint256 fees, uint256 seniorRatchetBps, uint256 newFloorPar);
+    event FrothHarvested(address indexed keeper, uint256 skimmed, uint256 keeperReward, uint256 priceAfter);
+    event FeesCompounded(uint256 usdcIn, uint256 aiMinted);
 
     error ZeroAmount();
     error NotOwner();
@@ -87,6 +91,7 @@ contract SuffixTreasury is ReentrancyGuard {
     error BufferLocked();
     error SlippageExceeded();
     error PoolEmpty();
+    error NotInFrothBand();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -118,6 +123,19 @@ contract SuffixTreasury is ReentrancyGuard {
     /// @notice Spot price of $ai in USDC (6dp) on the protocol-owned pool.
     function aiSpotPrice() public view returns (uint256) {
         return poolAi == 0 ? 0 : (poolUsdc * UNIT) / poolAi;
+    }
+
+    /// @notice Top of the meme/froth band — the price above which harvest acts.
+    function frothPriceUSDC() public view returns (uint256) {
+        return (M_FROTH_BPS * floorPar) / BPS;
+    }
+
+    /// @notice Pool USDC sitting ABOVE the froth band (the harvestable premium),
+    /// i.e. how much could be skimmed to bring the pool price down to m×FV.
+    function harvestablePremiumUSDC() public view returns (uint256) {
+        if (poolAi == 0) return 0;
+        uint256 target = (poolAi * frothPriceUSDC()) / UNIT; // poolUsdc at price = m×FV
+        return poolUsdc > target ? poolUsdc - target : 0;
     }
 
     /// @notice Buyback floor price, USDC 6dp per senior token.
@@ -347,5 +365,43 @@ contract SuffixTreasury is ReentrancyGuard {
             floorPar += (ratchetUsdc * UNIT) / ss;
         }
         emit RevenueSkimmed(amt, seniorRatchetBps, floorPar);
+    }
+
+    /// @notice Harvest froth: when the pool price is above the band top (m×FV),
+    /// skim the pool's above-band USDC premium into realized revenue, bringing
+    /// the price back down to m×FV (the meme keeps the whole band BELOW that).
+    /// Permissionless + a small keeper reward, so it self-executes — and because
+    /// it only extracts a premium that already exists in the pool (no public
+    /// limit order is posted), there is nothing for an informed trader to
+    /// front-run. (A competitive batch-auction MM is a later refinement.)
+    /// The DOWNSIDE band is defended separately by arbitrage against
+    /// redeemSeniorAtFloor — harvest is the UPSIDE half.
+    function harvestFroth(uint256 maxSkim) external nonReentrant returns (uint256 skim) {
+        if (poolAi == 0 || poolUsdc == 0) revert PoolEmpty();
+        if (aiSpotPrice() <= frothPriceUSDC()) revert NotInFrothBand();
+        uint256 premium = harvestablePremiumUSDC();
+        skim = maxSkim == 0 || maxSkim > premium ? premium : maxSkim;
+        if (skim == 0) revert NotInFrothBand();
+        poolUsdc -= skim;
+        uint256 reward = (skim * KEEPER_REWARD_BPS) / BPS;
+        feesBankUsdc += skim - reward; // realized → skimmable to the floor
+        if (reward > 0) USDC.safeTransfer(msg.sender, reward);
+        emit FrothHarvested(msg.sender, skim, reward, aiSpotPrice());
+    }
+
+    /// @notice Compound banked fees back into the protocol-owned pool to DEEPEN
+    /// liquidity (more depth → more future fee revenue), instead of skimming
+    /// them to the floor. Mints matching $ai at the current price so the price
+    /// is unchanged; the minted $ai is pool-held (excluded from the claim).
+    /// Governance chooses the split between this and skimRevenueToFloor.
+    function compoundFeesToPOL(uint256 amount) external onlyOwner nonReentrant {
+        if (amount == 0 || amount > feesBankUsdc) revert ZeroAmount();
+        if (poolAi == 0 || poolUsdc == 0) revert PoolEmpty();
+        uint256 aiMint = (amount * poolAi) / poolUsdc; // keep price flat
+        feesBankUsdc -= amount;
+        poolUsdc += amount;
+        poolAi += aiMint;
+        senior.mint(address(this), aiMint);
+        emit FeesCompounded(amount, aiMint);
     }
 }
