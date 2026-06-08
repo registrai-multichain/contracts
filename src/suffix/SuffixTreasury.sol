@@ -82,6 +82,20 @@ contract SuffixTreasury is ReentrancyGuard, AccessControl {
     /// is locked under stress until the buffer recovers.
     uint256 public minCushionBps;
 
+    /// @notice Competitive Dutch-auction MM (the anti-LVR upside harvester): a
+    /// block of newly-minted senior offered at a declining price. Takers compete
+    /// on timing (earlier = dearer); proceeds above par are revenue. Auction
+    /// inventory is treasury-owned and excluded from the senior claim until sold.
+    struct Auction {
+        uint256 ai;         // senior remaining in the auction
+        uint256 startPrice; // USDC 6dp per $ai at t0
+        uint256 floorPrice; // USDC 6dp per $ai at/after end (≥ floorPar)
+        uint64 start;
+        uint64 duration;
+        bool active;
+    }
+    Auction public auction;
+
     event SeniorSeeded(address indexed to, uint256 usdcIn, uint256 minted);
     event JuniorSeeded(address indexed to, uint256 usdcIn, uint256 minted);
     event SeniorRedeemedAtFloor(address indexed from, uint256 seniorBurned, uint256 usdcOut);
@@ -94,6 +108,9 @@ contract SuffixTreasury is ReentrancyGuard, AccessControl {
     event RevenueSkimmed(uint256 fees, uint256 seniorRatchetBps, uint256 newFloorPar);
     event FrothHarvested(address indexed keeper, uint256 skimmed, uint256 keeperReward, uint256 priceAfter);
     event FeesCompounded(uint256 usdcIn, uint256 aiMinted);
+    event AuctionOpened(uint256 ai, uint256 startPrice, uint256 floorPrice, uint64 duration);
+    event AuctionTaken(address indexed taker, uint256 ai, uint256 price, uint256 cost, uint256 premium);
+    event AuctionClosed(uint256 unsoldBurned);
 
     error ZeroAmount();
     error InsufficientReserve();
@@ -103,6 +120,9 @@ contract SuffixTreasury is ReentrancyGuard, AccessControl {
     error PoolEmpty();
     error NotInFrothBand();
     error SeniorCapExceeded();
+    error AuctionActive();
+    error NoAuction();
+    error BadAuctionParams();
 
     /// @param admin gets DEFAULT_ADMIN + GOVERNOR + KEEPER. In production, grant
     /// GOVERNOR_ROLE to a TimelockController and renounce the EOA's governor/admin
@@ -118,11 +138,13 @@ contract SuffixTreasury is ReentrancyGuard, AccessControl {
 
     // ─────────────────────────── Views ───────────────────────────
 
-    /// @notice Senior held externally (not in the protocol-owned pool) — the only
-    /// senior that is a real claim on the floor. Pool senior is treasury-owned.
+    /// @notice Senior held externally (not in the protocol-owned pool, not held
+    /// as live auction inventory) — the only senior that is a real claim on the
+    /// floor. Pool + auction senior are treasury-owned.
     function externalSeniorSupply() public view returns (uint256) {
+        uint256 held = poolAi + (auction.active ? auction.ai : 0);
         uint256 ts = senior.totalSupply();
-        return ts > poolAi ? ts - poolAi : 0;
+        return ts > held ? ts - held : 0;
     }
 
     /// @notice Senior's hard claim = the HardNAV that backs the floor. Excludes
@@ -424,5 +446,71 @@ contract SuffixTreasury is ReentrancyGuard, AccessControl {
         poolAi += aiMint;
         senior.mint(address(this), aiMint);
         emit FeesCompounded(amount, aiMint);
+    }
+
+    // ───────────────── Competitive Dutch-auction MM ─────────────────
+
+    /// @notice Current Dutch-auction clearing price (USDC 6dp per $ai), linearly
+    /// declining startPrice → floorPrice over the window. 0 if none active.
+    function dutchPrice() public view returns (uint256) {
+        if (!auction.active) return 0;
+        uint256 elapsed = block.timestamp - auction.start;
+        if (elapsed >= auction.duration) return auction.floorPrice;
+        uint256 drop = ((auction.startPrice - auction.floorPrice) * elapsed) / auction.duration;
+        return auction.startPrice - drop;
+    }
+
+    /// @notice Open a Dutch auction of `aiBlock` newly-minted senior, price
+    /// declining startPrice → floorPrice over `duration`. floorPrice must be ≥
+    /// floorPar so the protocol never sells senior below the claim it creates.
+    /// GOVERNOR-gated (timelock). Inventory is excluded from the claim until sold.
+    function openDutchAuction(uint256 aiBlock, uint256 startPrice, uint256 floorPrice, uint64 duration)
+        external onlyRole(GOVERNOR_ROLE)
+    {
+        if (auction.active) revert AuctionActive();
+        if (aiBlock == 0 || duration == 0) revert BadAuctionParams();
+        if (floorPrice < floorPar || startPrice < floorPrice) revert BadAuctionParams();
+        auction = Auction({
+            ai: aiBlock, startPrice: startPrice, floorPrice: floorPrice,
+            start: uint64(block.timestamp), duration: duration, active: true
+        });
+        senior.mint(address(this), aiBlock); // held as auction inventory (excluded from claim)
+        emit AuctionOpened(aiBlock, startPrice, floorPrice, duration);
+    }
+
+    /// @notice Take up to `aiWant` from the live auction at the current price
+    /// (revert if it exceeds `maxPrice` — slippage). The par-value portion backs
+    /// the new senior claim; the premium above par is realized revenue. Competes
+    /// purely on timing (earlier = dearer), so there is no front-running edge.
+    function takeDutch(uint256 aiWant, uint256 maxPrice) external nonReentrant returns (uint256 aiOut) {
+        if (!auction.active) revert NoAuction();
+        uint256 price = dutchPrice();
+        if (price > maxPrice) revert SlippageExceeded();
+        aiOut = aiWant > auction.ai ? auction.ai : aiWant;
+        if (aiOut == 0) revert ZeroAmount();
+        if (seniorCap != 0 && externalSeniorSupply() + aiOut > seniorCap) revert SeniorCapExceeded();
+
+        uint256 cost = (aiOut * price) / UNIT;
+        uint256 parPortion = (aiOut * floorPar) / UNIT;
+        uint256 premium = cost > parPortion ? cost - parPortion : 0;
+
+        auction.ai -= aiOut;
+        if (auction.ai == 0) auction.active = false;
+        totalUSDC += parPortion;       // backs the newly-external senior claim
+        feesBankUsdc += premium;       // above-par proceeds → realized revenue
+
+        USDC.safeTransferFrom(msg.sender, address(this), cost);
+        senior.transfer(msg.sender, aiOut); // inventory → taker (now external)
+        emit AuctionTaken(msg.sender, aiOut, price, cost, premium);
+    }
+
+    /// @notice Close the auction and burn any unsold inventory. GOVERNOR-gated.
+    function closeDutchAuction() external onlyRole(GOVERNOR_ROLE) {
+        if (!auction.active) revert NoAuction();
+        uint256 unsold = auction.ai;
+        auction.active = false;
+        auction.ai = 0;
+        if (unsold > 0) senior.burn(address(this), unsold);
+        emit AuctionClosed(unsold);
     }
 }
