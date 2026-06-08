@@ -36,6 +36,7 @@ contract SuffixTreasury is ReentrancyGuard {
     uint256 public constant K_FLOOR_BPS = 9_000; // floor = 0.9 × par
     uint256 public constant PAR0 = 1e6;          // 1.00 USDC, 6dp
     uint256 public constant UNIT = 1e6;          // 6dp scaling for token math
+    uint256 public constant SWAP_FEE_BPS = 30;   // 0.30% protocol-owned-liquidity fee → revenue
 
     IERC20 public immutable USDC;
     SuffixSenior public immutable senior;
@@ -47,6 +48,19 @@ contract SuffixTreasury is ReentrancyGuard {
     /// @notice Hard backing per senior token, USDC 6dp. Starts at par; ratchets
     /// up from realized revenue only.
     uint256 public floorPar = PAR0;
+    // ── Protocol-owned AMM ("the suffix pool"): a 100%-POL constant-product
+    // $ai/USDC market embedded in the treasury. Public trades pay SWAP_FEE_BPS,
+    // which banks as REALIZED revenue (feesBankUsdc) and is skimmed into the
+    // floor ratchet. Pool-held senior (poolAi) is treasury-owned and EXCLUDED
+    // from the senior claim. The pool price is kept near the floor by
+    // arbitrage against redeemSeniorAtFloor (buy cheap from pool → redeem at
+    // floor), so no deterministic, front-runnable keeper order is needed to
+    // defend it. (Froth-harvest / keeper-auction MM is a later slice.)
+    uint256 public poolAi;
+    uint256 public poolUsdc;
+    /// @notice Realized swap fees awaiting skim into the floor (USDC 6dp).
+    uint256 public feesBankUsdc;
+
     /// @notice Minimum junior cushion (bps of senior claim) that redeemJunior
     /// may not strip below — stops a voluntary buffer-strip that would leave the
     /// senior protected only by the k-gap (review FIX-2). Owner-set at launch
@@ -61,12 +75,18 @@ contract SuffixTreasury is ReentrancyGuard {
     event JuniorRedeemed(address indexed from, uint256 juniorBurned, uint256 usdcOut);
     event RevenueRecorded(uint256 usdcIn, uint256 seniorRatchetBps, uint256 newFloorPar);
     event LossApplied(uint256 usdcOut, uint256 juniorEquityAfter, bool seniorSolvent);
+    event PolProvisioned(uint256 usdcIn, uint256 aiMinted, uint256 spotPrice);
+    event AiBought(address indexed buyer, uint256 usdcIn, uint256 aiOut, uint256 fee);
+    event AiSold(address indexed seller, uint256 aiIn, uint256 usdcOut, uint256 fee);
+    event RevenueSkimmed(uint256 fees, uint256 seniorRatchetBps, uint256 newFloorPar);
 
     error ZeroAmount();
     error NotOwner();
     error InsufficientReserve();
     error OrphanedResidual();
     error BufferLocked();
+    error SlippageExceeded();
+    error PoolEmpty();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -82,9 +102,22 @@ contract SuffixTreasury is ReentrancyGuard {
 
     // ─────────────────────────── Views ───────────────────────────
 
-    /// @notice Senior's hard claim = the HardNAV that backs the floor.
+    /// @notice Senior held externally (not in the protocol-owned pool) — the only
+    /// senior that is a real claim on the floor. Pool senior is treasury-owned.
+    function externalSeniorSupply() public view returns (uint256) {
+        uint256 ts = senior.totalSupply();
+        return ts > poolAi ? ts - poolAi : 0;
+    }
+
+    /// @notice Senior's hard claim = the HardNAV that backs the floor. Excludes
+    /// pool-held (treasury-owned) senior, which is not a liability to itself.
     function seniorClaimUSDC() public view returns (uint256) {
-        return (senior.totalSupply() * floorPar) / UNIT;
+        return (externalSeniorSupply() * floorPar) / UNIT;
+    }
+
+    /// @notice Spot price of $ai in USDC (6dp) on the protocol-owned pool.
+    function aiSpotPrice() public view returns (uint256) {
+        return poolAi == 0 ? 0 : (poolUsdc * UNIT) / poolAi;
     }
 
     /// @notice Buyback floor price, USDC 6dp per senior token.
@@ -158,7 +191,7 @@ contract SuffixTreasury is ReentrancyGuard {
     function sweepResidualToFloor() external nonReentrant {
         if (junior.totalSupply() != 0) revert OrphanedResidual();
         uint256 resid = juniorEquityUSDC();
-        uint256 ss = senior.totalSupply();
+        uint256 ss = externalSeniorSupply();
         if (resid == 0 || ss == 0) revert ZeroAmount();
         floorPar += (resid * UNIT) / ss;
         emit RevenueRecorded(0, BPS, floorPar);
@@ -225,7 +258,7 @@ contract SuffixTreasury is ReentrancyGuard {
         if (seniorRatchetBps > BPS) revert ZeroAmount();
         totalUSDC += usdcAmount;
         USDC.safeTransferFrom(msg.sender, address(this), usdcAmount);
-        uint256 ss = senior.totalSupply();
+        uint256 ss = externalSeniorSupply();
         if (ss > 0 && seniorRatchetBps > 0) {
             uint256 ratchetUsdc = (usdcAmount * seniorRatchetBps) / BPS;
             floorPar += (ratchetUsdc * UNIT) / ss;
@@ -243,5 +276,76 @@ contract SuffixTreasury is ReentrancyGuard {
         totalUSDC -= out;
         USDC.safeTransfer(owner, out);
         emit LossApplied(out, juniorEquityUSDC(), seniorSolvent());
+    }
+
+    // ───────────────── Protocol-owned AMM (revenue engine) ─────────────────
+
+    /// @notice Seed/extend the protocol-owned $ai/USDC pool. Mints `aiMint`
+    /// senior INTO the pool (treasury-owned ⇒ excluded from the senior claim)
+    /// and pairs it with `usdcAmount`. Sets/moves the spot price. POL is held by
+    /// the protocol from day one — no mercenary LPs. Kept separate from the
+    /// floor reserve (totalUSDC): POL is a revenue source, not floor backing.
+    function provisionPOL(uint256 usdcAmount, uint256 aiMint) external onlyOwner nonReentrant {
+        if (usdcAmount == 0 || aiMint == 0) revert ZeroAmount();
+        poolAi += aiMint;
+        poolUsdc += usdcAmount;
+        USDC.safeTransferFrom(msg.sender, address(this), usdcAmount);
+        senior.mint(address(this), aiMint); // pool-held; excluded from claim
+        emit PolProvisioned(usdcAmount, aiMint, aiSpotPrice());
+    }
+
+    /// @notice Buy $ai from the pool. Pays SWAP_FEE_BPS, which banks as realized
+    /// revenue (feesBankUsdc). The $ai leaves the pool to the buyer and becomes
+    /// an external claim. Constant-product on the post-fee input.
+    function buyAi(uint256 usdcIn, uint256 minAiOut) external nonReentrant returns (uint256 aiOut) {
+        if (usdcIn == 0) revert ZeroAmount();
+        if (poolAi == 0 || poolUsdc == 0) revert PoolEmpty();
+        uint256 fee = (usdcIn * SWAP_FEE_BPS) / BPS;
+        uint256 net = usdcIn - fee;
+        aiOut = (poolAi * net) / (poolUsdc + net);
+        if (aiOut < minAiOut || aiOut == 0 || aiOut >= poolAi) revert SlippageExceeded();
+        poolUsdc += net;
+        poolAi -= aiOut;
+        feesBankUsdc += fee;
+        USDC.safeTransferFrom(msg.sender, address(this), usdcIn);
+        senior.transfer(msg.sender, aiOut); // treasury(pool) → buyer
+        emit AiBought(msg.sender, usdcIn, aiOut, fee);
+    }
+
+    /// @notice Sell $ai to the pool. Fee taken from the USDC out and banked as
+    /// revenue. The $ai returns to the pool (claim drops). Seller must approve
+    /// the treasury for `aiIn` first.
+    function sellAi(uint256 aiIn, uint256 minUsdcOut) external nonReentrant returns (uint256 usdcOut) {
+        if (aiIn == 0) revert ZeroAmount();
+        if (poolAi == 0 || poolUsdc == 0) revert PoolEmpty();
+        uint256 usdcGross = (poolUsdc * aiIn) / (poolAi + aiIn);
+        if (usdcGross >= poolUsdc) revert SlippageExceeded();
+        uint256 fee = (usdcGross * SWAP_FEE_BPS) / BPS;
+        usdcOut = usdcGross - fee;
+        if (usdcOut < minUsdcOut || usdcOut == 0) revert SlippageExceeded();
+        poolAi += aiIn;
+        poolUsdc -= usdcGross;
+        feesBankUsdc += fee;
+        senior.transferFrom(msg.sender, address(this), aiIn); // buyer → treasury(pool)
+        USDC.safeTransfer(msg.sender, usdcOut);
+        emit AiSold(msg.sender, aiIn, usdcOut, fee);
+    }
+
+    /// @notice Move banked swap fees into the floor reserve and ratchet the
+    /// senior floor up by `seniorRatchetBps` of them (the rest grows junior
+    /// equity). This is the revenue→floor transmission: degen churn → fees →
+    /// a higher floor. Permissionless (it only adds value); keeper-callable.
+    function skimRevenueToFloor(uint256 seniorRatchetBps) external nonReentrant {
+        if (seniorRatchetBps > BPS) revert ZeroAmount();
+        uint256 amt = feesBankUsdc;
+        if (amt == 0) revert ZeroAmount();
+        feesBankUsdc = 0;
+        totalUSDC += amt; // fees were already in the contract; reclassify to reserve
+        uint256 ss = externalSeniorSupply();
+        if (ss > 0 && seniorRatchetBps > 0) {
+            uint256 ratchetUsdc = (amt * seniorRatchetBps) / BPS;
+            floorPar += (ratchetUsdc * UNIT) / ss;
+        }
+        emit RevenueSkimmed(amt, seniorRatchetBps, floorPar);
     }
 }
