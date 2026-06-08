@@ -37,7 +37,10 @@
     "AttestedBTCOracle": "0x83f3e3d6e9cc18579de577d92df1e23cc27057a1",
     "cirBTC": "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF",
     "MarketsV3": "0xDDC085320D5A739cB5726f01E9c4b5d058fFfB00",
-    "CirqueBetLending": "0x8168bdD7990abc42b92b59DE6d411e9C66bB93C1"
+    "CirqueBetLending": "0x8168bdD7990abc42b92b59DE6d411e9C66bB93C1",
+    "SuffixTreasury": "0x736430fc2Cbe77941a121c83Ac02328162C03a93",
+    "SuffixSenior_ai": "0xf6571cC2C67B681ED41a2eC04ecb3C3CC3B81F15",
+    "SuffixJunior_aiLP": "0xc337188cA1a43d11FcFf381aAefb1558563cAA79"
   },
   "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
   "feeds": [

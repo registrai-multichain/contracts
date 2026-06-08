@@ -22,30 +22,35 @@ contract DeploySuffix is Script {
         uint256 minCushionBps = vm.envOr("MIN_CUSHION_BPS", uint256(0));
         require(usdc != address(0), "USDC not configured");
 
+        // HANDOFF=true (default, production): renounce EOA powers to a timelock.
+        // HANDOFF=false (testnet): deployer keeps roles to seed + manage.
+        bool handoff = vm.envOr("HANDOFF", true);
+
         vm.startBroadcast();
 
-        // 1. Treasury — deployer is initial admin (does setup, then hands off).
+        // 1. Treasury — deployer is initial admin.
         treasury = new SuffixTreasury(IERC20(usdc), msg.sender);
 
-        // 2. Timelock — proposer/executor = deployer for now (move to a DAO/
-        //    multisig later); no extra admin (self-administered).
-        address[] memory props = new address[](1);
-        props[0] = msg.sender;
-        address[] memory execs = new address[](1);
-        execs[0] = msg.sender;
-        timelock = new TimelockController(delay, props, execs, address(0));
-
-        // 3. Initial parameter setup while the deployer still holds GOVERNOR.
+        // 2. Initial parameter setup while the deployer still holds GOVERNOR.
         if (seniorCap > 0) treasury.setSeniorCap(seniorCap);
         if (minCushionBps > 0) treasury.setMinCushion(minCushionBps);
-
-        // 4. Hand governance to the timelock; keeper key gets KEEPER_ROLE;
-        //    deployer renounces its EOA governor + admin powers.
-        treasury.grantRole(treasury.GOVERNOR_ROLE(), address(timelock));
-        treasury.grantRole(treasury.DEFAULT_ADMIN_ROLE(), address(timelock));
         if (keeper != msg.sender) treasury.grantRole(treasury.KEEPER_ROLE(), keeper);
-        treasury.renounceRole(treasury.GOVERNOR_ROLE(), msg.sender);
-        treasury.renounceRole(treasury.DEFAULT_ADMIN_ROLE(), msg.sender);
+
+        if (handoff) {
+            // 3. Timelock — proposer/executor = deployer for now (move to a DAO/
+            //    multisig later); no extra admin (self-administered).
+            address[] memory props = new address[](1);
+            props[0] = msg.sender;
+            address[] memory execs = new address[](1);
+            execs[0] = msg.sender;
+            timelock = new TimelockController(delay, props, execs, address(0));
+
+            // 4. Hand governance to the timelock; deployer renounces EOA powers.
+            treasury.grantRole(treasury.GOVERNOR_ROLE(), address(timelock));
+            treasury.grantRole(treasury.DEFAULT_ADMIN_ROLE(), address(timelock));
+            treasury.renounceRole(treasury.GOVERNOR_ROLE(), msg.sender);
+            treasury.renounceRole(treasury.DEFAULT_ADMIN_ROLE(), msg.sender);
+        }
 
         vm.stopBroadcast();
 
