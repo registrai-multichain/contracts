@@ -47,6 +47,13 @@ contract SuffixTreasury is ReentrancyGuard {
     /// @notice Hard backing per senior token, USDC 6dp. Starts at par; ratchets
     /// up from realized revenue only.
     uint256 public floorPar = PAR0;
+    /// @notice Minimum junior cushion (bps of senior claim) that redeemJunior
+    /// may not strip below — stops a voluntary buffer-strip that would leave the
+    /// senior protected only by the k-gap (review FIX-2). Owner-set at launch
+    /// (0 = off, MVP default). Does not block redemptions when the cushion is
+    /// already below it from losses being reduced further is prevented; junior
+    /// is locked under stress until the buffer recovers.
+    uint256 public minCushionBps;
 
     event SeniorSeeded(address indexed to, uint256 usdcIn, uint256 minted);
     event JuniorSeeded(address indexed to, uint256 usdcIn, uint256 minted);
@@ -58,6 +65,8 @@ contract SuffixTreasury is ReentrancyGuard {
     error ZeroAmount();
     error NotOwner();
     error InsufficientReserve();
+    error OrphanedResidual();
+    error BufferLocked();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -125,14 +134,34 @@ contract SuffixTreasury is ReentrancyGuard {
     }
 
     /// @notice Buy junior at current junior NAV/token (the residual-equity price).
+    /// @dev FIX-1 (review CRITICAL): when junior supply is 0, juniorNAVPerToken()
+    /// reports PAR0 even if residual equity is positive (the k-gap left by senior
+    /// sell-at-floor, or the non-ratcheted slice of recordRevenue). Seeding then
+    /// would let the first buyer capture that orphaned residual for ~free. Refuse
+    /// until the residual is swept to the floor (sweepResidualToFloor). Invariant:
+    /// junior supply transitioning to 0 must leave juniorEquityUSDC() == 0.
     function seedJunior(uint256 usdcAmount) external nonReentrant returns (uint256 minted) {
         if (usdcAmount == 0) revert ZeroAmount();
+        if (junior.totalSupply() == 0 && juniorEquityUSDC() > 0) revert OrphanedResidual();
         minted = (usdcAmount * UNIT) / juniorNAVPerToken();
         if (minted == 0) revert ZeroAmount();
         totalUSDC += usdcAmount;
         USDC.safeTransferFrom(msg.sender, address(this), usdcAmount);
         junior.mint(msg.sender, minted);
         emit JuniorSeeded(msg.sender, usdcAmount, minted);
+    }
+
+    /// @notice Sweep ownerless residual equity (junior supply == 0) into the
+    /// senior floor — the k-gap surplus strengthens the floor rather than being
+    /// captured by the next junior buyer. Permissionless (it only benefits the
+    /// senior / the system; no griefing surface). Clears the FIX-1 block.
+    function sweepResidualToFloor() external nonReentrant {
+        if (junior.totalSupply() != 0) revert OrphanedResidual();
+        uint256 resid = juniorEquityUSDC();
+        uint256 ss = senior.totalSupply();
+        if (resid == 0 || ss == 0) revert ZeroAmount();
+        floorPar += (resid * UNIT) / ss;
+        emit RevenueRecorded(0, BPS, floorPar);
     }
 
     // ─────────────────────────── Redemptions ───────────────────────
@@ -152,14 +181,37 @@ contract SuffixTreasury is ReentrancyGuard {
 
     /// @notice Redeem junior for its residual NAV (can be below what was paid in
     /// — that is the first-loss risk junior holders took).
+    /// @dev FIX-2 (review HIGH): a withdrawal may not strip the junior cushion
+    /// below `minCushionBps` of the senior claim. Without this, all junior could
+    /// exit in good times and leave the senior protected only by the k-gap — the
+    /// first-loss buffer the design rests on would be freely withdrawable. The
+    /// guard makes the buffer sticky: junior is locked while the cushion is at /
+    /// below the floor (i.e. exactly under the stress when it must protect
+    /// senior). minCushionBps = 0 (MVP default) ⇒ no restriction.
     function redeemJunior(uint256 juniorAmount) external nonReentrant returns (uint256 usdcOut) {
         if (juniorAmount == 0) revert ZeroAmount();
         usdcOut = (juniorAmount * juniorNAVPerToken()) / UNIT;
         if (usdcOut > totalUSDC) revert InsufficientReserve();
+        if (minCushionBps > 0) {
+            uint256 claim = seniorClaimUSDC();
+            if (claim > 0) {
+                uint256 newTotal = totalUSDC - usdcOut;
+                uint256 newEquity = newTotal > claim ? newTotal - claim : 0;
+                if ((newEquity * BPS) / claim < minCushionBps) revert BufferLocked();
+            }
+        }
         totalUSDC -= usdcOut;
         junior.burn(msg.sender, juniorAmount);
         if (usdcOut > 0) USDC.safeTransfer(msg.sender, usdcOut);
         emit JuniorRedeemed(msg.sender, juniorAmount, usdcOut);
+    }
+
+    /// @notice Set the minimum junior cushion (bps of senior claim) that
+    /// redeemJunior may not strip below. Launch sets this > 0 to lock the
+    /// protocol-owned first-loss buffer (review FIX-2).
+    function setMinCushion(uint256 bps) external onlyOwner {
+        if (bps > BPS) revert ZeroAmount();
+        minCushionBps = bps;
     }
 
     // ─────────────────── Realized revenue / loss (keeper) ───────────

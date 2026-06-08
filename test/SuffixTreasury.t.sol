@@ -143,6 +143,67 @@ contract SuffixTreasuryTest is Test {
         junior.mint(dora, 1e6);
     }
 
+    // ── FIX-1 (review CRITICAL): orphaned residual at junior-supply-0 cannot be
+    //    captured by the next junior buyer; it must be swept to the floor first ──
+    function test_fix1_orphanedResidualBlockedThenSwept() public {
+        _seedSenior(alice, 1_000e6);
+        _seedJunior(dora, 500e6);
+        vm.prank(dora);
+        t.redeemJunior(500e6);                       // junior supply → 0, equity 0
+        assertEq(junior.totalSupply(), 0);
+        assertEq(t.juniorEquityUSDC(), 0);
+
+        // Book revenue to the junior side while no junior exists → orphaned residual.
+        usdc.approve(address(t), 100e6);
+        t.recordRevenue(100e6, 0);                   // 0 bps to senior → all residual
+        assertEq(t.juniorEquityUSDC(), 100e6);       // ownerless surplus
+
+        // A new junior buyer CANNOT seed in and capture it.
+        vm.startPrank(dora);
+        usdc.approve(address(t), 1_000e6);
+        vm.expectRevert(SuffixTreasury.OrphanedResidual.selector);
+        t.seedJunior(1_000e6);
+        vm.stopPrank();
+
+        // Sweep routes the orphaned residual into the senior floor.
+        uint256 parBefore = t.floorPar();
+        t.sweepResidualToFloor();
+        assertEq(t.juniorEquityUSDC(), 0);
+        assertGt(t.floorPar(), parBefore);
+
+        // Now seeding works again, at par — no free residual to capture.
+        _seedJunior(dora, 1_000e6);
+        assertApproxEqAbs(t.juniorNAVPerToken(), 1e6, 2);
+    }
+
+    // ── FIX-2 (review HIGH): the first-loss buffer can't be voluntarily stripped
+    //    below minCushionBps ──
+    function test_fix2_bufferStripBlocked() public {
+        _seedSenior(alice, 1_000e6);
+        _seedJunior(dora, 500e6);     // cushion 5000 bps
+        t.setMinCushion(2_500);       // lock 25% of senior claim as buffer
+
+        // Full strip would drop cushion to 0 → blocked.
+        vm.startPrank(dora);
+        vm.expectRevert(SuffixTreasury.BufferLocked.selector);
+        t.redeemJunior(500e6);
+        vm.stopPrank();
+
+        // Partial down to exactly the floor is allowed; one wei more is not.
+        vm.prank(dora);
+        t.redeemJunior(250e6);
+        assertEq(t.cushionBps(), 2_500);
+        vm.prank(dora);
+        vm.expectRevert(SuffixTreasury.BufferLocked.selector);
+        t.redeemJunior(1e6);
+    }
+
+    function test_setMinCushion_onlyOwner() public {
+        vm.prank(alice);
+        vm.expectRevert(SuffixTreasury.NotOwner.selector);
+        t.setMinCushion(2_500);
+    }
+
     // ── internal accounting tracks balance (donation-proof) ──
     function test_totalUSDCMatchesBalance() public {
         _seedSenior(alice, 1_000e6);
