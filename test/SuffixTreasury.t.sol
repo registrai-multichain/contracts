@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {SuffixTreasury} from "../src/suffix/SuffixTreasury.sol";
 import {SuffixSenior} from "../src/suffix/SuffixSenior.sol";
 import {SuffixJunior} from "../src/suffix/SuffixJunior.sol";
@@ -198,10 +199,32 @@ contract SuffixTreasuryTest is Test {
         t.redeemJunior(1e6);
     }
 
-    function test_setMinCushion_onlyOwner() public {
-        vm.prank(alice);
-        vm.expectRevert(SuffixTreasury.NotOwner.selector);
+    function test_setMinCushion_onlyGovernor() public {
+        bytes32 gov = t.GOVERNOR_ROLE(); // read before the prank (it's a call too)
+        vm.prank(alice); // alice has no role
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector,
+                alice,
+                gov
+            )
+        );
         t.setMinCushion(2_500);
+    }
+
+    // ── SENIOR_CAP: bounded senior float (hybrid supply model) ──
+    function test_seniorCapEnforced() public {
+        t.setSeniorCap(1_000e6); // governor (this) sets cap
+        _seedSenior(alice, 800e6); // ok, external 800
+        // next seed would push external senior past 1000 → revert
+        vm.startPrank(alice);
+        usdc.approve(address(t), 300e6);
+        vm.expectRevert(SuffixTreasury.SeniorCapExceeded.selector);
+        t.seedSenior(300e6);
+        vm.stopPrank();
+        // exactly to the cap is allowed
+        _seedSenior(alice, 200e6);
+        assertEq(t.externalSeniorSupply(), 1_000e6);
     }
 
     // ── internal accounting tracks balance (donation-proof) ──

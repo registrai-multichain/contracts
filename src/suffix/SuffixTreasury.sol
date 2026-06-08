@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {SuffixSenior} from "./SuffixSenior.sol";
 import {SuffixJunior} from "./SuffixJunior.sol";
 
@@ -29,8 +30,15 @@ import {SuffixJunior} from "./SuffixJunior.sol";
 /// The floor RATCHETS only from REALIZED revenue (recordRevenue) — never from
 /// unrealized marks. Domains, the `.ai` index, and the AMM band-MM/keeper are
 /// later slices; this contract is the floor/tranche core, fully simulatable.
-contract SuffixTreasury is ReentrancyGuard {
+contract SuffixTreasury is ReentrancyGuard, AccessControl {
     using SafeERC20 for IERC20;
+
+    /// @notice Param-setting / sensitive ops. In production this role is held by
+    /// a TimelockController (delayed, governed) — NOT an EOA.
+    bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
+    /// @notice Operational ops (booking revenue, compounding). Can be a hot
+    /// keeper key; cannot change risk parameters.
+    bytes32 public constant KEEPER_ROLE = keccak256("KEEPER_ROLE");
 
     uint256 public constant BPS = 10_000;
     uint256 public constant K_FLOOR_BPS = 9_000; // floor = 0.9 × par
@@ -43,13 +51,16 @@ contract SuffixTreasury is ReentrancyGuard {
     IERC20 public immutable USDC;
     SuffixSenior public immutable senior;
     SuffixJunior public immutable junior;
-    address public immutable owner; // keeper/governance in MVP (revenue/loss admin)
 
     /// @notice Internal USDC accounting (donation-proof; never reads balanceOf).
     uint256 public totalUSDC;
     /// @notice Hard backing per senior token, USDC 6dp. Starts at par; ratchets
     /// up from realized revenue only.
     uint256 public floorPar = PAR0;
+    /// @notice Max EXTERNAL senior supply (the bounded launch float of the
+    /// hybrid supply model). 0 = uncapped. seedSenior reverts past it. The
+    /// elastic leg is junior; senior is governed/bounded. GOVERNOR-set.
+    uint256 public seniorCap;
     // ── Protocol-owned AMM ("the suffix pool"): a 100%-POL constant-product
     // $ai/USDC market embedded in the treasury. Public trades pay SWAP_FEE_BPS,
     // which banks as REALIZED revenue (feesBankUsdc) and is skimmed into the
@@ -85,24 +96,24 @@ contract SuffixTreasury is ReentrancyGuard {
     event FeesCompounded(uint256 usdcIn, uint256 aiMinted);
 
     error ZeroAmount();
-    error NotOwner();
     error InsufficientReserve();
     error OrphanedResidual();
     error BufferLocked();
     error SlippageExceeded();
     error PoolEmpty();
     error NotInFrothBand();
+    error SeniorCapExceeded();
 
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
-        _;
-    }
-
-    constructor(IERC20 usdc_, address owner_) {
+    /// @param admin gets DEFAULT_ADMIN + GOVERNOR + KEEPER. In production, grant
+    /// GOVERNOR_ROLE to a TimelockController and renounce the EOA's governor/admin
+    /// roles (see DeploySuffix). KEEPER may stay a hot key.
+    constructor(IERC20 usdc_, address admin) {
         USDC = usdc_;
-        owner = owner_;
         senior = new SuffixSenior(address(this));
         junior = new SuffixJunior(address(this));
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(GOVERNOR_ROLE, admin);
+        _grantRole(KEEPER_ROLE, admin);
     }
 
     // ─────────────────────────── Views ───────────────────────────
@@ -178,10 +189,20 @@ contract SuffixTreasury is ReentrancyGuard {
         if (usdcAmount == 0) revert ZeroAmount();
         minted = (usdcAmount * UNIT) / floorPar;
         if (minted == 0) revert ZeroAmount();
+        // Bounded senior float (hybrid supply model): external senior may not
+        // exceed seniorCap. 0 = uncapped. Pool-held senior is excluded.
+        if (seniorCap != 0 && externalSeniorSupply() + minted > seniorCap) {
+            revert SeniorCapExceeded();
+        }
         totalUSDC += usdcAmount;
         USDC.safeTransferFrom(msg.sender, address(this), usdcAmount);
         senior.mint(msg.sender, minted);
         emit SeniorSeeded(msg.sender, usdcAmount, minted);
+    }
+
+    /// @notice Set the bounded senior float cap (GOVERNOR / timelock). 0 = off.
+    function setSeniorCap(uint256 cap) external onlyRole(GOVERNOR_ROLE) {
+        seniorCap = cap;
     }
 
     /// @notice Buy junior at current junior NAV/token (the residual-equity price).
@@ -260,7 +281,7 @@ contract SuffixTreasury is ReentrancyGuard {
     /// @notice Set the minimum junior cushion (bps of senior claim) that
     /// redeemJunior may not strip below. Launch sets this > 0 to lock the
     /// protocol-owned first-loss buffer (review FIX-2).
-    function setMinCushion(uint256 bps) external onlyOwner {
+    function setMinCushion(uint256 bps) external onlyRole(GOVERNOR_ROLE) {
         if (bps > BPS) revert ZeroAmount();
         minCushionBps = bps;
     }
@@ -271,7 +292,7 @@ contract SuffixTreasury is ReentrancyGuard {
     /// domain gains). `seniorRatchetBps` of it ratchets the senior floor up
     /// (floorPar); the rest accrues to junior equity. Unrealized marks NEVER
     /// enter here.
-    function recordRevenue(uint256 usdcAmount, uint256 seniorRatchetBps) external onlyOwner nonReentrant {
+    function recordRevenue(uint256 usdcAmount, uint256 seniorRatchetBps) external onlyRole(KEEPER_ROLE) nonReentrant {
         if (usdcAmount == 0) revert ZeroAmount();
         if (seniorRatchetBps > BPS) revert ZeroAmount();
         totalUSDC += usdcAmount;
@@ -288,11 +309,11 @@ contract SuffixTreasury is ReentrancyGuard {
     /// value leaving the treasury; junior equity absorbs it first by
     /// construction. MVP/simulation surface (in production, losses arise from
     /// the asset side, not an admin call).
-    function applyLoss(uint256 usdcAmount) external onlyOwner nonReentrant {
+    function applyLoss(uint256 usdcAmount) external onlyRole(GOVERNOR_ROLE) nonReentrant {
         if (usdcAmount == 0) revert ZeroAmount();
         uint256 out = usdcAmount > totalUSDC ? totalUSDC : usdcAmount;
         totalUSDC -= out;
-        USDC.safeTransfer(owner, out);
+        USDC.safeTransfer(msg.sender, out);
         emit LossApplied(out, juniorEquityUSDC(), seniorSolvent());
     }
 
@@ -303,7 +324,7 @@ contract SuffixTreasury is ReentrancyGuard {
     /// and pairs it with `usdcAmount`. Sets/moves the spot price. POL is held by
     /// the protocol from day one — no mercenary LPs. Kept separate from the
     /// floor reserve (totalUSDC): POL is a revenue source, not floor backing.
-    function provisionPOL(uint256 usdcAmount, uint256 aiMint) external onlyOwner nonReentrant {
+    function provisionPOL(uint256 usdcAmount, uint256 aiMint) external onlyRole(GOVERNOR_ROLE) nonReentrant {
         if (usdcAmount == 0 || aiMint == 0) revert ZeroAmount();
         poolAi += aiMint;
         poolUsdc += usdcAmount;
@@ -394,7 +415,7 @@ contract SuffixTreasury is ReentrancyGuard {
     /// them to the floor. Mints matching $ai at the current price so the price
     /// is unchanged; the minted $ai is pool-held (excluded from the claim).
     /// Governance chooses the split between this and skimRevenueToFloor.
-    function compoundFeesToPOL(uint256 amount) external onlyOwner nonReentrant {
+    function compoundFeesToPOL(uint256 amount) external onlyRole(KEEPER_ROLE) nonReentrant {
         if (amount == 0 || amount > feesBankUsdc) revert ZeroAmount();
         if (poolAi == 0 || poolUsdc == 0) revert PoolEmpty();
         uint256 aiMint = (amount * poolAi) / poolUsdc; // keep price flat
