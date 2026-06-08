@@ -20,7 +20,9 @@ contract SuffixSenior is ERC20 {
         _;
     }
 
-    constructor(address treasury_) ERC20("Suffix AI (senior)", "ai") {
+    constructor(address treasury_, string memory name_, string memory symbol_)
+        ERC20(name_, symbol_)
+    {
         treasury = treasury_;
     }
 

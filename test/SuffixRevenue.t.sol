@@ -19,7 +19,7 @@ contract SuffixRevenueTest is Test {
 
     function setUp() public {
         usdc = new MockUSDC();
-        t = new SuffixTreasury(usdc, owner);
+        t = new SuffixTreasury(usdc, owner, "Suffix AI", "ai");
         senior = t.senior();
         usdc.mint(alice, 1_000_000e6);
         usdc.mint(bob, 1_000_000e6);

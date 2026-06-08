@@ -127,10 +127,13 @@ contract SuffixTreasury is ReentrancyGuard, AccessControl {
     /// @param admin gets DEFAULT_ADMIN + GOVERNOR + KEEPER. In production, grant
     /// GOVERNOR_ROLE to a TimelockController and renounce the EOA's governor/admin
     /// roles (see DeploySuffix). KEEPER may stay a hot key.
-    constructor(IERC20 usdc_, address admin) {
+    /// @param name_ human name of the suffix, e.g. "Suffix AI".
+    /// @param symbol_ senior ticker, e.g. "ai" (junior becomes "<symbol>LP").
+    ///        Each suffix ($ai, $xyz, $fun, …) is its own deployment.
+    constructor(IERC20 usdc_, address admin, string memory name_, string memory symbol_) {
         USDC = usdc_;
-        senior = new SuffixSenior(address(this));
-        junior = new SuffixJunior(address(this));
+        senior = new SuffixSenior(address(this), string.concat(name_, " (senior)"), symbol_);
+        junior = new SuffixJunior(address(this), string.concat(name_, " (junior)"), string.concat(symbol_, "LP"));
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(GOVERNOR_ROLE, admin);
         _grantRole(KEEPER_ROLE, admin);

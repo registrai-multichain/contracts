@@ -20,6 +20,8 @@ contract DeploySuffix is Script {
         uint256 delay = vm.envOr("TIMELOCK_DELAY", uint256(2 days));
         uint256 seniorCap = vm.envOr("SENIOR_CAP", uint256(0));
         uint256 minCushionBps = vm.envOr("MIN_CUSHION_BPS", uint256(0));
+        string memory name_ = vm.envOr("SUFFIX_NAME", string("Suffix AI"));
+        string memory symbol_ = vm.envOr("SUFFIX_SYMBOL", string("ai"));
         require(usdc != address(0), "USDC not configured");
 
         // HANDOFF=true (default, production): renounce EOA powers to a timelock.
@@ -29,7 +31,7 @@ contract DeploySuffix is Script {
         vm.startBroadcast();
 
         // 1. Treasury — deployer is initial admin.
-        treasury = new SuffixTreasury(IERC20(usdc), msg.sender);
+        treasury = new SuffixTreasury(IERC20(usdc), msg.sender, name_, symbol_);
 
         // 2. Initial parameter setup while the deployer still holds GOVERNOR.
         if (seniorCap > 0) treasury.setSeniorCap(seniorCap);

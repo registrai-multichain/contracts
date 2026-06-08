@@ -19,7 +19,7 @@ contract SuffixGovernanceTest is Test {
 
     function setUp() public {
         usdc = new MockUSDC();
-        t = new SuffixTreasury(usdc, address(this)); // deployer = initial admin
+        t = new SuffixTreasury(usdc, address(this), "Suffix AI", "ai"); // deployer = initial admin
 
         address[] memory props = new address[](1);
         props[0] = address(this);

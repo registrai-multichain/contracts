@@ -20,7 +20,7 @@ contract SuffixTreasuryTest is Test {
 
     function setUp() public {
         usdc = new MockUSDC();
-        t = new SuffixTreasury(usdc, owner);
+        t = new SuffixTreasury(usdc, owner, "Suffix AI", "ai");
         senior = t.senior();
         junior = t.junior();
         usdc.mint(alice, 1_000_000e6);
@@ -134,6 +134,21 @@ contract SuffixTreasuryTest is Test {
         vm.prank(dora);
         uint256 out = t.redeemJunior(jr);
         assertEq(out, 700e6);                  // paid 500, got 700 (+40%)
+    }
+
+    // ── tokens carry the deploy-time name/symbol (multi-suffix ready) ──
+    function test_tokenNamingPerSuffix() public {
+        assertEq(senior.symbol(), "ai");
+        assertEq(junior.symbol(), "aiLP");
+        assertEq(senior.name(), "Suffix AI (senior)");
+        assertEq(junior.name(), "Suffix AI (junior)");
+        assertEq(senior.decimals(), 6);
+
+        // a second suffix deploys with its own ticker — no code change
+        SuffixTreasury xyz = new SuffixTreasury(usdc, owner, "Suffix XYZ", "xyz");
+        assertEq(xyz.senior().symbol(), "xyz");
+        assertEq(xyz.junior().symbol(), "xyzLP");
+        assertEq(xyz.senior().name(), "Suffix XYZ (senior)");
     }
 
     // ── only the treasury can mint/burn the tokens ──
