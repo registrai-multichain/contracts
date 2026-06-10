@@ -161,6 +161,33 @@ contract SuffixRevenueTest is Test {
         t.harvestFroth(0);
     }
 
+    // ── audit HIGH: seed-at-par cannot drain the POL when pool trades above par ──
+    function test_seedSenior_cannotDrainPOLAbovePar() public {
+        _provisionPOL(1_000e6, 500e6); // pool price 2.0 (>> par 1.0)
+        assertEq(t.aiSpotPrice(), 2e6);
+        uint256 start = usdc.balanceOf(bob);
+        vm.startPrank(bob);
+        usdc.approve(address(t), 100e6);
+        t.seedSenior(100e6);                 // issues at spot (2.0) → ~50 $ai, not 100
+        uint256 bal = senior.balanceOf(bob);
+        senior.approve(address(t), bal);
+        t.sellAi(bal, 0);                    // dump into the POL
+        vm.stopPrank();
+        assertLe(usdc.balanceOf(bob), start); // no profit ⇒ drain closed
+    }
+
+    // ── audit HIGH: buyAi enforces the senior float cap ──
+    function test_buyAi_respectsSeniorCap() public {
+        t.setSeniorCap(1_050e6);
+        _seedSenior(alice, 1_000e6);         // external 1000
+        _provisionPOL(1_000e6, 1_000e6);
+        vm.startPrank(bob);
+        usdc.approve(address(t), 200e6);
+        vm.expectRevert(SuffixTreasury.SeniorCapExceeded.selector);
+        t.buyAi(100e6, 0);                   // ~90 $ai → external 1090 > cap 1050
+        vm.stopPrank();
+    }
+
     // ── (2) compounding fees deepens POL at a flat price, claim unchanged ──
     function test_compoundFeesToPOL() public {
         _provisionPOL(1_000e6, 1_000e6);

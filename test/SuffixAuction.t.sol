@@ -90,6 +90,28 @@ contract SuffixAuctionTest is Test {
         assertEq(t.externalSeniorSupply(), 1_200e6);
     }
 
+    // ── audit HIGH: a floorPar ratchet mid-auction must not let takeDutch sell
+    //    below par (phantom reserve). Price is clamped up to par. ──
+    function test_takeDutch_neverSellsBelowParAfterRatchet() public {
+        _seedSenior(alice, 1_000e6);                       // floorPar 1.0
+        t.openDutchAuction(500e6, 1.5e6, 1.0e6, 1 hours);  // floorPrice = par
+        usdc.mint(address(this), 200e6);                   // fund the keeper (this)
+        usdc.approve(address(t), 200e6);
+        t.recordRevenue(200e6, t.BPS());                   // ratchet floorPar 1.0 → 1.2
+        assertEq(t.floorPar(), 1.2e6);
+
+        uint256 reserveBefore = t.totalUSDC();
+        vm.warp(block.timestamp + 2 hours);                // dutchPrice() → 1.0 < floorPar
+        vm.startPrank(bob);
+        usdc.approve(address(t), 200e6);
+        uint256 got = t.takeDutch(100e6, 2e6);             // clamps price up to 1.2
+        vm.stopPrank();
+
+        assertEq(got, 100e6);
+        // cost = 100 × 1.2 = 120, fully backing the new claim — no phantom reserve
+        assertEq(t.totalUSDC(), reserveBefore + 120e6);
+    }
+
     function test_openRejectsFloorBelowPar() public {
         _seedSenior(alice, 1_000e6);                   // floorPar 1.0
         vm.expectRevert(SuffixTreasury.BadAuctionParams.selector);

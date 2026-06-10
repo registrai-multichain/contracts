@@ -212,7 +212,14 @@ contract SuffixTreasury is ReentrancyGuard, AccessControl {
     /// (1−k) gap + junior cushion is the senior's protection.
     function seedSenior(uint256 usdcAmount) external nonReentrant returns (uint256 minted) {
         if (usdcAmount == 0) revert ZeroAmount();
-        minted = (usdcAmount * UNIT) / floorPar;
+        // Issue at the HIGHER of par and the live pool price. Pricing purely at
+        // par would let an attacker mint senior cheaply and dump it into the
+        // protocol-owned pool whenever the pool trades above par, draining the
+        // POL's premium (seed→sell arb). Issuing at >= spot removes that gift;
+        // any amount paid above par accrues to the reserve (grows the cushion).
+        uint256 spot = aiSpotPrice();
+        uint256 issuePrice = spot > floorPar ? spot : floorPar;
+        minted = (usdcAmount * UNIT) / issuePrice;
         if (minted == 0) revert ZeroAmount();
         // Bounded senior float (hybrid supply model): external senior may not
         // exceed seniorCap. 0 = uncapped. Pool-held senior is excluded.
@@ -368,6 +375,10 @@ contract SuffixTreasury is ReentrancyGuard, AccessControl {
         uint256 net = usdcIn - fee;
         aiOut = (poolAi * net) / (poolUsdc + net);
         if (aiOut < minAiOut || aiOut == 0 || aiOut >= poolAi) revert SlippageExceeded();
+        // Buying moves pool senior (claim-excluded) into external supply, so the
+        // float cap must bind here too — otherwise minting into the pool
+        // (provisionPOL / compoundFeesToPOL) then buying it out would evade it.
+        if (seniorCap != 0 && externalSeniorSupply() + aiOut > seniorCap) revert SeniorCapExceeded();
         poolUsdc += net;
         poolAi -= aiOut;
         feesBankUsdc += fee;
@@ -440,7 +451,7 @@ contract SuffixTreasury is ReentrancyGuard, AccessControl {
     /// them to the floor. Mints matching $ai at the current price so the price
     /// is unchanged; the minted $ai is pool-held (excluded from the claim).
     /// Governance chooses the split between this and skimRevenueToFloor.
-    function compoundFeesToPOL(uint256 amount) external onlyRole(KEEPER_ROLE) nonReentrant {
+    function compoundFeesToPOL(uint256 amount) external onlyRole(GOVERNOR_ROLE) nonReentrant {
         if (amount == 0 || amount > feesBankUsdc) revert ZeroAmount();
         if (poolAi == 0 || poolUsdc == 0) revert PoolEmpty();
         uint256 aiMint = (amount * poolAi) / poolUsdc; // keep price flat
@@ -488,6 +499,11 @@ contract SuffixTreasury is ReentrancyGuard, AccessControl {
     function takeDutch(uint256 aiWant, uint256 maxPrice) external nonReentrant returns (uint256 aiOut) {
         if (!auction.active) revert NoAuction();
         uint256 price = dutchPrice();
+        // floorPar can ratchet up DURING a live auction (recordRevenue/skim/etc.),
+        // which would push the declining dutch price below the now-higher par.
+        // Never clear below par: that would book a full par claim while taking in
+        // less than par (phantom reserve + under-backed senior). Clamp up to par.
+        if (price < floorPar) price = floorPar;
         if (price > maxPrice) revert SlippageExceeded();
         aiOut = aiWant > auction.ai ? auction.ai : aiWant;
         if (aiOut == 0) revert ZeroAmount();
