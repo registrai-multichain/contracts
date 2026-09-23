@@ -42,7 +42,7 @@ contract SettlementLivenessTest is Test {
 
     function setUp() public {
         usdc = new MockUSDC();
-        registry = new Registry(usdc);
+        registry = new Registry(usdc, 10e6);
         attestation = new Attestation(registry);
         dispute = new Dispute(registry, attestation, usdc);
         registry.wire(address(attestation), address(dispute));

@@ -11,10 +11,11 @@ import {PointsValues} from "./PointsValues.sol";
 contract Registry {
     using SafeERC20 for IERC20;
 
-    /// @notice Floor for any feed's minBond. Mainnet target is 100 USDC; lowered
-    ///         for Arc testnet demo where faucet drips are small. Configurable
-    ///         per deploy via constructor would be cleaner — to be revisited.
-    uint256 public constant MIN_BOND = 10e6; // 10 USDC (6 decimals) — testnet
+    /// @notice Floor for any feed's minBond, fixed per deployment. Testnet and
+    ///         tests use 10 USDC (10e6, 6 decimals); the mainnet value is an owner
+    ///         decision and a required input of script/DeployOracle.s.sol.
+    ///         Kept as `MIN_BOND()` so existing callers (OracleStake, UI) still work.
+    uint256 public immutable MIN_BOND;
     uint256 public constant MIN_DISPUTE_WINDOW = 1 hours;
     uint256 public constant MAX_DISPUTE_WINDOW = 7 days;
     uint256 public constant WITHDRAW_COOLDOWN = 7 days;
@@ -89,8 +90,10 @@ contract Registry {
     error AlreadyWired();
     error NotFeedCreator();
 
-    constructor(IERC20 usdc) {
+    constructor(IERC20 usdc, uint256 minBond_) {
+        if (minBond_ == 0) revert BondTooLow();
         USDC = usdc;
+        MIN_BOND = minBond_;
         DEPLOYER = msg.sender;
     }
 

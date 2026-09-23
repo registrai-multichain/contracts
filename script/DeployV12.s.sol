@@ -43,7 +43,7 @@ contract DeployV12 is Script {
         points = new RegistraiPoints();
 
         // 2. Core protocol stack.
-        registry    = new Registry(IERC20(usdc));
+        registry    = new Registry(IERC20(usdc), 10e6);
         attestation = new Attestation(registry);
         dispute     = new Dispute(registry, attestation, IERC20(usdc));
         markets     = new Markets(attestation, registry, IERC20(usdc), msg.sender);

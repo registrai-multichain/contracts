@@ -34,7 +34,7 @@ contract RehearseSettlement is Script {
 
         vm.startBroadcast(DEPLOYER);
         MockUSDC usdc = new MockUSDC();
-        Registry registry = new Registry(usdc);
+        Registry registry = new Registry(usdc, 10e6);
         Attestation attestation = new Attestation(registry);
         Dispute dispute = new Dispute(registry, attestation, usdc);
         registry.wire(address(attestation), address(dispute));

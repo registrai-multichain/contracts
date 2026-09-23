@@ -58,7 +58,7 @@ contract CirqueLeveragedTest is Test {
         cirbtc = new MockCirBTC();
         oracle = new MockBtcOracle(BTC_45K);
 
-        registry = new Registry(usdc);
+        registry = new Registry(usdc, 10e6);
         attestation = new Attestation(registry);
         dispute = new Dispute(registry, attestation, usdc);
         markets = new Markets(attestation, registry, usdc, treasury);

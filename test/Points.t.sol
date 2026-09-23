@@ -28,7 +28,7 @@ contract PointsTest is Test {
     function setUp() public {
         usdc = new MockUSDC();
         points = new RegistraiPoints();
-        registry = new Registry(usdc);
+        registry = new Registry(usdc, 10e6);
         attestation = new Attestation(registry);
         dispute = new Dispute(registry, attestation, usdc);
         markets = new Markets(attestation, registry, usdc, treasury);

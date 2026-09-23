@@ -24,7 +24,7 @@ contract AttestedBTCOracleTest is Test {
         vm.warp(1_700_000_000);
 
         usdc = new MockUSDC();
-        registry = new Registry(IERC20(address(usdc)));
+        registry = new Registry(IERC20(address(usdc)), 10e6);
         attestation = new Attestation(registry);
         dispute = new Dispute(registry, attestation, IERC20(address(usdc)));
         registry.wire(address(attestation), address(dispute));

@@ -30,7 +30,7 @@ contract ProtocolTest is Test {
 
     function setUp() public {
         usdc = new MockUSDC();
-        registry = new Registry(usdc);
+        registry = new Registry(usdc, 10e6);
         attestation = new Attestation(registry);
         dispute = new Dispute(registry, attestation, usdc);
         registry.wire(address(attestation), address(dispute));
@@ -85,6 +85,22 @@ contract ProtocolTest is Test {
         vm.prank(creator);
         vm.expectRevert(Registry.BondTooLow.selector);
         registry.createFeed("x", METHODOLOGY, floor - 1, DISPUTE_WINDOW, resolver);
+    }
+
+    function test_minBond_isConstructorParameter() public {
+        assertEq(registry.MIN_BOND(), 10e6);
+        Registry strict = new Registry(usdc, 100e6);
+        assertEq(strict.MIN_BOND(), 100e6);
+        vm.prank(creator);
+        vm.expectRevert(Registry.BondTooLow.selector);
+        strict.createFeed("x", METHODOLOGY, 100e6 - 1, DISPUTE_WINDOW, resolver);
+        vm.prank(creator);
+        strict.createFeed("x", METHODOLOGY, 100e6, DISPUTE_WINDOW, resolver);
+    }
+
+    function test_minBond_zeroRejected() public {
+        vm.expectRevert(Registry.BondTooLow.selector);
+        new Registry(usdc, 0);
     }
 
     function test_createFeed_revertsOnBadWindow() public {

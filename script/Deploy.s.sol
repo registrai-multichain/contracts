@@ -18,7 +18,7 @@ contract Deploy is Script {
         address usdc = vm.envAddress("USDC");
 
         vm.startBroadcast();
-        registry = new Registry(IERC20(usdc));
+        registry = new Registry(IERC20(usdc), 10e6);
         attestation = new Attestation(registry);
         dispute = new Dispute(registry, attestation, IERC20(usdc));
         // Treasury defaults to the deployer; rotate via redeploy if needed.
