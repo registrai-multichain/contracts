@@ -39,7 +39,7 @@ contract MarketsV4Test is Test {
         attestation.wire(address(dispute));
 
         ledger = new NanoLedger(usdc, address(this));
-        markets = new MarketsV4(ledger, registry, attestation, treasury);
+        markets = new MarketsV4(ledger, registry, attestation, treasury, address(0x51F), 1 hours, 1 days);
         ledger.setSource(address(markets), true);
 
         // bonded agent + feed (creator == agent in v2)
@@ -103,9 +103,11 @@ contract MarketsV4Test is Test {
         assertGt(shares, 0);
         assertEq(ledger.balanceOf(taker), takerBefore - 1_000e6, "collateral debited from ledger balance");
 
-        // fee = 1000 * 70bps = 7 USDC, split 40/20/10 -> creator 4, agent 2, treasury 1
+        // fee = 1000 * 70bps = 7 USDC: creator 4 and treasury 1 accrue to the pool;
+        // the agent's 2 is escrowed until it settles the market.
         assertEq(markets.LEDGER().claimablePool(id, creator), 4e6, "creator fee accrued");
-        assertEq(markets.LEDGER().claimablePool(id, oracle), 2e6, "agent fee accrued");
+        assertEq(markets.LEDGER().claimablePool(id, oracle), 0, "agent not in the pool");
+        assertEq(markets.agentEscrow(id), 2e6, "agent fee escrowed");
         assertEq(markets.LEDGER().claimablePool(id, treasury), 1e6, "treasury fee accrued");
         _solvent();
     }
@@ -153,12 +155,12 @@ contract MarketsV4Test is Test {
         vm.prank(taker);
         uint256 shares = markets.buy(id, MarketsV4.Outcome.Yes, 2_000e6, 0);
 
-        // oracle attests a value that makes YES win (>= 100_000)
+        // trading closes at expiry; then the oracle attests a value that makes
+        // YES win (>= 100_000), and the dispute window runs out
+        vm.warp(block.timestamp + 2 hours + 1);
         vm.prank(oracle);
         attestation.attest(feedId, int256(123_456), bytes32("ih"));
-
-        // past expiry + dispute window
-        vm.warp(block.timestamp + 2 hours + DW + 1);
+        vm.warp(block.timestamp + DW);
         markets.resolve(id);
         assertTrue(markets.getMarket(id).phase == MarketsV4.Phase.Resolved);
         assertTrue(markets.getMarket(id).yesWon);
