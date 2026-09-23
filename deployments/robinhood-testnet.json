@@ -1,0 +1,25 @@
+{
+  "network": "robinhood-testnet",
+  "chainId": 46630,
+  "rpc": "https://rpc.testnet.chain.robinhood.com",
+  "deployedAt": "2026-07-14",
+  "status": "legacy-read-only-redeploy-required",
+  "deployer": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
+  "note": "LEGACY READ-ONLY DEPLOYMENT. This immutable July 14 stack predates active-builder/caretaker enforcement and retains a deployer progress-role bypass. Do not use it for new value. Redeploy with the current hardened script, verify on Blockscout, propagate the new addresses, and only then re-enable frontend writes. Its token is a throwaway mintable testnet MockUSDC; mainnet deployments use canonical USDG.",
+  "contracts": {
+    "MockUSDC": "0xBB6F4B18776Fd20Bb53a1205375273373DD1E5bA",
+    "NanoLedger": "0x5d90B335044667f39C38a2CDd4E0d816653Aabd5",
+    "Registry": "0x64725935d90F0aa6f3c8642Bb9cACF44CAA46224",
+    "Attestation": "0x7379F25C9C39949eABd7df97b87ddB558A70316F",
+    "Dispute": "0xC8eD8E4EcF999b754AF60C2F998C6bb295ecC803",
+    "BuilderRegistry": "0xF229d2Ed13Cc35d46fa7676a579495E5C80CFEB2",
+    "CaretakerRegistry": "0x2c3a63A5865Ca6F41cD857C2Cd332E14311Ba176",
+    "ProgressPool": "0xa1075405D86F86Ce6AE9EC45e9319b1C33DfBC7d",
+    "ProgressArbiter": "0xdcCc487b5B89CBcE36ee42381Eb00bF333733478",
+    "MarketsPerennial": "0x14D83b828a0ff881171355B82724cAe392d9D6f2"
+  },
+  "demoBuilder": {
+    "id": 1,
+    "address": "0xEE2a803cBAcEfEd8958Ca018cd1d1108d88eA7b4"
+  }
+}

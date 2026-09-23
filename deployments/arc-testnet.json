@@ -42,7 +42,15 @@
     "SuffixSenior_ai": "0x4b3A8957BFd80fC54393CeF7fBdf1a96586fbeA1",
     "SuffixJunior_aiLP": "0xCa1e23c01bCF9fDf3AE1CA2d3b072cCE007fb814",
     "SuffixTreasury_xyz": "0x41fFAf360C0F3120732BF69530a667Eec57FD7E3",
-    "SuffixTreasury_fun": "0xcA9D317c846186F0B3f8446D8df94d6Ca826B1EB"
+    "SuffixTreasury_fun": "0xcA9D317c846186F0B3f8446D8df94d6Ca826B1EB",
+    "CurveMarket": "0xf5d0857df82f7bb26e81f59a5cc10c4ddffe2f2c",
+    "NanoLedger": "0x71Ea02b2E75e6C65A41DF9E3c78E14F9ae2232D9",
+    "MarketsV4": "0x7bCdf186a0C93A32B48ECC0D0d1160e75Bb2Ee03",
+    "BuilderRegistry": "0x16E7604882784530e2aAC279afb82198175131FF",
+    "CaretakerRegistry": "0xD5f24d4249079514F399b8917dEED8f900a6F303",
+    "ProgressPool": "0xDdf3A946971b6d3375fdec4F324473aE259359c6",
+    "MarketsPerennial": "0x6F233843Db915EfD931DEC22842C9dBf55788f46",
+    "ProgressArbiter": "0x7b588ce1b65a4f46d34Ae92472aF7dFc6356C959"
   },
   "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
   "feeds": [
@@ -211,5 +219,134 @@
       "expiryDays": 60,
       "initialSeedUsdc": 5
     }
-  ]
+  ],
+  "curveMarkets": [
+    {
+      "id": "0xa31c25344f6a844af0272dc1c242449b5bcc91ff98c5e05dd55ae318085e494c",
+      "symbol": "BTCUSD_5M",
+      "name": "BTC/USD short-dated settlement",
+      "contract": "0xf5d0857df82f7bb26e81f59a5cc10c4ddffe2f2c",
+      "collateral": "USDC",
+      "bucketCount": 9,
+      "band": "+/-0.4% of strike",
+      "feeBps": 100,
+      "jackpotBps": 2000,
+      "resolver": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
+      "opensAt": 1788159583,
+      "closesAt": 1788163183,
+      "resolveAfter": 1788163213,
+      "seededUsdc": "1.36",
+      "note": "First CurveMarket round. Resolver is the deployer EOA pending the IPriceSource adapter."
+    }
+  ],
+  "perennial": {
+    "deployedAt": "2026-09-17",
+    "status": "COMPLETE on Arc testnet: full market + funding lifecycle, bonded progress, slash path, and a scheduled caretaker",
+    "epochLength": 0,
+    "streamWindow": 60,
+    "note": "EPOCH_LENGTH=0 and STREAM_WINDOW=60 are TEST values for same-session loop verification. Production needs epochLength 30d and a realistic stream window. Built from current hardened source: active-builder enforcement present, unlike the legacy robinhood-testnet deployment.",
+    "verified": [
+      "NanoLedger deposit/withdraw/internalTransfer/approveSpender",
+      "BuilderRegistry.registerBuilder; CaretakerRegistry.setPayout",
+      "ProgressPool: addProgress -> closeEpoch -> claim -> openStream -> settleStream (paid exactly 3 USDC, pot drained to 0)",
+      "Registry.createFeed + registerAgent (bonded 10 USDC) + Attestation.attest -> finalized after 1h window",
+      "MarketsPerennial: createMarket -> buy -> commons got exactly 7000 (35/70 leg) -> resolve -> redeem -> claimLP; contract drained to 0",
+      "MarketsV4: createMarket -> buy -> resolve -> redeem -> claimLP; contract drained to 0",
+      "MarketsV4 fee split 40/20/10 across THREE DISTINCT addresses (8000/4000/2000), each claimed, zero residual",
+      "MarketsV4 LP payout goes to the actual market creator (distinct address), not the buyer",
+      "CurveMarket parimutuel: createMarket -> stake -> resolve -> claim"
+    ],
+    "untested": [
+      "production parameters (epoch 30d, real stake/window, non-deployer treasury)"
+    ],
+    "demoBuilder": {
+      "id": 1,
+      "address": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e"
+    },
+    "feeSplitProof": {
+      "market": "0xd46dde83dd1afa069ed38bac59166156eb5ee829a45f7c18d065550d9b44abf9",
+      "creator": {
+        "addr": "0xf26db19bc8DC33c9A72399128CF5cfB5dDC76263",
+        "bps": 40,
+        "got": 8000
+      },
+      "agent": {
+        "addr": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+        "bps": 20,
+        "got": 4000
+      },
+      "treasury": {
+        "addr": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
+        "bps": 10,
+        "got": 2000,
+        "note": "IMMUTABLE ctor arg on MarketsV4 \u2014 currently the deployer. Must be a separate address before mainnet; cannot be changed without redeploying."
+      }
+    },
+    "registryV2Constraint": "Registry v2 requires msg.sender == feed.creator to registerAgent (NotFeedCreator 0x9b69dca1). Feed creator and agent are deliberately the same wallet \u2014 an agent must create its own feed. This shapes agent onboarding.",
+    "settlementProof": {
+      "market1_perennial": {
+        "collateral": 6986000,
+        "redeem": 3407414,
+        "lp": 3578586,
+        "residual": 0
+      },
+      "market1_v4": {
+        "collateral": 6986000,
+        "redeem": 3407414,
+        "lp": 3578586,
+        "residual": 0
+      },
+      "market2_v4": {
+        "collateral": 6986000,
+        "redeem": 3407414,
+        "lp": 3578586,
+        "residual": 0,
+        "note": "redeem to buyer 0x84C7..., LP to creator 0xf26d... - distinct parties"
+      }
+    },
+    "liveMarket": {
+      "marketId": "0x5e7e88c1e7e16ec469bf6089c22309d7f5983069332e8ba6e1bc43c344ae6296",
+      "builderId": 1,
+      "feedId": "0x5feff482b8ba79c844c057b4420ec15aee6d050ad645a79c919223b14d7c195a",
+      "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
+      "threshold": 17000,
+      "comparator": "GreaterThan",
+      "expiry": 1790248841,
+      "liquidity": 5000000,
+      "note": "Open 7-day market for the frontend to display."
+    },
+    "feedId": "0x5feff482b8ba79c844c057b4420ec15aee6d050ad645a79c919223b14d7c195a",
+    "progressArbiter": {
+      "address": "0x7b588ce1b65a4f46d34Ae92472aF7dFc6356C959",
+      "deployedAt": "2026-09-17",
+      "challengeWindow": 300,
+      "stakePerProposal": 2000000,
+      "maxWeightPerProposal": 10,
+      "proposer": "0xf26db19bc8DC33c9A72399128CF5cfB5dDC76263",
+      "resolver": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+      "note": "challengeWindow 300s and stake 2 USDC are TEST values (Robinhood used 1h / 50 USDC). Proposer and resolver are deliberately DIFFERENT addresses.",
+      "bypassClosed": "deployer PROGRESS_ROLE revoked; addProgress from the deployer now reverts AccessControlUnauthorizedAccount (0xe2517d3f). Arbiter is the sole PROGRESS_ROLE holder.",
+      "verified": "setCaretaker -> depositBond(2 USDC) -> propose(builder 1, weight 7) -> 300s window -> finalize by a third party -> progressWeight[epoch1][builder1]=7, totalWeight=7, bond unlocked.",
+      "challengeVerified": "False-proposal path proven: propose(weight 3) -> challenge (symmetric 2 USDC stake) -> resolve(INVALID) -> proposer bond slashed 2 USDC to 0, challenger net +2.000000 USDC (2x stake), weight NOT credited (progressWeight stayed 0), finalize reverts BadState."
+    },
+    "caretaker": {
+      "config": "keeper/config.arc.json",
+      "runner": "keeper/run-arc-caretaker.sh",
+      "scheduler": "keeper/cc.registrai.arc-caretaker.plist (launchd, 600s) \u2014 NOT loaded by default",
+      "operator": "0xf26db19bc8DC33c9A72399128CF5cfB5dDC76263 (PROPOSER_ROLE + registered caretaker for builder 1)",
+      "verified": "Live tick closed the epoch and distributed pot 10500, opened the salary stream, and settled vested funds to the builder \u2014 the crank whose absence caused the Robinhood stall.",
+      "gotchas": [
+        "caretaker.py reads keeper/builders.json, NOT config.arc.json. It shipped with demo builders and registerFor'd a junk address (0x\u2026c2) as builder #2 on the first tick; that builder is now setActive(false) and builders.json holds only the real Arc builder.",
+        "The caretaker MUST run as operator_addr \u2014 propose needs PROPOSER_ROLE + registered caretaker. Running as the deployer degrades silently to 'propose FAILED' every tick; the runner now preflights the role and exits 1 rather than half-working."
+      ]
+    },
+    "deployBlock": 62539246,
+    "blockTimeSeconds": 0.555,
+    "builders": {
+      "note": "Builder #1 (the deployer, registered during testing) was setActive(false) on 2026-09-21 so the atlas starts empty for a real registration. Builder #2 was the junk 0x...c2 the caretaker onboarded from demo builders.json, also inactive. There is no delete in BuilderRegistry, so ids 1 and 2 stay occupied and the next real registration is #3.",
+      "activeIds": [],
+      "nextId": 3,
+      "marketsUnaffected": "buy/sell/resolve/redeem do not check builder status, so the three existing markets remain tradeable and redeemable."
+    }
+  }
 }
