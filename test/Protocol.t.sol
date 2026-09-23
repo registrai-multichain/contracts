@@ -310,6 +310,64 @@ contract ProtocolTest is Test {
         assertEq(registry.getAgent(feedId, agent).lockedBond, MIN_BOND);
     }
 
+    function test_challenge_locksOnlyPerChallengeStake() public {
+        bytes32 feedId = _createFeed();
+        _registerAgent(feedId, agent, 3 * MIN_BOND);
+        bytes32 attId = _attest(feedId, 15000, keccak256("x"));
+        assertEq(dispute.challengeStake(attId), MIN_BOND);
+        uint256 before = usdc.balanceOf(challenger);
+        _challenge(attId, challenger);
+        assertEq(before - usdc.balanceOf(challenger), MIN_BOND, "challenger stakes minBond");
+        assertEq(registry.getAgent(feedId, agent).lockedBond, MIN_BOND, "lock == stake");
+        assertEq(registry.availableBond(feedId, agent), 2 * MIN_BOND);
+        // agent can still attest on the feed while challenged
+        vm.warp(block.timestamp + 1);
+        _attest(feedId, 15001, keccak256("y"));
+    }
+
+    function test_challenge_stakeCappedAtAvailable() public {
+        bytes32 feedId = _createFeed();
+        _registerAgent(feedId, agent, MIN_BOND + MIN_BOND / 2);
+        bytes32 a1 = _attest(feedId, 1, keccak256("a"));
+        vm.warp(block.timestamp + 1);
+        bytes32 a2 = _attest(feedId, 2, keccak256("b"));
+        _challenge(a1, challenger);
+        // half a minBond is left free: the second challenge stakes (and locks) only that
+        assertEq(dispute.challengeStake(a2), MIN_BOND / 2);
+        _challenge(a2, challenger2);
+        assertEq(registry.getAgent(feedId, agent).lockedBond, MIN_BOND + MIN_BOND / 2);
+        assertEq(dispute.challengeStake(a2), 0);
+    }
+
+    function test_resolveInvalid_slashIsCoveredByLock() public {
+        bytes32 feedId = _createFeed();
+        _registerAgent(feedId, agent, 3 * MIN_BOND);
+        bytes32 attId = _attest(feedId, 99999, keccak256("x"));
+        uint256 cBefore = usdc.balanceOf(challenger);
+        bytes32 d = _challenge(attId, challenger);
+        vm.prank(resolver);
+        dispute.resolve(d, Dispute.DisputeOutcome.AttestationInvalid);
+        Registry.Agent memory a = registry.getAgent(feedId, agent);
+        assertEq(a.bond, 2 * MIN_BOND, "slash took exactly the stake");
+        assertEq(a.lockedBond, 0, "lock released by the slash");
+        assertTrue(a.slashed);
+        assertFalse(a.active, "one Invalid ruling deactivates even with bond left above minBond");
+        assertEq(usdc.balanceOf(challenger), cBefore + MIN_BOND, "stake back + equal slash");
+    }
+
+    function test_resolveValid_unlocksExactStake() public {
+        bytes32 feedId = _createFeed();
+        _registerAgent(feedId, agent, 3 * MIN_BOND);
+        bytes32 attId = _attest(feedId, 1, keccak256("x"));
+        uint256 aBefore = usdc.balanceOf(agent);
+        bytes32 d = _challenge(attId, challenger);
+        vm.prank(resolver);
+        dispute.resolve(d, Dispute.DisputeOutcome.AttestationValid);
+        assertEq(registry.getAgent(feedId, agent).lockedBond, 0);
+        assertEq(registry.getAgent(feedId, agent).bond, 3 * MIN_BOND);
+        assertEq(usdc.balanceOf(agent), aBefore + MIN_BOND);
+    }
+
     function test_challenge_revertsAfterWindow() public {
         bytes32 feedId = _createFeed();
         _registerAgent(feedId, agent, MIN_BOND);

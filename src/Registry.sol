@@ -258,10 +258,12 @@ contract Registry {
         a.bond -= slashAmount;
         uint256 lockReduction = slashAmount > a.lockedBond ? a.lockedBond : slashAmount;
         a.lockedBond -= lockReduction;
-        Feed memory f = _feeds[feedId];
-        if (a.bond < f.minBond) {
-            a.active = false;
-        }
+        // One Invalid ruling deactivates the agent on this feed for good. Dispute
+        // now slashes only the per-challenge stake (feed minBond), so the bond
+        // left behind can exceed minBond; deactivation is therefore unconditional
+        // rather than inferred from "bond < minBond" as when a challenge took the
+        // whole free bond. The remainder stays withdrawable through withdrawBond.
+        a.active = false;
         a.slashed = true;
         // Slashed agents can never re-activate, even if top-up restores bond ≥ minBond.
         USDC.safeTransfer(recipient, slashAmount);

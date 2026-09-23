@@ -69,8 +69,15 @@ contract Dispute {
         uint256 available = a.bond - a.lockedBond;
         if (available == 0) revert NoAvailableBond();
 
-        // Symmetric stake: challenger matches the agent's available bond.
-        uint256 bond = available;
+        // Symmetric stake, sized to what THIS challenge can take. An Invalid
+        // ruling slashes exactly `challengerBond` (see resolve), so locking that
+        // amount — and no more — keeps the slash fully covered while leaving the
+        // rest of the agent's bond free to back its other attestations on the
+        // feed. (Locking the whole available bond froze every other market on
+        // the feed: Attestation requires `minBond` free to attest.) The stake is
+        // the feed's `minBond`, the same amount Attestation reserves per
+        // attestation, capped at what is still free.
+        uint256 bond = available < f.minBond ? available : f.minBond;
         USDC.safeTransferFrom(msg.sender, address(this), bond);
         REGISTRY.lockBond(att.feedId, att.agent, bond);
 
@@ -117,6 +124,17 @@ contract Dispute {
         }
 
         emit Resolved(disputeId, outcome);
+    }
+
+    /// @notice What a challenge of `attestationId` would stake right now (and lock
+    /// from the agent): the feed's minBond, capped at the agent's free bond.
+    /// Returns 0 when the attestation is missing or the agent has nothing free.
+    function challengeStake(bytes32 attestationId) external view returns (uint256) {
+        Attestation.AttestationData memory att = ATTESTATION.getAttestation(attestationId);
+        if (att.timestamp == 0) return 0;
+        uint256 minBond = REGISTRY.getFeed(att.feedId).minBond;
+        uint256 available = REGISTRY.availableBond(att.feedId, att.agent);
+        return available < minBond ? available : minBond;
     }
 
     function getDispute(bytes32 disputeId) external view returns (DisputeData memory) {

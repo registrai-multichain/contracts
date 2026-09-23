@@ -209,17 +209,25 @@ contract OracleStakeTest is Test {
 
     function test_attest_blockedWhileBondLockedInDispute() public {
         _stake(dev, 125e6);
-        bytes32 feedId = _deploy(dev, "feed");
+        bytes32 feedId = _deploy(dev, "feed"); // bonded FLOOR (20), feed minBond 10
         bytes32 attId = _attest(dev, feedId, int256(1));
-        // open a dispute → bond is locked → feed is under-backed for attest
         vm.startPrank(challenger);
         usdc.approve(address(dispute), type(uint256).max);
+        // A challenge locks only its own stake (the feed minBond), so one open
+        // dispute leaves FLOOR - MIN_BOND free and the feed keeps attesting.
         dispute.challenge(attId, bytes32("ev"));
         vm.stopPrank();
+        vm.warp(block.timestamp + 1);
+        bytes32 att2 = _attest(dev, feedId, int256(2));
 
+        // A second open dispute locks the rest: now the feed is under-backed.
+        vm.startPrank(challenger);
+        dispute.challenge(att2, bytes32("ev2"));
+        vm.stopPrank();
+        vm.warp(block.timestamp + 1);
         vm.prank(dev);
         vm.expectRevert(OracleStake.FeedUnderBacked.selector);
-        os.attest(feedId, int256(2), bytes32("ih"));
+        os.attest(feedId, int256(3), bytes32("ih"));
     }
 
     function test_attest_deadFeedReverts() public {
@@ -283,8 +291,9 @@ contract OracleStakeTest is Test {
 
         _slashFeed(feedId, dev);
 
-        // lost the 20 bond (to challenger) + 50% penalty (10) routed to feeSink.
-        assertEq(os.depositOf(dev), depBefore - FLOOR - 10e6, "deposit debited bond + penalty");
+        // lost the challenge stake (the feed minBond, 10) to the challenger +
+        // 50% penalty on the reserved FLOOR (10) routed to feeSink.
+        assertEq(os.depositOf(dev), depBefore - MIN_BOND - 10e6, "deposit debited stake + penalty");
         assertEq(usdc.balanceOf(feeSink) - sinkBefore, 10e6, "penalty to feeSink");
         assertEq(os.activeOf(dev), 0);
         assertEq(os.bondedOf(dev), 0);
