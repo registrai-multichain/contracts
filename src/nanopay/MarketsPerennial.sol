@@ -8,6 +8,7 @@ import {Registry} from "../Registry.sol";
 import {Attestation} from "../Attestation.sol";
 import {NanoLedger} from "./NanoLedger.sol";
 import {BuilderRegistry} from "../perennial/BuilderRegistry.sol";
+import {SettlementPolicy} from "./SettlementPolicy.sol";
 
 /// @title MarketsPerennial. Builder-milestone prediction markets that fund a
 ///        shared commons.
@@ -20,11 +21,15 @@ import {BuilderRegistry} from "../perennial/BuilderRegistry.sol";
 ///           - the TREASURY leg routes to a `commons` address (the ProgressPool)
 ///             rather than to the builder the market is about, so attention fills
 ///             the commons but never captures it;
-///           - the AGENT leg pays the bonded oracle that settles.
+///           - the AGENT leg is ESCROWED per market: released to the bonded
+///             oracle when it settles, forfeited to `forfeitSink` when the
+///             market voids because it did not;
 ///         Fees are paid as direct ledger internalTransfers (value-independent,
 ///         no per-market pool, no source registration needed). Real USDC only
-///         crosses at NanoLedger.deposit/withdraw. Oracle-resolved via Attestation.
-contract MarketsPerennial is AccessControl, ReentrancyGuard {
+///         crosses at NanoLedger.deposit/withdraw. Settlement rules — which
+///         attestation decides a market, and when it voids instead — live in
+///         SettlementPolicy.
+contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     enum Outcome {
         Yes,
         No
@@ -37,7 +42,8 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
     }
     enum Phase {
         Trading,
-        Resolved
+        Resolved,
+        Voided
     }
 
     struct Market {
@@ -79,6 +85,12 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
     mapping(bytes32 => mapping(address => uint256)) public lpShares;
     mapping(bytes32 => uint256) public totalLpShares;
     mapping(bytes32 => uint256) public lpPotAtResolution;
+    /// @notice Agent-leg fees held until the market settles.
+    mapping(bytes32 => uint256) public agentEscrow;
+    /// @notice Where a voided market's escrowed agent fee goes. Deliberately not
+    /// protocol revenue: when the protocol runs the agent, a penalty it pays to
+    /// itself is no penalty. Defaults to the commons; a leaderboard can replace it.
+    address public forfeitSink;
 
     event MarketCreated(
         bytes32 indexed marketId,
@@ -112,6 +124,10 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
     event LPClaimed(bytes32 indexed marketId, address indexed lp, uint256 payout);
     event FeeSplitSet(uint256 creatorBps, uint256 treasuryBps, uint256 agentBps);
     event CommonsSet(address commons);
+    event MarketVoided(bytes32 indexed marketId);
+    event AgentFeeReleased(bytes32 indexed marketId, address indexed agent, uint256 amount);
+    event AgentFeeForfeited(bytes32 indexed marketId, address indexed sink, uint256 amount);
+    event ForfeitSinkSet(address sink);
 
     error MarketMissing();
     error MarketExists();
@@ -127,8 +143,6 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
     error SlippageExceeded();
     error InsufficientShares();
     error NoLPShares();
-    error AttestationNotFound();
-    error AttestationNotFinalized();
     error BadSplit();
     error ZeroAddress();
     error BuilderInactive();
@@ -139,14 +153,17 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
         Attestation attestation_,
         BuilderRegistry builders_,
         address admin,
-        address commons_
-    ) {
+        address commons_,
+        uint256 settlementWindow_,
+        uint256 resolutionGrace_
+    ) SettlementPolicy(settlementWindow_, resolutionGrace_) {
         if (address(builders_) == address(0) || admin == address(0) || commons_ == address(0)) revert ZeroAddress();
         LEDGER = ledger_;
         REGISTRY = registry_;
         ATTESTATION = attestation_;
         BUILDERS = builders_;
         commons = commons_;
+        forfeitSink = commons_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(GOVERNOR_ROLE, admin);
     }
@@ -166,6 +183,7 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
         if (liquidity < MIN_LIQUIDITY) revert LiquidityTooLow();
         if (!BUILDERS.isActiveBuilderId(builderId)) revert BuilderInactive();
         if (!REGISTRY.isActiveAgent(feedId, agent)) revert AgentNotRegistered();
+        _requireSettleableFeed(REGISTRY, feedId);
 
         uint256 nonce = createdBy[msg.sender]++;
         marketId = keccak256(abi.encode(msg.sender, nonce, feedId, agent, threshold, comparator, expiry));
@@ -269,17 +287,18 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
         emit Sold(marketId, msg.sender, outcome, sharesIn, collateralOut, fee);
     }
 
-    /// @dev Split the fee three ways by the current governable bps and pay each
-    /// leg as a direct internal transfer. Commons (treasury leg) goes to the
-    /// shared pool, never to the builder the market is about. Remainder to
-    /// commons so rounding never strands wei.
+    /// @dev Split the fee three ways by the current governable bps. Creator and
+    /// commons legs are paid immediately; the agent leg is escrowed until the
+    /// market settles, so an agent that never settles is never paid. Commons
+    /// (treasury leg) goes to the shared pool, never to the builder the market is
+    /// about. Remainder to commons so rounding never strands wei.
     function _payFees(bytes32 marketId, Market storage m, uint256 fee) internal {
         if (fee == 0) return;
         uint256 cFee = (fee * creatorBps) / FEE_BPS_TOTAL;
         uint256 aFee = (fee * agentBps) / FEE_BPS_TOTAL;
         uint256 tFee = fee - cFee - aFee; // commons gets the remainder
         if (cFee > 0) LEDGER.internalTransfer(m.creator, cFee);
-        if (aFee > 0) LEDGER.internalTransfer(m.agent, aFee);
+        if (aFee > 0) agentEscrow[marketId] += aFee; // stays in this contract's ledger balance
         if (tFee > 0) LEDGER.internalTransfer(commons, tFee);
         emit FeesPaid(marketId, cFee, tFee, aFee);
     }
@@ -289,18 +308,50 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
     function resolve(bytes32 marketId) external nonReentrant {
         Market storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
-        if (m.phase == Phase.Resolved) revert AlreadyResolved();
+        if (m.phase != Phase.Trading) revert AlreadyResolved();
         if (block.timestamp < m.expiry) revert MarketNotExpired();
 
-        (int256 value, bool finalized) = ATTESTATION.valueAt(m.feedId, m.agent, m.expiry);
-        if (value == 0 && !finalized) revert AttestationNotFound();
-        if (!finalized) revert AttestationNotFinalized();
+        (Settlement state, int256 value) = _settlement(ATTESTATION, m.feedId, m.agent, m.expiry);
+        if (state != Settlement.Resolvable) revert SettlementPending();
 
         bool yesWon = _evaluate(value, m.threshold, m.comparator);
         m.yesWon = yesWon;
         m.phase = Phase.Resolved;
         lpPotAtResolution[marketId] = yesWon ? m.yesReserve : m.noReserve;
         emit Resolved(marketId, yesWon, value);
+
+        uint256 fee = agentEscrow[marketId];
+        if (fee > 0) {
+            agentEscrow[marketId] = 0;
+            LEDGER.internalTransfer(m.agent, fee);
+            emit AgentFeeReleased(marketId, m.agent, fee);
+        }
+    }
+
+    /// @notice Close a market that can no longer be settled. Anyone may call it.
+    /// @dev Every YES and every NO share redeems for half a unit, and LPs share
+    /// half the combined reserves. Solvent by construction: each side's total
+    /// supply (reserve plus holders) equals the collateral the market holds, so
+    /// paying half of both pays exactly that collateral (less rounding, which
+    /// stays in the contract). Void is only knowable after trading has closed,
+    /// so nobody can trade into it. The escrowed agent fee is forfeited.
+    function voidMarket(bytes32 marketId) external nonReentrant {
+        Market storage m = _markets[marketId];
+        if (m.createdAt == 0) revert MarketMissing();
+        if (m.phase != Phase.Trading) revert AlreadyResolved();
+        (Settlement state,) = _settlement(ATTESTATION, m.feedId, m.agent, m.expiry);
+        if (state != Settlement.Voidable) revert NotVoidable();
+
+        m.phase = Phase.Voided;
+        lpPotAtResolution[marketId] = (m.yesReserve + m.noReserve) / 2;
+        emit MarketVoided(marketId);
+
+        uint256 fee = agentEscrow[marketId];
+        if (fee > 0) {
+            agentEscrow[marketId] = 0;
+            LEDGER.internalTransfer(forfeitSink, fee);
+            emit AgentFeeForfeited(marketId, forfeitSink, fee);
+        }
     }
 
     function _evaluate(int256 value, int256 threshold, Comparator c) internal pure returns (bool) {
@@ -313,8 +364,12 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
     function redeem(bytes32 marketId) external nonReentrant returns (uint256 payout) {
         Market storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
-        if (m.phase != Phase.Resolved) revert NotResolved();
-        if (m.yesWon) {
+        if (m.phase == Phase.Trading) revert NotResolved();
+        if (m.phase == Phase.Voided) {
+            payout = (yesBalance[marketId][msg.sender] + noBalance[marketId][msg.sender]) / 2;
+            yesBalance[marketId][msg.sender] = 0;
+            noBalance[marketId][msg.sender] = 0;
+        } else if (m.yesWon) {
             payout = yesBalance[marketId][msg.sender];
             yesBalance[marketId][msg.sender] = 0;
         } else {
@@ -329,7 +384,7 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
     function claimLP(bytes32 marketId) external nonReentrant returns (uint256 payout) {
         Market storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
-        if (m.phase != Phase.Resolved) revert NotResolved();
+        if (m.phase == Phase.Trading) revert NotResolved();
         uint256 myShares = lpShares[marketId][msg.sender];
         if (myShares == 0) revert NoLPShares();
         payout = (myShares * lpPotAtResolution[marketId]) / totalLpShares[marketId];
@@ -351,6 +406,12 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
         emit FeeSplitSet(creatorBps_, treasuryBps_, agentBps_);
     }
 
+    function setForfeitSink(address sink) external onlyRole(GOVERNOR_ROLE) {
+        if (sink == address(0)) revert ZeroAddress();
+        forfeitSink = sink;
+        emit ForfeitSinkSet(sink);
+    }
+
     function setCommons(address commons_) external onlyRole(GOVERNOR_ROLE) {
         if (commons_ == address(0)) revert ZeroAddress();
         commons = commons_;
@@ -361,6 +422,14 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard {
 
     function getMarket(bytes32 marketId) external view returns (Market memory) {
         return _markets[marketId];
+    }
+
+    /// @notice Where a market stands in settlement, and the settling value once
+    /// it is resolvable. The keeper's single source of truth for what to do next.
+    function settlementState(bytes32 marketId) external view returns (Settlement state, int256 value) {
+        Market storage m = _markets[marketId];
+        if (m.createdAt == 0) revert MarketMissing();
+        return _settlement(ATTESTATION, m.feedId, m.agent, m.expiry);
     }
 
     function priceOf(bytes32 marketId, Outcome outcome) external view returns (uint256) {

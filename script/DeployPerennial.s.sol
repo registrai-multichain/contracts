@@ -17,7 +17,10 @@ import {CaretakerRegistry} from "../src/perennial/CaretakerRegistry.sol";
 ///
 /// @dev env: RPC, PRIVATE_KEY, REGISTRY, ATTESTATION, NANO_LEDGER;
 ///      optional EPOCH_LENGTH (default 0 for a same-session demo; set 30 days
-///      for production).
+///      for production); SETTLEMENT_WINDOW (default 24h) and RESOLUTION_GRACE
+///      (default 7d) — how long the agent has after expiry to attest, and how
+///      long a disputed reading may take before the market voids. Both are
+///      immutable once deployed and bounds-checked by SettlementPolicy.
 contract DeployPerennial is Script {
     function run()
         external
@@ -28,13 +31,22 @@ contract DeployPerennial is Script {
         address ledger = vm.envAddress("NANO_LEDGER");
         uint256 epochLength = vm.envOr("EPOCH_LENGTH", uint256(0));
         uint256 streamWindow = vm.envOr("STREAM_WINDOW", uint256(30 days));
+        uint256 settlementWindow = vm.envOr("SETTLEMENT_WINDOW", uint256(24 hours));
+        uint256 resolutionGrace = vm.envOr("RESOLUTION_GRACE", uint256(7 days));
 
         vm.startBroadcast();
         builderReg = new BuilderRegistry(msg.sender);
         caretakers = new CaretakerRegistry(builderReg, msg.sender);
         pool = new ProgressPool(NanoLedger(ledger), builderReg, caretakers, msg.sender, epochLength, streamWindow);
         markets = new MarketsPerennial(
-            NanoLedger(ledger), Registry(registry), Attestation(attestation), builderReg, msg.sender, address(pool)
+            NanoLedger(ledger),
+            Registry(registry),
+            Attestation(attestation),
+            builderReg,
+            msg.sender,
+            address(pool),
+            settlementWindow,
+            resolutionGrace
         );
         vm.stopBroadcast();
 
@@ -45,5 +57,7 @@ contract DeployPerennial is Script {
         console2.log("  commons -> pool:", markets.commons());
         console2.log("  epochLength:", epochLength);
         console2.log("  streamWindow:", streamWindow);
+        console2.log("  settlementWindow:", settlementWindow);
+        console2.log("  resolutionGrace:", resolutionGrace);
     }
 }

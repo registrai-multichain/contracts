@@ -51,7 +51,7 @@ contract PerennialTest is Test {
         builderReg.registerFor(builderB, "ipfs://b");
         pool = new ProgressPool(ledger, builderReg, caretakers, address(this), EPOCH, WINDOW);
         pool.grantRole(pool.PROGRESS_ROLE(), address(this)); // direct unit-test writer
-        markets = new MarketsPerennial(ledger, registry, attestation, builderReg, address(this), address(pool));
+        markets = new MarketsPerennial(ledger, registry, attestation, builderReg, address(this), address(pool), 1 hours, 1 days);
 
         usdc.mint(oracle, 1_000e6);
         vm.startPrank(oracle);

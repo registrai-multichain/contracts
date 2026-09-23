@@ -39,7 +39,7 @@ contract MarketsPerennialTest is Test {
         builders = new BuilderRegistry(address(this));
         builders.registerFor(builder, "github.com/example/builder");
         commons = address(0xC0117);
-        markets = new MarketsPerennial(ledger, registry, attestation, builders, address(this), commons);
+        markets = new MarketsPerennial(ledger, registry, attestation, builders, address(this), commons, 1 hours, 1 days);
 
         usdc.mint(oracle, 1_000e6);
         vm.startPrank(oracle);
@@ -115,7 +115,17 @@ contract MarketsPerennialTest is Test {
         // creator 20/70 -> 2, commons 35/70 -> 3.5, agent 15/70 -> 1.5
         assertEq(ledger.balanceOf(creator) - creatorBefore, 2e6, "creator leg 20bps");
         assertEq(ledger.balanceOf(commons) - commonsBefore, 35e5, "commons leg 35bps");
-        assertEq(ledger.balanceOf(oracle) - oracleBefore, 15e5, "agent leg 15bps");
+        // The agent leg is escrowed, not paid: it is earned by settling.
+        assertEq(ledger.balanceOf(oracle), oracleBefore, "agent not paid at trade time");
+        assertEq(markets.agentEscrow(id), 15e5, "agent leg 15bps escrowed");
+        _solvent();
+
+        vm.warp(block.timestamp + 2 hours + 1); // past expiry
+        vm.prank(oracle);
+        attestation.attest(feedId, int256(123_456), bytes32("ih"));
+        vm.warp(block.timestamp + DW);
+        markets.resolve(id);
+        assertEq(ledger.balanceOf(oracle) - oracleBefore, 15e5, "agent leg released on settlement");
         _solvent();
     }
 
@@ -147,9 +157,10 @@ contract MarketsPerennialTest is Test {
         bytes32 id = _market();
         vm.prank(taker);
         uint256 shares = markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0);
+        vm.warp(block.timestamp + 2 hours + 1); // trading closed; now the agent reads
         vm.prank(oracle);
         attestation.attest(feedId, int256(123_456), bytes32("ih"));
-        vm.warp(block.timestamp + 2 hours + DW + 1);
+        vm.warp(block.timestamp + DW);
         markets.resolve(id);
         assertTrue(markets.getMarket(id).yesWon);
         uint256 before = ledger.balanceOf(taker);

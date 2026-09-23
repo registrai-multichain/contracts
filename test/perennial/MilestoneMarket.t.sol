@@ -45,7 +45,7 @@ contract MilestoneMarketTest is Test {
         caretakers = new CaretakerRegistry(builders, address(this));
         builders.registerFor(builder, "github.com/example/builder");
         pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours);
-        markets = new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool));
+        markets = new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), 1 hours, 1 days);
 
         usdc.mint(agent, 1_000e6);
         vm.startPrank(agent);
@@ -81,9 +81,10 @@ contract MilestoneMarketTest is Test {
         markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // fee 7e6; treasury leg 35e5
         assertEq(ledger.balanceOf(address(pool)), 35e5, "commons funded by milestone-market fee");
 
+        vm.warp(block.timestamp + 2 hours + 1); // trading closed; now the agent reads
         vm.prank(agent);
         attestation.attest(feedId, int256(1), bytes32("release:v1.2.0")); // shipped
-        vm.warp(block.timestamp + 2 hours + DW + 1);
+        vm.warp(block.timestamp + DW);
         markets.resolve(id);
         assertTrue(markets.getMarket(id).yesWon, "shipped -> YES wins");
         assertEq(usdc.balanceOf(address(ledger)), ledger.totalOwed(), "solvent");
@@ -94,9 +95,10 @@ contract MilestoneMarketTest is Test {
         vm.prank(taker);
         markets.buy(id, MarketsPerennial.Outcome.No, 1_000e6, 0);
 
+        vm.warp(block.timestamp + 2 hours + 1); // trading closed; now the agent reads
         vm.prank(agent);
         attestation.attest(feedId, int256(0), bytes32("release:none")); // nothing shipped
-        vm.warp(block.timestamp + 2 hours + DW + 1);
+        vm.warp(block.timestamp + DW);
         markets.resolve(id);
         assertFalse(markets.getMarket(id).yesWon, "not shipped -> NO wins");
         assertEq(usdc.balanceOf(address(ledger)), ledger.totalOwed(), "solvent");

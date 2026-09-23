@@ -229,6 +229,38 @@ contract Attestation {
         return (0, false);
     }
 
+    /// @notice The first non-invalidated attestation stamped in [from, to] — the
+    /// settlement read for markets that close before their oracle reports.
+    /// @dev "First", not "latest": an agent's first answer is its commitment, and a
+    /// wrong one is removed by dispute rather than overwritten. History is
+    /// append-only and stamped with block.timestamp, so timestamps are monotonic
+    /// and the window start is found by binary search. The forward walk is then
+    /// bounded by the invalidated entries inside the window, each of which cost a
+    /// challenger a matched stake, so lookup cost does not grow with how much
+    /// history accumulated after the window. (`valueAt` walks backwards from the
+    /// newest entry, which is linear in exactly that.)
+    function firstInWindow(bytes32 feedId, address agent, uint256 from, uint256 to)
+        external
+        view
+        returns (bool found, int256 value, uint256 timestamp, bool finalized)
+    {
+        bytes32[] storage h = _history[feedId][agent];
+        uint256 lo;
+        uint256 hi = h.length;
+        while (lo < hi) {
+            uint256 mid = (lo + hi) / 2;
+            if (_attestations[h[mid]].timestamp < from) lo = mid + 1;
+            else hi = mid;
+        }
+        for (uint256 i = lo; i < h.length; i++) {
+            AttestationData storage att = _attestations[h[i]];
+            if (att.timestamp > to) break;
+            if (att.status == DisputeStatus.ResolvedInvalid) continue;
+            return (true, att.value, att.timestamp, isFinalized(h[i]));
+        }
+        return (false, 0, 0, false);
+    }
+
     function historyLength(bytes32 feedId, address agent) external view returns (uint256) {
         return _history[feedId][agent].length;
     }
