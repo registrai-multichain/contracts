@@ -50,7 +50,10 @@ contract DeployNanoStack is Script {
             treasury,
             forfeitSink,
             settlementWindow,
-            resolutionGrace
+            resolutionGrace,
+            40,
+            20,
+            10
         );
         ledger.setSource(address(markets), true);
 

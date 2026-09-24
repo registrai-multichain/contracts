@@ -63,9 +63,12 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
 
     uint256 public constant MIN_LIQUIDITY = 5e6;
-    uint256 public constant FEE_BPS_CREATOR = 40;
-    uint256 public constant FEE_BPS_AGENT = 20;
-    uint256 public constant FEE_BPS_TREASURY = 10;
+    /// @notice Per-trade fee split, fixed at deploy (must sum to FEE_BPS_TOTAL).
+    /// The mainnet split is an owner decision and a required input of
+    /// DeployNanoStack; testnet uses 40 / 20 / 10.
+    uint256 public immutable FEE_BPS_CREATOR;
+    uint256 public immutable FEE_BPS_AGENT;
+    uint256 public immutable FEE_BPS_TREASURY;
     uint256 public constant FEE_BPS_TOTAL = 70;
     uint256 private constant BPS = 10_000;
 
@@ -113,6 +116,7 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     error NoLPShares();
     error ZeroAddress();
     error ReserveDepleted();
+    error BadSplit();
     error AgentNotApproved();
     error ResolverNotApproved();
 
@@ -124,9 +128,16 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         address treasury_,
         address forfeitSink_,
         uint256 settlementWindow_,
-        uint256 resolutionGrace_
+        uint256 resolutionGrace_,
+        uint256 feeBpsCreator_,
+        uint256 feeBpsAgent_,
+        uint256 feeBpsTreasury_
     ) SettlementPolicy(settlementWindow_, resolutionGrace_) {
-        if (treasury_ == address(0)) revert AmountTooLow();
+        if (treasury_ == address(0)) revert ZeroAddress();
+        if (feeBpsCreator_ + feeBpsAgent_ + feeBpsTreasury_ != FEE_BPS_TOTAL) revert BadSplit();
+        FEE_BPS_CREATOR = feeBpsCreator_;
+        FEE_BPS_AGENT = feeBpsAgent_;
+        FEE_BPS_TREASURY = feeBpsTreasury_;
         if (forfeitSink_ == address(0) || admin == address(0)) revert ZeroAddress();
         FORFEIT_SINK = forfeitSink_;
         LEDGER = ledger_;
@@ -168,8 +179,8 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         lpShares[marketId][msg.sender] = liquidity;
         totalLpShares[marketId] = liquidity;
 
-        // fee pool: creator 40 / treasury 10 bps, deduped by address. The agent's
-        // 20 is escrowed instead (see _chargeFee).
+        // fee pool: creator / treasury bps, deduped by address. The agent's cut
+        // is escrowed instead (see _chargeFee).
         LEDGER.createPool(marketId);
         _setFeeShares(marketId, msg.sender);
 
@@ -196,7 +207,7 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         }
     }
 
-    /// @dev Escrow the agent's cut, pool the rest. Pool shares are 40:10, so
+    /// @dev Escrow the agent's cut, pool the rest. Pool shares are creator:treasury bps, so
     /// pooling the remainder pays creator and treasury exactly their bps of the
     /// whole fee.
     function _chargeFee(bytes32 marketId, uint256 fee) internal {

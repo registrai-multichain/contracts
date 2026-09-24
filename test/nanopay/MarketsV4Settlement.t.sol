@@ -44,7 +44,7 @@ contract MarketsV4SettlementTest is Test {
         registry.wire(address(attestation), address(dispute));
         attestation.wire(address(dispute));
         ledger = new NanoLedger(usdc, address(this));
-        markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, WINDOW, GRACE);
+        markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, WINDOW, GRACE, 40, 20, 10);
         markets.setApprovedAgent(oracle, true);
         markets.setApprovedResolver(resolver, true);
         ledger.setSource(address(markets), true);
@@ -167,12 +167,47 @@ contract MarketsV4SettlementTest is Test {
 
     function test_constructorRejectsBadParams() public {
         vm.expectRevert(SettlementPolicy.BadSettlementParams.selector);
-        new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, 0, GRACE);
+        new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, 0, GRACE, 40, 20, 10);
     }
 
     function test_constructorRejectsZeroSink() public {
         vm.expectRevert(MarketsV4.ZeroAddress.selector);
-        new MarketsV4(ledger, registry, attestation, address(this), treasury, address(0), WINDOW, GRACE);
+        new MarketsV4(ledger, registry, attestation, address(this), treasury, address(0), WINDOW, GRACE, 40, 20, 10);
+    }
+
+    /// L7: a zero treasury is a ZeroAddress error, not AmountTooLow.
+    function test_constructorRejectsZeroTreasury() public {
+        vm.expectRevert(MarketsV4.ZeroAddress.selector);
+        new MarketsV4(ledger, registry, attestation, address(this), address(0), sink, WINDOW, GRACE, 40, 20, 10);
+    }
+
+    function test_constructorRejectsSplitNotSummingToTotal() public {
+        vm.expectRevert(MarketsV4.BadSplit.selector);
+        new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, WINDOW, GRACE, 40, 20, 11);
+        vm.expectRevert(MarketsV4.BadSplit.selector);
+        new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, WINDOW, GRACE, 0, 0, 0);
+    }
+
+    /// The split is a deploy input: a 30 / 25 / 15 market pays exactly that.
+    function test_customSplitIsHonoured() public {
+        MarketsV4 m2 = new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, WINDOW, GRACE, 30, 25, 15);
+        assertEq(m2.FEE_BPS_CREATOR(), 30);
+        assertEq(m2.FEE_BPS_AGENT(), 25);
+        assertEq(m2.FEE_BPS_TREASURY(), 15);
+        ledger.setSource(address(m2), true);
+        m2.setApprovedAgent(oracle, true);
+        m2.setApprovedResolver(resolver, true);
+        vm.startPrank(creator);
+        ledger.approveSpender(address(m2), type(uint256).max);
+        bytes32 id = m2.createMarket(feedId, oracle, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
+        vm.stopPrank();
+        vm.startPrank(yesTaker);
+        ledger.approveSpender(address(m2), type(uint256).max);
+        m2.buy(id, MarketsV4.Outcome.Yes, 10_000e6, 0); // fee 70 USDC
+        vm.stopPrank();
+        assertEq(m2.agentEscrow(id), 25e6);
+        assertEq(ledger.claimablePool(id, creator), 30e6);
+        assertEq(ledger.claimablePool(id, treasury), 15e6);
     }
 
     // ───────────── the fee, carved out of the pool ─────────────

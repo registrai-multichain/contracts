@@ -54,7 +54,7 @@ contract OracleAllowlistTest is Test {
         pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours);
         perennial =
             new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), WINDOW, GRACE);
-        v4 = new MarketsV4(ledger, registry, attestation, address(this), address(0x7EA), address(pool), WINDOW, GRACE);
+        v4 = new MarketsV4(ledger, registry, attestation, address(this), address(0x7EA), address(pool), WINDOW, GRACE, 40, 20, 10);
         ledger.setSource(address(v4), true);
 
         usdc.mint(agent, 1_000e6);
@@ -171,7 +171,7 @@ contract OracleAllowlistTest is Test {
 
     function test_v4_constructorRejectsZeroAdmin() public {
         vm.expectRevert(MarketsV4.ZeroAddress.selector);
-        new MarketsV4(ledger, registry, attestation, address(0), address(0x7EA), address(pool), WINDOW, GRACE);
+        new MarketsV4(ledger, registry, attestation, address(0), address(0x7EA), address(pool), WINDOW, GRACE, 40, 20, 10);
     }
 
     // ── revoking never strands an open market ──

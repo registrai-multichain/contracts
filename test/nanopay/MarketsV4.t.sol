@@ -39,7 +39,7 @@ contract MarketsV4Test is Test {
         attestation.wire(address(dispute));
 
         ledger = new NanoLedger(usdc, address(this));
-        markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, address(0x51F), 1 hours, 1 days);
+        markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, address(0x51F), 1 hours, 1 days, 40, 20, 10);
         markets.setApprovedAgent(oracle, true);
         markets.setApprovedResolver(resolver, true);
         ledger.setSource(address(markets), true);

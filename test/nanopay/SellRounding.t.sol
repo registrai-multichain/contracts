@@ -44,7 +44,7 @@ contract SellRoundingTest is Test {
         ProgressPool pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours);
         perennial =
             new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), 1 hours, 1 days);
-        v4 = new MarketsV4(ledger, registry, attestation, address(this), address(0x7EA), address(pool), 1 hours, 1 days);
+        v4 = new MarketsV4(ledger, registry, attestation, address(this), address(0x7EA), address(pool), 1 hours, 1 days, 40, 20, 10);
         ledger.setSource(address(v4), true);
         perennial.setApprovedAgent(agent, true);
         perennial.setApprovedResolver(resolver, true);
