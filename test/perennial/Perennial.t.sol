@@ -33,6 +33,8 @@ contract PerennialTest is Test {
     address taker = address(0x7A4E);
     address builderA = address(0xB111);
     address builderB = address(0xB222);
+    uint256 constant A_ID = 1; // builderA's id
+    uint256 constant B_ID = 2; // builderB's id
     address protocolTreasury = address(0x7EA5);
     bytes32 feedId;
     uint256 constant DW = 1 hours;
@@ -122,7 +124,7 @@ contract PerennialTest is Test {
     function test_inactiveBuilderCannotReceiveProgressOrMarkets() public {
         builderReg.setActive(1, false);
         vm.expectRevert(ProgressPool.BuilderInactive.selector);
-        pool.addProgress(builderA, 1);
+        pool.addProgress(A_ID, 1);
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.BuilderInactive.selector);
         markets.createMarket(
@@ -153,25 +155,25 @@ contract PerennialTest is Test {
         _fundCommons(); // commons gets 10 USDC
 
         // keeper records verified progress: builderA weight 3, builderB weight 1
-        pool.addProgress(builderA, 3);
-        pool.addProgress(builderB, 1);
+        pool.addProgress(A_ID, 3);
+        pool.addProgress(B_ID, 1);
         assertEq(pool.totalWeight(0), 4);
 
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
         assertEq(pool.epochPot(0), 10e6, "pot snapshotted");
-        assertEq(pool.claimable(0, builderA), 7_425e3, "claimable is net of the 1% protocol fee");
+        assertEq(pool.claimable(0, A_ID), 7_425e3, "claimable is net of the 1% protocol fee");
 
-        uint256 a = pool.claimFor(0, builderA);
-        uint256 b = pool.claimFor(0, builderB);
+        uint256 a = pool.claimFor(0, A_ID);
+        uint256 b = pool.claimFor(0, B_ID);
         assertEq(a, 7_425e3, "A share 3/4 of 10 USDC, minus 1%");
         assertEq(b, 2_475e3, "B share 1/4 of 10 USDC, minus 1%");
         assertEq(ledger.balanceOf(protocolTreasury), 100e3, "1% of 10 USDC to the protocol treasury");
         // funds stream, not lump: nothing withdrawable yet
         assertEq(ledger.balanceOf(builderA), 0, "no instant credit");
 
-        uint256 idA = pool.streamIdOf(0, builderA);
-        uint256 idB = pool.streamIdOf(0, builderB);
+        uint256 idA = pool.streamIdOf(0, A_ID);
+        uint256 idB = pool.streamIdOf(0, B_ID);
         vm.warp(pool.epochStart() + 2 * WINDOW);
         ledger.settleStream(idA);
         ledger.settleStream(idB);
@@ -180,24 +182,24 @@ contract PerennialTest is Test {
         _solvent();
 
         vm.expectRevert(ProgressPool.AlreadyClaimed.selector);
-        pool.claimFor(0, builderA);
+        pool.claimFor(0, A_ID);
         vm.expectRevert(ProgressPool.NoProgress.selector);
-        pool.claimFor(0, taker);
+        pool.claimFor(0, 99);
     }
 
     function test_claimFor_creditsBuilderNotCaller() public {
         _fundCommons(); // commons 10
 
-        pool.addProgress(builderA, 3);
-        pool.addProgress(builderB, 1);
+        pool.addProgress(A_ID, 3);
+        pool.addProgress(B_ID, 1);
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
 
         address caretaker = address(0xCA4E);
         vm.prank(caretaker);
-        uint256 a = pool.claimFor(0, builderA);
+        uint256 a = pool.claimFor(0, A_ID);
         assertEq(a, 7_425e3, "A share, net");
-        uint256 streamId = pool.streamIdOf(0, builderA);
+        uint256 streamId = pool.streamIdOf(0, A_ID);
         (, address to,, uint256 cap,,,) = ledger.streams(streamId);
         assertEq(to, builderA, "stream pays the builder");
         assertEq(cap, 7_425e3, "stream cap = share minus the protocol fee");
@@ -210,27 +212,27 @@ contract PerennialTest is Test {
 
     function test_claimFor_doubleClaimReverts() public {
         _fundCommons();
-        pool.addProgress(builderA, 1);
+        pool.addProgress(A_ID, 1);
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
 
-        pool.claimFor(0, builderA);
+        pool.claimFor(0, A_ID);
         vm.expectRevert(ProgressPool.AlreadyClaimed.selector);
-        pool.claimFor(0, builderA);
+        pool.claimFor(0, A_ID);
     }
 
     function test_claimFor_noProgressReverts() public {
         _fundCommons();
-        pool.addProgress(builderA, 1);
+        pool.addProgress(A_ID, 1);
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
 
         vm.expectRevert(ProgressPool.NoProgress.selector);
-        pool.claimFor(0, builderB); // B had no weight
+        pool.claimFor(0, B_ID); // B had no weight
     }
 
     function test_claim_beforeCloseReverts() public {
-        pool.addProgress(builderA, 1);
+        pool.addProgress(A_ID, 1);
         vm.prank(builderA);
         vm.expectRevert(ProgressPool.EpochNotClosed.selector);
         pool.claim(0);
@@ -253,12 +255,12 @@ contract PerennialTest is Test {
 
     function test_claimFor_partialSettle() public {
         _fundCommons();
-        pool.addProgress(builderA, 1);
+        pool.addProgress(A_ID, 1);
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
 
-        pool.claimFor(0, builderA); // share 10e6, streams 9.9e6
-        uint256 streamId = pool.streamIdOf(0, builderA);
+        pool.claimFor(0, A_ID); // share 10e6, streams 9.9e6
+        uint256 streamId = pool.streamIdOf(0, A_ID);
         vm.warp(pool.epochStart() + WINDOW / 2);
         ledger.settleStream(streamId);
         uint256 half = ledger.balanceOf(builderA);
@@ -268,11 +270,11 @@ contract PerennialTest is Test {
 
     function test_pendingPot_unchangedByClaim() public {
         _fundCommons();
-        pool.addProgress(builderA, 1);
+        pool.addProgress(A_ID, 1);
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
         uint256 before = pool.pendingPot();
-        pool.claimFor(0, builderA);
+        pool.claimFor(0, A_ID);
         assertEq(pool.pendingPot(), before, "opening a stream (and paying the fee) does not change pendingPot");
     }
 

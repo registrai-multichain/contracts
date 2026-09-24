@@ -14,7 +14,7 @@ import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 contract CaretakerHandler is Test {
     ProgressPool public pool;
     NanoLedger public ledger;
-    address[3] public builders = [address(0xB1), address(0xB2), address(0xB3)];
+    uint256[3] public builderIds = [uint256(1), 2, 3]; // 0xB1, 0xB2, 0xB3
 
     constructor(ProgressPool pool_, NanoLedger ledger_) {
         pool = pool_;
@@ -22,7 +22,7 @@ contract CaretakerHandler is Test {
     }
 
     function addProgress(uint256 bIdx, uint256 w) external {
-        address b = builders[bIdx % 3];
+        uint256 b = builderIds[bIdx % 3];
         pool.addProgress(b, bound(w, 0, 1_000));
     }
 
@@ -32,14 +32,14 @@ contract CaretakerHandler is Test {
     }
 
     function claimFor(uint256 epoch, uint256 bIdx) external {
-        address b = builders[bIdx % 3];
+        uint256 b = builderIds[bIdx % 3];
         uint256 e = pool.currentEpoch();
         if (e == 0) return;
         try pool.claimFor(epoch % e, b) {} catch {}
     }
 
     function settle(uint256 epoch, uint256 bIdx) external {
-        address b = builders[bIdx % 3];
+        uint256 b = builderIds[bIdx % 3];
         uint256 e = pool.currentEpoch();
         if (e == 0) return;
         uint256 id = pool.streamIdOf(epoch % e, b);
@@ -93,9 +93,13 @@ contract CaretakerInvariantTest is Test {
     /// cannot receive progress or drain a claim.
     function test_unregisteredSelfWeightIsRejected() public {
         address puppet = address(0xDEAD);
+        uint256 puppetId = builders.builderIdOf(puppet); // 0: unregistered
         vm.prank(address(handler));
         vm.expectRevert(ProgressPool.BuilderInactive.selector);
-        pool.addProgress(puppet, 100);
+        pool.addProgress(puppetId, 100);
+        vm.prank(address(handler));
+        vm.expectRevert(ProgressPool.BuilderInactive.selector);
+        pool.addProgress(99, 100); // an id never registered
         assertEq(ledger.balanceOf(puppet), 0);
     }
 }

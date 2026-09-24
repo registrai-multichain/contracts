@@ -162,7 +162,7 @@ contract PocRegressionTest is Test {
         caretakers.setCaretaker(1, caretaker);
         vm.startPrank(caretaker);
         arb.depositBond(50e6);
-        uint256 e = arb.propose(address(0xB111), 5);
+        uint256 e = arb.propose(1, 5);
         vm.stopPrank();
         builders.setActive(1, false);
         vm.warp(block.timestamp + 301);
@@ -180,7 +180,7 @@ contract PocRegressionTest is Test {
         caretakers.setCaretaker(1, caretaker);
         vm.startPrank(caretaker);
         arb.depositBond(50e6);
-        uint256 e = arb.propose(address(0xB111), 5);
+        uint256 e = arb.propose(1, 5);
         vm.stopPrank();
         uint256 chBefore = ledger.balanceOf(challenger);
         vm.prank(challenger);
@@ -191,6 +191,6 @@ contract PocRegressionTest is Test {
         arb.expireChallenge(e);
         assertEq(arb.availableBond(caretaker), 50e6, "proposer stake recovered");
         assertEq(ledger.balanceOf(challenger), chBefore, "challenger stake recovered");
-        assertEq(pool.progressWeight(0, address(0xB111)), 0, "no weight");
+        assertEq(pool.progressWeight(0, 1), 0, "no weight");
     }
 }

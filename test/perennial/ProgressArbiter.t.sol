@@ -20,7 +20,8 @@ contract ProgressArbiterTest is Test {
     address caretaker = address(0xCA4E);
     address challenger = address(0xC44A);
     address resolver = address(0x5E50);
-    address builder = address(0xB111);
+    address builderWallet = address(0xB111);
+    uint256 constant BUILDER_ID = 1;
     uint256 constant WINDOW = 1 hours;
     uint256 constant STAKE = 10e6;
     uint256 constant MAX_WEIGHT = 10;
@@ -31,7 +32,7 @@ contract ProgressArbiterTest is Test {
         ledger = new NanoLedger(usdc, address(this));
         builders = new BuilderRegistry(address(this));
         caretakers = new CaretakerRegistry(builders, address(this));
-        uint256 builderId = builders.registerFor(builder, "github.com/example/builder");
+        uint256 builderId = builders.registerFor(builderWallet, "github.com/example/builder");
         caretakers.setCaretaker(builderId, caretaker);
         pool = new ProgressPool(ledger, builders, caretakers, address(this), 0, 1 hours, address(0x7EA5));
         arb = new ProgressArbiter(ledger, pool, builders, caretakers, address(this), WINDOW, STAKE, MAX_WEIGHT, TIMEOUT);
@@ -60,23 +61,23 @@ contract ProgressArbiterTest is Test {
 
     function test_propose_finalize_creditsPool() public {
         vm.prank(caretaker);
-        uint256 id = arb.propose(builder, 7);
+        uint256 id = arb.propose(BUILDER_ID, 7);
         vm.warp(block.timestamp + WINDOW + 1);
         arb.finalize(id);
-        assertEq(pool.progressWeight(0, builder), 7, "weight credited via arbiter");
+        assertEq(pool.progressWeight(0, BUILDER_ID), 7, "weight credited via arbiter");
         _solvent();
     }
 
     function test_finalize_beforeWindow_reverts() public {
         vm.prank(caretaker);
-        uint256 id = arb.propose(builder, 7);
+        uint256 id = arb.propose(BUILDER_ID, 7);
         vm.expectRevert(ProgressArbiter.WindowOpen.selector);
         arb.finalize(id);
     }
 
     function test_challenge_thenResolveInvalid_slashes_noCredit() public {
         vm.prank(caretaker);
-        uint256 id = arb.propose(builder, 7);
+        uint256 id = arb.propose(BUILDER_ID, 7);
         uint256 chBefore = ledger.balanceOf(challenger);
         vm.prank(challenger);
         arb.challenge(id);
@@ -86,26 +87,26 @@ contract ProgressArbiterTest is Test {
         assertEq(arb.bondOf(caretaker), 50e6 - STAKE, "proposer slashed");
         vm.expectRevert(ProgressArbiter.BadState.selector);
         arb.finalize(id);
-        assertEq(pool.progressWeight(0, builder), 0, "no credit for false progress");
+        assertEq(pool.progressWeight(0, BUILDER_ID), 0, "no credit for false progress");
         _solvent();
     }
 
     function test_challenge_thenResolveValid_allowsFinalize() public {
         vm.prank(caretaker);
-        uint256 id = arb.propose(builder, 7);
+        uint256 id = arb.propose(BUILDER_ID, 7);
         vm.prank(challenger);
         arb.challenge(id);
         vm.prank(resolver);
         arb.resolve(id, true);
         assertEq(arb.bondOf(caretaker), 50e6 + STAKE, "proposer gains challenger stake");
         arb.finalize(id);
-        assertEq(pool.progressWeight(0, builder), 7, "valid progress credited");
+        assertEq(pool.progressWeight(0, BUILDER_ID), 7, "valid progress credited");
         _solvent();
     }
 
     function test_challenge_afterWindow_reverts() public {
         vm.prank(caretaker);
-        uint256 id = arb.propose(builder, 7);
+        uint256 id = arb.propose(BUILDER_ID, 7);
         vm.warp(block.timestamp + WINDOW + 1);
         vm.prank(challenger);
         vm.expectRevert(ProgressArbiter.WindowClosed.selector);
@@ -115,12 +116,12 @@ contract ProgressArbiterTest is Test {
     function test_propose_onlyProposer() public {
         vm.prank(challenger);
         vm.expectRevert();
-        arb.propose(builder, 7);
+        arb.propose(BUILDER_ID, 7);
     }
 
     function test_resolve_onlyResolver() public {
         vm.prank(caretaker);
-        uint256 id = arb.propose(builder, 7);
+        uint256 id = arb.propose(BUILDER_ID, 7);
         vm.prank(challenger);
         arb.challenge(id);
         vm.prank(challenger);
@@ -134,28 +135,28 @@ contract ProgressArbiterTest is Test {
         caretakers.setCaretaker(1, poor);
         vm.prank(poor);
         vm.expectRevert(ProgressArbiter.InsufficientBond.selector);
-        arb.propose(builder, 7);
+        arb.propose(BUILDER_ID, 7);
     }
 
     function test_propose_rejectsUnregisteredBuilder() public {
         vm.prank(caretaker);
         vm.expectRevert(ProgressArbiter.BuilderInactive.selector);
-        arb.propose(address(0xBAD), 7);
+        arb.propose(99, 7);
     }
 
     function test_propose_rejectsWrongCaretaker() public {
         arb.grantRole(arb.PROPOSER_ROLE(), challenger);
         vm.prank(challenger);
         vm.expectRevert(ProgressArbiter.UnauthorizedCaretaker.selector);
-        arb.propose(builder, 7);
+        arb.propose(BUILDER_ID, 7);
     }
 
     function test_propose_rejectsZeroOrExcessiveWeight() public {
         vm.startPrank(caretaker);
         vm.expectRevert(ProgressArbiter.InvalidWeight.selector);
-        arb.propose(builder, 0);
+        arb.propose(BUILDER_ID, 0);
         vm.expectRevert(ProgressArbiter.InvalidWeight.selector);
-        arb.propose(builder, MAX_WEIGHT + 1);
+        arb.propose(BUILDER_ID, MAX_WEIGHT + 1);
         vm.stopPrank();
     }
 
@@ -173,12 +174,12 @@ contract ProgressArbiterTest is Test {
 
     // ── M2: no stake can lock forever ──
 
-    event ProgressClosedInactive(uint256 indexed id, address indexed builder, bool challengerRefunded);
+    event ProgressClosedInactive(uint256 indexed id, uint256 indexed builderId, bool challengerRefunded);
     event ChallengeExpired(uint256 indexed id, address indexed challenger);
 
     function _propose() internal returns (uint256 id) {
         vm.prank(caretaker);
-        id = arb.propose(builder, 7);
+        id = arb.propose(BUILDER_ID, 7);
     }
 
     function _challengeIt(uint256 id) internal {
@@ -193,11 +194,11 @@ contract ProgressArbiterTest is Test {
         arb.closeInactive(id); // a challenger keeps the whole window
         vm.warp(block.timestamp + WINDOW + 1);
         vm.expectEmit(true, true, false, true, address(arb));
-        emit ProgressClosedInactive(id, builder, false);
+        emit ProgressClosedInactive(id, BUILDER_ID, false);
         arb.closeInactive(id);
         assertEq(uint8(arb.getEntry(id).state), uint8(ProgressArbiter.State.Closed));
         assertEq(arb.availableBond(caretaker), 50e6, "stake unlocked");
-        assertEq(pool.progressWeight(0, builder), 0, "no weight credited");
+        assertEq(pool.progressWeight(0, BUILDER_ID), 0, "no weight credited");
         vm.expectRevert(ProgressArbiter.BadState.selector);
         arb.finalize(id);
         _solvent();
@@ -219,7 +220,7 @@ contract ProgressArbiterTest is Test {
         arb.closeInactive(id);
         vm.prank(resolver);
         vm.expectEmit(true, true, false, true, address(arb));
-        emit ProgressClosedInactive(id, builder, true);
+        emit ProgressClosedInactive(id, BUILDER_ID, true);
         arb.closeInactive(id);
         assertEq(ledger.balanceOf(challenger), chBefore, "challenger stake refunded");
         assertEq(arb.availableBond(caretaker), 50e6);
@@ -235,7 +236,7 @@ contract ProgressArbiterTest is Test {
         builders.setActive(1, false);
         arb.closeInactive(id);
         assertEq(arb.availableBond(caretaker), 50e6 + STAKE, "stake + won challenger stake");
-        assertEq(pool.progressWeight(0, builder), 0);
+        assertEq(pool.progressWeight(0, BUILDER_ID), 0);
         _solvent();
     }
 
@@ -263,7 +264,7 @@ contract ProgressArbiterTest is Test {
         assertEq(uint8(arb.getEntry(id).state), uint8(ProgressArbiter.State.Expired));
         assertEq(ledger.balanceOf(challenger), chBefore);
         assertEq(arb.availableBond(caretaker), 50e6);
-        assertEq(pool.progressWeight(0, builder), 0);
+        assertEq(pool.progressWeight(0, BUILDER_ID), 0);
         vm.prank(resolver);
         vm.expectRevert(ProgressArbiter.BadState.selector);
         arb.resolve(id, false);

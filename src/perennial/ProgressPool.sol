@@ -12,8 +12,11 @@ import {CaretakerRegistry} from "./CaretakerRegistry.sol";
 /// distributes it to builders by VERIFIED PROGRESS, never by who attracted the
 /// betting. Attention fills the pool; progress draws it.
 ///
-/// Model: progress weight is added per builder per epoch by a PROGRESS_ROLE
-/// keeper (which maps oracle-verified milestones to a builder + tier weight).
+/// Model: progress weight is added per builder ID per epoch by PROGRESS_ROLE
+/// (the ProgressArbiter, which maps verified milestones to a builder + tier
+/// weight). Everything is keyed by builder id, not wallet: a builder's owner
+/// can change (transfer / recovery) without touching its weight or claims, and
+/// payouts always resolve through CaretakerRegistry.payoutOf at claim time.
 /// `closeEpoch` snapshots the unallocated pool balance as that epoch's pot;
 /// builders then `claim` a weight-proportional (linear) share. Linear keeps it
 /// sybil-neutral until a unique-builder gate enables quadratic.
@@ -45,23 +48,23 @@ contract ProgressPool is AccessControl {
     uint256 public currentEpoch;
     uint256 public epochStart;
 
-    mapping(uint256 => mapping(address => uint256)) public progressWeight; // epoch => builder => weight
+    mapping(uint256 => mapping(uint256 => uint256)) public progressWeight; // epoch => builderId => weight
     mapping(uint256 => uint256) public totalWeight; // epoch => total weight
     mapping(uint256 => uint256) public epochPot; // closed epoch => snapshotted pot
-    mapping(uint256 => mapping(address => bool)) public claimed; // epoch => builder => claimed
+    mapping(uint256 => mapping(uint256 => bool)) public claimed; // epoch => builderId => claimed
     uint256 public unclaimedReserved; // pot reserved for closed epochs, not yet claimed
     uint256 public streamWindow; // seconds; salary cadence
-    mapping(uint256 => mapping(address => uint256)) public streamIdOf; // epoch => builder => NanoLedger stream id
+    mapping(uint256 => mapping(uint256 => uint256)) public streamIdOf; // epoch => builderId => NanoLedger stream id
 
-    event ProgressAdded(uint256 indexed epoch, address indexed builder, uint256 weight);
+    event ProgressAdded(uint256 indexed epoch, uint256 indexed builderId, uint256 weight);
     event EpochClosed(uint256 indexed epoch, uint256 pot, uint256 totalWeight);
-    event Claimed(uint256 indexed epoch, address indexed builder, uint256 amount);
+    event Claimed(uint256 indexed epoch, uint256 indexed builderId, uint256 amount);
     event EpochLengthSet(uint256 epochLength);
     event StreamWindowSet(uint256 streamWindow);
     event ClaimStreamed(
-        uint256 indexed epoch, address indexed builder, uint256 streamId, uint256 amount, uint256 ratePerSec
+        uint256 indexed epoch, uint256 indexed builderId, uint256 streamId, uint256 amount, uint256 ratePerSec
     );
-    event ProtocolFeePaid(uint256 indexed epoch, address indexed builder, uint256 fee);
+    event ProtocolFeePaid(uint256 indexed epoch, uint256 indexed builderId, uint256 fee);
 
     error EpochNotOver();
     error EpochNotClosed();
@@ -98,12 +101,11 @@ contract ProgressPool is AccessControl {
 
     /// @notice Credit a builder with verified progress for the current epoch.
     /// Called by the keeper that maps oracle-verified milestones to tier weight.
-    function addProgress(address builder, uint256 weight) external onlyRole(PROGRESS_ROLE) {
-        if (builder == address(0)) revert ZeroAddress();
-        if (!BUILDERS.isActiveBuilder(builder)) revert BuilderInactive();
-        progressWeight[currentEpoch][builder] += weight;
+    function addProgress(uint256 builderId, uint256 weight) external onlyRole(PROGRESS_ROLE) {
+        if (!BUILDERS.isActiveBuilderId(builderId)) revert BuilderInactive();
+        progressWeight[currentEpoch][builderId] += weight;
         totalWeight[currentEpoch] += weight;
-        emit ProgressAdded(currentEpoch, builder, weight);
+        emit ProgressAdded(currentEpoch, builderId, weight);
     }
 
     /// @notice Snapshot the current epoch's pot (the unallocated pool balance)
@@ -125,30 +127,30 @@ contract ProgressPool is AccessControl {
 
     /// @notice Permissionless: crank a builder's claim. Credits the BUILDER, not
     /// the caller. The amount is deterministic, so anyone (including the builder's
-    /// caretaker) may call it; funds can only land on the named builder.
+    /// caretaker) may call it; funds can only land on the builder's CURRENT
+    /// payout (CaretakerRegistry.payoutOf, read at claim time).
     /// @return amount What the builder receives: its share of the pot minus the
     /// PROTOCOL_FEE_BPS protocol fee (which goes to PROTOCOL_TREASURY).
-    function claimFor(uint256 epoch, address builder) public returns (uint256 amount) {
+    function claimFor(uint256 epoch, uint256 builderId) public returns (uint256 amount) {
         if (epoch >= currentEpoch) revert EpochNotClosed();
-        if (claimed[epoch][builder]) revert AlreadyClaimed();
-        uint256 w = progressWeight[epoch][builder];
+        if (claimed[epoch][builderId]) revert AlreadyClaimed();
+        uint256 w = progressWeight[epoch][builderId];
         if (w == 0) revert NoProgress();
         uint256 tw = totalWeight[epoch];
         // KNOWN (review L2, deliberately not fixed here): flooring each share
         // leaves up to (builders - 1) units of an epoch's pot reserved in
         // unclaimedReserved forever. Dust-sized; tracked for a later release.
         uint256 share = (epochPot[epoch] * w) / tw;
-        claimed[epoch][builder] = true;
+        claimed[epoch][builderId] = true;
         if (share > 0) {
             unclaimedReserved -= share;
-            uint256 builderId = BUILDERS.builderIdOf(builder);
             address payout = CARETAKERS.payoutOf(builderId);
             if (payout == address(0)) revert BuilderInactive();
             uint256 fee = (share * PROTOCOL_FEE_BPS) / BPS;
             amount = share - fee; // >= 1 whenever share >= 1
             if (fee > 0) {
                 LEDGER.internalTransfer(PROTOCOL_TREASURY, fee);
-                emit ProtocolFeePaid(epoch, builder, fee);
+                emit ProtocolFeePaid(epoch, builderId, fee);
             }
             // Integer rate: `cap` (== amount) always bounds the total, so no fund
             // loss and the pool can't be drained. Two rounding edges by design:
@@ -159,15 +161,16 @@ contract ProgressPool is AccessControl {
             uint256 rate = amount / streamWindow;
             if (rate == 0) rate = 1;
             uint256 id = LEDGER.openStream(payout, rate, amount);
-            streamIdOf[epoch][builder] = id;
-            emit ClaimStreamed(epoch, builder, id, amount, rate);
+            streamIdOf[epoch][builderId] = id;
+            emit ClaimStreamed(epoch, builderId, id, amount, rate);
         }
-        emit Claimed(epoch, builder, amount);
+        emit Claimed(epoch, builderId, amount);
     }
 
-    /// @notice Builder pulls their own share (thin wrapper over claimFor).
+    /// @notice Builder owner pulls its builder's share (thin wrapper over
+    /// claimFor for `builderIdOf(msg.sender)`; an unregistered caller has none).
     function claim(uint256 epoch) external returns (uint256 amount) {
-        return claimFor(epoch, msg.sender);
+        return claimFor(epoch, BUILDERS.builderIdOf(msg.sender));
     }
 
     // ── views ──
@@ -176,11 +179,11 @@ contract ProgressPool is AccessControl {
         return bal > unclaimedReserved ? bal - unclaimedReserved : 0;
     }
 
-    function claimable(uint256 epoch, address builder) external view returns (uint256) {
-        if (epoch >= currentEpoch || claimed[epoch][builder]) return 0;
+    function claimable(uint256 epoch, uint256 builderId) external view returns (uint256) {
+        if (epoch >= currentEpoch || claimed[epoch][builderId]) return 0;
         uint256 tw = totalWeight[epoch];
         if (tw == 0) return 0;
-        uint256 share = (epochPot[epoch] * progressWeight[epoch][builder]) / tw;
+        uint256 share = (epochPot[epoch] * progressWeight[epoch][builderId]) / tw;
         return share - (share * PROTOCOL_FEE_BPS) / BPS;
     }
 

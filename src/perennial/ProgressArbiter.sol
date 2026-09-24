@@ -42,7 +42,7 @@ contract ProgressArbiter is AccessControl {
     }
 
     struct Entry {
-        address builder;
+        uint256 builderId;
         uint256 weight;
         address proposer;
         uint256 maturesAt;
@@ -58,12 +58,12 @@ contract ProgressArbiter is AccessControl {
 
     event BondDeposited(address indexed proposer, uint256 amount);
     event BondWithdrawn(address indexed proposer, uint256 amount);
-    event ProgressProposed(uint256 indexed id, address indexed builder, uint256 weight, uint256 maturesAt);
+    event ProgressProposed(uint256 indexed id, uint256 indexed builderId, uint256 weight, uint256 maturesAt);
     event ProgressChallenged(uint256 indexed id, address indexed challenger);
     event ProgressResolved(uint256 indexed id, bool valid);
-    event ProgressFinalized(uint256 indexed id, address indexed builder, uint256 weight);
+    event ProgressFinalized(uint256 indexed id, uint256 indexed builderId, uint256 weight);
     event ParamsSet(uint256 challengeWindow, uint256 stakePerProposal);
-    event ProgressClosedInactive(uint256 indexed id, address indexed builder, bool challengerRefunded);
+    event ProgressClosedInactive(uint256 indexed id, uint256 indexed builderId, bool challengerRefunded);
     event ChallengeExpired(uint256 indexed id, address indexed challenger);
 
     error ZeroAddress();
@@ -123,11 +123,11 @@ contract ProgressArbiter is AccessControl {
         return bondOf[who] - lockedBond[who];
     }
 
-    function propose(address builder, uint256 weight) external onlyRole(PROPOSER_ROLE) returns (uint256 id) {
-        if (builder == address(0)) revert ZeroAddress();
+    /// @notice Propose `weight` of progress for `builderId`. The caller must be
+    /// that builder's caretaker and the builder must be active.
+    function propose(uint256 builderId, uint256 weight) external onlyRole(PROPOSER_ROLE) returns (uint256 id) {
         if (weight == 0 || weight > maxWeightPerProposal) revert InvalidWeight();
-        uint256 builderId = BUILDERS.builderIdOf(builder);
-        if (builderId == 0 || !BUILDERS.isActiveBuilderId(builderId)) revert BuilderInactive();
+        if (!BUILDERS.isActiveBuilderId(builderId)) revert BuilderInactive();
         if (!CARETAKERS.isCaretaker(builderId, msg.sender)) revert UnauthorizedCaretaker();
         if (availableBond(msg.sender) < stakePerProposal) revert InsufficientBond();
         uint256 stake = stakePerProposal;
@@ -136,7 +136,7 @@ contract ProgressArbiter is AccessControl {
         uint256 m = block.timestamp + challengeWindow;
         entries.push(
             Entry({
-                builder: builder,
+                builderId: builderId,
                 weight: weight,
                 proposer: msg.sender,
                 maturesAt: m,
@@ -145,7 +145,7 @@ contract ProgressArbiter is AccessControl {
                 state: State.Proposed
             })
         );
-        emit ProgressProposed(id, builder, weight, m);
+        emit ProgressProposed(id, builderId, weight, m);
     }
 
     function challenge(uint256 id) external {
@@ -185,8 +185,8 @@ contract ProgressArbiter is AccessControl {
             revert BadState();
         }
         e.state = State.Finalized;
-        POOL.addProgress(e.builder, e.weight);
-        emit ProgressFinalized(id, e.builder, e.weight);
+        POOL.addProgress(e.builderId, e.weight);
+        emit ProgressFinalized(id, e.builderId, e.weight);
     }
 
     /// @notice Close an entry whose builder has been deactivated, so finalize
@@ -200,7 +200,7 @@ contract ProgressArbiter is AccessControl {
     ///    the entry is closed by expireChallenge after RESOLVE_TIMEOUT.
     function closeInactive(uint256 id) external {
         Entry storage e = entries[id];
-        if (BUILDERS.isActiveBuilder(e.builder)) revert BuilderActive();
+        if (BUILDERS.isActiveBuilderId(e.builderId)) revert BuilderActive();
         State st = e.state;
         if (st == State.Proposed) {
             if (block.timestamp < e.maturesAt) revert WindowOpen();
@@ -213,7 +213,7 @@ contract ProgressArbiter is AccessControl {
         e.state = State.Closed;
         bool refund = st == State.Challenged;
         if (refund) LEDGER.internalTransfer(e.challenger, e.stake);
-        emit ProgressClosedInactive(id, e.builder, refund);
+        emit ProgressClosedInactive(id, e.builderId, refund);
     }
 
     /// @notice Expire a challenge the resolver never ruled on. Permissionless once

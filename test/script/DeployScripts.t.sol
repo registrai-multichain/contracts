@@ -250,7 +250,7 @@ contract DeployScriptsTest is Test {
         // wallet) onboards without the Safe
         address alice = makeAddr("alice");
         vm.prank(alice);
-        uint256 id = builders.registerBuilder("registrai:github:alice/app");
+        (uint256 id,) = builders.registerBuilderWithProject("", "github:alice/app");
         vm.startPrank(onboarder);
         caretakers.setCaretaker(id, proposer);
         uint256 serial = badge.issue(id);
@@ -332,7 +332,7 @@ contract DeployScriptsTest is Test {
 
         address bob = makeAddr("bob");
         vm.prank(bob);
-        uint256 id = b.registerBuilder("registrai:domain:bob.xyz");
+        (uint256 id,) = b.registerBuilderWithProject("", "domain:bob.xyz");
         vm.startPrank(onboarder);
         ct.setCaretaker(id, proposer);
         badge.issue(id);
@@ -342,6 +342,10 @@ contract DeployScriptsTest is Test {
         b.setActive(id, false); // REGISTRAR stays with the Safe
         vm.expectRevert();
         b.registerFor(makeAddr("squat"), "registrai:github:x/y");
+        vm.expectRevert();
+        b.addProjectFor(id, "github:x/y"); // REGISTRAR: projects on a builder's behalf
+        vm.expectRevert();
+        b.startRecovery(id, makeAddr("squat")); // REGISTRAR: recovery is Safe-only
         vm.expectRevert();
         badge.grantRole(issuer, makeAddr("friend"));
         vm.expectRevert();
@@ -484,7 +488,7 @@ contract DeployScriptsTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, PROGRESS)
         );
-        pool.addProgress(address(0xD3AD), 1);
+        pool.addProgress(1, 1);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, GOVERNOR)
         );
@@ -522,7 +526,7 @@ contract DeployScriptsTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, PROPOSER)
         );
-        arbiter.propose(address(0xB111), 1);
+        arbiter.propose(1, 1);
         vm.stopPrank();
         // ADMIN (the Safe) keeps the powers
         vm.prank(admin);

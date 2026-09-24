@@ -4,6 +4,9 @@ pragma solidity ^0.8.24;
 /// Builder-side security audit (pre mainnet phase 1).
 /// Scope: BuilderRegistry, CaretakerRegistry, VerifiedBuilderBadge,
 /// DeployBuilders / DeployPerennial (reuse path) / DeployBadge.
+/// Updated for builders-with-projects (2026-09-24-builder-projects-design):
+/// M-2 is superseded (the badge names no project), M-3 is fixed (owner
+/// transfer + REGISTRAR recovery + payout fallback); pool/arbiter by builder id.
 ///
 /// Naming: test_POC_* demonstrate an issue (they PASS when the issue is real);
 ///         test_OK_*  are regression tests for properties that were checked and hold.
@@ -50,8 +53,8 @@ contract RejectingOwner {
         reg = r;
     }
 
-    function register(string calldata uri) external returns (uint256) {
-        return reg.registerBuilder(uri);
+    function register(string calldata uri, string calldata source) external returns (uint256 id) {
+        (id,) = reg.registerBuilderWithProject(uri, source);
     }
 
     function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
@@ -154,9 +157,9 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
         vm.stopPrank();
 
         vm.prank(alice);
-        aliceId = builders.registerBuilder("registrai:github:alice/app");
+        (aliceId,) = builders.registerBuilderWithProject("https://alice.dev", "github:alice/app");
         vm.prank(bob);
-        bobId = builders.registerBuilder("registrai:domain:bob.xyz");
+        (bobId,) = builders.registerBuilderWithProject("", "domain:bob.xyz");
     }
 
     function _onboard(uint256 id) internal returns (uint256 serial) {
@@ -172,24 +175,37 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
 
     // ───────────────────────────── FINDINGS ─────────────────────────────
 
-    /// FIXED (was M-2): the badge fingerprints the profile link at issue and
-    /// shows the verified source; re-pointing the profile flips it to Lapsed
-    /// on-chain immediately, with no keeper involved.
-    function test_FIXED_badgeShowsVerifiedSource_andLapsesOnProfileChange() public {
+    /// SUPERSEDED (was M-2, then the profile-hash fix): a builder may hold
+    /// several projects, and only the off-chain proof says which one is
+    /// verified, so the badge names NO project and ignores the free-form
+    /// profile. It needs >=1 active project to be issued; it reads Lapsed on the
+    /// keeper flag (no verified project left) or at once when the builder is
+    /// deactivated. A re-pointed profile can no longer borrow a verified look.
+    function test_SUPERSEDED_M2_badgeNamesNoProject_lapseIsKeeperOrInactive() public {
         uint256 serial = _onboard(aliceId);
-        assertEq(vm.parseJsonString(_json(serial), ".attributes[3].value"), "github:alice/app");
-
-        vm.prank(alice);
-        builders.updateProfile("registrai:github:ethereum/go-ethereum");
         string memory j = _json(serial);
-        assertEq(vm.parseJsonString(j, ".attributes[0].value"), "Lapsed");
-        assertEq(vm.parseJsonString(j, ".attributes[3].value"), "github:alice/app", "still the verified source");
+        assertFalse(_contains(bytes(j), "github:alice/app"), "no source on-chain");
+        assertFalse(vm.keyExistsJson(j, ".attributes[5]"), "Status, Serial, Builder ID, Chain, Issued");
 
-        vm.prank(alice);
-        builders.updateProfile("https://evil.example");
+        vm.startPrank(alice);
+        builders.updateProfile("registrai:github:ethereum/go-ethereum");
+        builders.addProject("github:ethereum/go-ethereum"); // a squat: no proof, keeper lapses it
+        vm.stopPrank();
         j = _json(serial);
-        assertEq(vm.parseJsonString(j, ".attributes[0].value"), "Lapsed");
-        assertEq(vm.parseJsonString(j, ".attributes[3].value"), "github:alice/app");
+        assertFalse(_contains(bytes(j), "ethereum"), "neither profile nor projects are rendered");
+
+        // the keeper sees no verified project left -> Lapsed
+        vm.prank(operator);
+        badge.setLapsed(aliceId, true);
+        assertEq(vm.parseJsonString(_json(serial), ".attributes[0].value"), "Lapsed");
+
+        // a builder without an active project cannot get a badge at all
+        address dave = makeAddr("dave");
+        vm.prank(dave);
+        uint256 daveId = builders.registerBuilder("registrai:github:dave/app");
+        vm.prank(onboarder);
+        vm.expectRevert(VerifiedBuilderBadge.NoProject.selector);
+        badge.issue(daveId);
     }
 
     /// FIXED (was L-3): burning is REVOKER-only (the Safe). A compromised
@@ -208,7 +224,7 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
         assertEq(badge.ownerOf(2), bob);
 
         vm.prank(mallory);
-        uint256 sybil = builders.registerBuilder("registrai:github:mallory/fake");
+        (uint256 sybil,) = builders.registerBuilderWithProject("", "github:mallory/fake");
         vm.prank(onboarder);
         badge.issue(sybil);
         vm.prank(safe);
@@ -240,19 +256,21 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
         }
     }
 
-    /// FINDING (Informational): bytes >= 0x80 are copied through unvalidated,
-    /// so a builder can make its own badge's JSON invalid UTF-8 (strict
-    /// parsers reject it). Self-inflicted only; other tokens unaffected.
-    function test_POC_invalidUtf8PassesIntoJson() public {
-        vm.prank(alice);
+    /// FIXED (was Informational): bytes >= 0x80 in a builder's profile or
+    /// project source never reach the badge JSON (no builder string is rendered).
+    function test_FIXED_invalidUtf8CannotReachJson() public {
+        vm.startPrank(alice);
         builders.updateProfile(string(abi.encodePacked("registrai:github:a/", hex"ff", hex"c0")));
+        builders.addProject(string(abi.encodePacked("github:a/", hex"ff", hex"c0")));
+        vm.stopPrank();
         uint256 s = _onboard(aliceId);
         bytes memory j = bytes(_json(s));
-        assertTrue(_contains(j, hex"ffc0"), "raw invalid UTF-8 bytes present in metadata");
+        assertFalse(_contains(j, hex"ffc0"), "no raw builder bytes in metadata");
     }
 
     /// FIXED (was L-4): builder-controlled strings are capped (profile 256
-    /// bytes, identity 1024), so a builder cannot price its own tokenURI out.
+    /// bytes, identity 1024, source 128, 16 projects), and none is rendered, so
+    /// tokenURI costs the same for every builder.
     function test_FIXED_builderStringsCapped_tokenURIGasBounded() public {
         uint256 sA = _onboard(aliceId);
         bytes memory big = abi.encodePacked("registrai:github:", _blob(24_000, "\""));
@@ -262,19 +280,28 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
         vm.expectRevert(BuilderRegistry.TooLong.selector);
         builders.linkIdentity(_blob(1025, 0x01));
         builders.linkIdentity(_blob(1024, 0x01));
+        vm.expectRevert(BuilderRegistry.TooLong.selector);
+        builders.addProject(string(_blob(129, "x")));
+        vm.expectRevert(BuilderRegistry.EmptySource.selector);
+        builders.addProject("");
         vm.stopPrank();
         vm.prank(mallory);
         vm.expectRevert(BuilderRegistry.TooLong.selector);
         builders.registerBuilder(string(big));
 
-        // worst case allowed: a 256-byte profile of quotes (the badge renders the
-        // VERIFIED source, fixed at issue) + 1KB identity
+        // worst case allowed: 256-byte profile, 1KB identity, 16 x 128-byte sources
         address carol = makeAddr("carol");
-        vm.prank(carol);
-        uint256 id = builders.registerBuilder(string(abi.encodePacked("registrai:github:", _blob(239, "\""))));
-        vm.prank(carol);
+        vm.startPrank(carol);
+        uint256 id = builders.registerBuilder(string(_blob(256, "\"")));
         builders.linkIdentity(_blob(1024, 0x02));
+        for (uint256 i; i < 16; i++) {
+            builders.addProject(string(_blob(128, "\"")));
+        }
+        vm.expectRevert(BuilderRegistry.TooManyProjects.selector);
+        builders.addProject("github:c/17");
+        vm.stopPrank();
         uint256 sC = _onboard(id);
+        badge.tokenURI(_onboard(bobId)); // warm the shared strings for a fair comparison
         uint256 g = gasleft();
         badge.tokenURI(sC);
         uint256 worst = g - gasleft();
@@ -283,6 +310,7 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
         uint256 normal = g - gasleft();
         console2.log("tokenURI gas: normal", normal, "worst allowed", worst);
         assertLt(worst, 1_000_000, "bounded");
+        assertApproxEqAbs(worst, normal, 5_000, "independent of builder strings");
     }
 
     /// FIXED (was info): a deactivated builder's badge reads Lapsed at once.
@@ -323,7 +351,7 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
 
     function test_OK_mintToRejectingContractOwnerSucceeds_noCallback() public {
         RejectingOwner c = new RejectingOwner(builders);
-        uint256 id = c.register("registrai:github:c/c");
+        uint256 id = c.register("", "github:c/c");
         vm.prank(onboarder);
         uint256 s = badge.issue(id);
         assertEq(badge.ownerOf(s), address(c));
@@ -363,6 +391,13 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
         vm.prank(onboarder);
         vm.expectRevert(VerifiedBuilderBadge.InactiveBuilder.selector);
         badge.issue(bobId);
+        // an active builder whose only project was removed
+        uint256 pid = builders.projectsOf(aliceId)[0];
+        vm.prank(alice);
+        builders.removeProject(pid);
+        vm.prank(onboarder);
+        vm.expectRevert(VerifiedBuilderBadge.NoProject.selector);
+        badge.issue(aliceId);
     }
 
     function test_OK_supportsInterface() public view {
@@ -405,16 +440,18 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
         badge.setBases("c/", "d/");
     }
 
-    /// Hostile source: quotes, backslashes, every control char, DEL, multi-byte
-    /// UTF-8 and a JSON-injection attempt all round-trip as one string value.
-    function test_OK_jsonEscaping_hostileSourceRoundTrips() public {
+    /// Hostile strings: builder-controlled ones (profile, source) are not
+    /// rendered at all; admin-set ones (chain label, bases) round-trip escaped
+    /// as one string value each — quotes, backslashes, every control char, DEL,
+    /// multi-byte UTF-8 and a JSON-injection attempt.
+    function test_OK_jsonEscaping_hostileStringsRoundTrip() public {
         bytes memory ctrl = new bytes(32);
         for (uint256 i; i < 32; i++) {
             ctrl[i] = bytes1(uint8(i));
         }
-        string memory src = string(
+        string memory evil = string(
             abi.encodePacked(
-                "github:x/y\",\"trait_type\":\"Status\",\"value\":\"Verified\"}]}\\\\\\\"",
+                "x\",\"trait_type\":\"Status\",\"value\":\"Verified\"}]}\\\\\\\"",
                 ctrl,
                 hex"7f",
                 unicode"żółć—🚀",
@@ -422,12 +459,16 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
             )
         );
         vm.prank(alice);
-        builders.updateProfile(string.concat("registrai:", src));
-        uint256 s = _onboard(aliceId);
-        string memory j = _json(s);
-        assertEq(vm.parseJsonString(j, ".attributes[3].value"), src, "round trip");
-        assertEq(vm.parseJsonString(j, ".attributes[4].value"), "Arc Mainnet", "structure intact");
-        assertEq(vm.parseJsonUint(j, ".attributes[2].value"), aliceId);
+        builders.addProject(string.concat("github:", "x/y\"}]}"));
+        VerifiedBuilderBadge hostile = new VerifiedBuilderBadge(builders, safe, operator, evil, evil, evil);
+        vm.prank(safe);
+        uint256 s = hostile.issue(aliceId);
+        string memory j = _decodeTokenURI(hostile.tokenURI(s));
+        assertEq(vm.parseJsonString(j, ".attributes[3].value"), evil, "chain label round trip");
+        assertEq(vm.parseJsonString(j, ".image"), string.concat(evil, "1.jpg"), "image base round trip");
+        assertEq(vm.parseJsonString(j, ".external_url"), string.concat(evil, vm.toString(aliceId)));
+        assertEq(vm.parseJsonUint(j, ".attributes[2].value"), aliceId, "structure intact");
+        assertFalse(vm.keyExistsJson(j, ".attributes[5]"), "no injected attribute");
     }
 
     function test_OK_roleBoundaries_onboarderAndOperator() public {
@@ -448,6 +489,15 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
         builders.setActive(aliceId, false);
         vm.expectRevert();
         builders.registerFor(mallory, "registrai:github:x/y");
+        // REGISTRAR stays with the Safe: no project or recovery power
+        vm.expectRevert();
+        builders.addProjectFor(aliceId, "github:x/y");
+        vm.expectRevert();
+        builders.setProjectActive(1, false);
+        vm.expectRevert();
+        builders.startRecovery(aliceId, onboarder);
+        vm.expectRevert(BuilderRegistry.NotOwner.selector);
+        builders.cancelRecovery(aliceId);
         vm.expectRevert(CaretakerRegistry.NotOwner.selector);
         caretakers.setPayout(aliceId, onboarder);
         vm.stopPrank();
@@ -461,6 +511,11 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
         caretakers.setCaretaker(bobId, operator);
         vm.expectRevert(CaretakerRegistry.NotOwner.selector);
         caretakers.setPayout(aliceId, operator); // caretaker cannot redirect payout
+        vm.expectRevert();
+        builders.startRecovery(aliceId, operator);
+        vm.expectRevert(BuilderRegistry.NotOwner.selector);
+        builders.removeProject(1);
+        badge.sync(aliceId); // anyone may sync: a no-op while in sync
         vm.expectRevert(VerifiedBuilderBadge.Soulbound.selector);
         badge.transferFrom(alice, operator, s);
         vm.stopPrank();
@@ -550,7 +605,7 @@ contract BuilderSideAuditPhase2Test is Test {
         vm.stopPrank();
 
         vm.prank(alice);
-        aliceId = builders.registerBuilder("registrai:github:alice/app");
+        (aliceId,) = builders.registerBuilderWithProject("", "github:alice/app");
         vm.prank(onboarder);
         caretakers.setCaretaker(aliceId, operator);
 
@@ -571,9 +626,9 @@ contract BuilderSideAuditPhase2Test is Test {
         vm.stopPrank();
     }
 
-    function _proposeAndFinalize(address builder, uint256 w) internal {
+    function _proposeAndFinalize(uint256 builderId, uint256 w) internal {
         vm.prank(operator);
-        uint256 id = arb.propose(builder, w);
+        uint256 id = arb.propose(builderId, w);
         vm.warp(block.timestamp + WINDOW + 1);
         arb.finalize(id);
     }
@@ -588,12 +643,12 @@ contract BuilderSideAuditPhase2Test is Test {
     /// revoking the onboarder afterwards does not claw anything back.
     function test_POC_onboarderGovernor_admitsSybilToCommons_andCutsOffBuilder() public {
         vm.prank(mallory);
-        uint256 sybilId = builders.registerBuilder("registrai:github:mallory/tags-farm");
+        (uint256 sybilId,) = builders.registerBuilderWithProject("", "github:mallory/tags-farm");
 
         // before: the operator cannot propose for the sybil
         vm.prank(operator);
         vm.expectRevert(ProgressArbiter.UnauthorizedCaretaker.selector);
-        arb.propose(mallory, 10);
+        arb.propose(sybilId, 10);
 
         // compromised onboarder: admit sybil, cut alice off
         vm.startPrank(onboarder);
@@ -603,10 +658,10 @@ contract BuilderSideAuditPhase2Test is Test {
 
         vm.prank(operator);
         vm.expectRevert(ProgressArbiter.UnauthorizedCaretaker.selector);
-        arb.propose(alice, 5); // alice's real progress can no longer be proposed
+        arb.propose(aliceId, 5); // alice's real progress can no longer be proposed
 
         // the keeper proposes the sybil's (real, self-made) tags; nothing to challenge
-        _proposeAndFinalize(mallory, 10);
+        _proposeAndFinalize(sybilId, 10);
 
         vm.warp(block.timestamp + EPOCH);
         pool.closeEpoch();
@@ -619,38 +674,77 @@ contract BuilderSideAuditPhase2Test is Test {
         vm.stopPrank();
 
         // too late: claimFor has no active check and the stream cannot be cancelled
-        uint256 amount = pool.claimFor(0, mallory);
+        uint256 amount = pool.claimFor(0, sybilId);
         assertEq(amount, 990e6, "sybil took the whole pot (net of 1% fee)");
         vm.warp(block.timestamp + 31 days); // integer rate vests slightly after the window
-        ledger.settleStream(pool.streamIdOf(0, mallory));
+        ledger.settleStream(pool.streamIdOf(0, sybilId));
         assertEq(ledger.balanceOf(mallory), 990e6);
-        assertEq(pool.claimable(0, alice), 0);
+        assertEq(pool.claimable(0, aliceId), 0);
     }
 
-    /// FINDING (Medium): builder ownership is immutable and there is no
-    /// recovery. A leaked builder key lets the thief setPayout to itself and
-    /// crank claimFor for every closed epoch; the Safe's only lever,
-    /// setActive(false), does not stop claims. A lost key strands the id, its
-    /// payout default and its soulbound badge forever.
-    function test_POC_builderKeyCompromise_redirectsClaims_safeCannotStop() public {
-        _proposeAndFinalize(alice, 10);
+    /// FIXED (was M-3): builder ownership was immutable with no recovery. Now
+    /// the Safe (REGISTRAR) recovers a builder to a fresh wallet after
+    /// RECOVERY_DELAY; the thief-set payout is ignored once the owner changed
+    /// (CaretakerRegistry stores who set it), and claims are keyed by builder id,
+    /// so the next claim pays the recovered owner.
+    function test_FIXED_M3_builderKeyCompromise_safeRecovers_payoutFallsBack() public {
+        _proposeAndFinalize(aliceId, 10);
         vm.warp(block.timestamp + EPOCH);
         pool.closeEpoch();
 
         address thief = makeAddr("thief");
         vm.prank(alice); // attacker holding alice's key
         caretakers.setPayout(aliceId, thief);
+        assertEq(caretakers.payoutOf(aliceId), thief);
 
+        address aliceNew = makeAddr("aliceNew");
         vm.prank(safe);
-        builders.setActive(aliceId, false); // emergency switch
+        builders.startRecovery(aliceId, aliceNew);
+        vm.expectRevert(BuilderRegistry.RecoveryNotReady.selector);
+        builders.finishRecovery(aliceId);
+        vm.warp(block.timestamp + builders.RECOVERY_DELAY());
+        builders.finishRecovery(aliceId); // anyone
+        assertEq(builders.ownerOf(aliceId), aliceNew);
+        assertEq(builders.builderIdOf(alice), 0, "the stolen key holds nothing");
+        assertEq(caretakers.payoutOf(aliceId), aliceNew, "thief-set payout ignored");
 
-        uint256 amount = pool.claimFor(0, alice); // permissionless
+        uint256 amount = pool.claimFor(0, aliceId); // permissionless
         vm.warp(block.timestamp + 31 days); // integer rate vests slightly after the window
-        ledger.settleStream(pool.streamIdOf(0, alice));
-        assertEq(ledger.balanceOf(thief), amount);
+        ledger.settleStream(pool.streamIdOf(0, aliceId));
         assertEq(amount, 990e6);
-        // no function exists to rotate builders[aliceId].owner (Safe, REGISTRAR or builder)
-        assertEq(builders.ownerOf(aliceId), alice);
+        assertEq(ledger.balanceOf(aliceNew), amount);
+        assertEq(ledger.balanceOf(thief), 0);
+
+        // the old key can no longer act for the builder
+        vm.startPrank(alice);
+        vm.expectRevert(CaretakerRegistry.NotOwner.selector);
+        caretakers.setPayout(aliceId, thief);
+        vm.expectRevert(BuilderRegistry.NotRegistered.selector);
+        builders.proposeOwner(thief);
+        vm.stopPrank();
+    }
+
+    /// RESIDUAL (by design, spec "recovery option B"): the current owner may
+    /// cancel a recovery for RECOVERY_DELAY, and an owner transfer clears it, so
+    /// a thief who keeps using the key can block recovery indefinitely; and
+    /// until a recovery finishes, claimFor pays the thief-set payout. The
+    /// Safe's levers are setActive(false) (stops new progress) and restarting.
+    function test_POC_residual_activeThiefCanCancelRecovery_andClaimMeanwhile() public {
+        _proposeAndFinalize(aliceId, 10);
+        vm.warp(block.timestamp + EPOCH);
+        pool.closeEpoch();
+        address thief = makeAddr("thief");
+        vm.prank(alice);
+        caretakers.setPayout(aliceId, thief);
+        vm.prank(safe);
+        builders.startRecovery(aliceId, makeAddr("aliceNew"));
+        vm.prank(alice); // the thief, with alice's key
+        builders.cancelRecovery(aliceId);
+        (address pendingNew,) = builders.recoveryOf(aliceId);
+        assertEq(pendingNew, address(0));
+        pool.claimFor(0, aliceId);
+        (, address to,,,,,) = ledger.streams(pool.streamIdOf(0, aliceId));
+        assertEq(to, thief);
     }
 
     /// Context for the role table: in phase 2 the keeper operator is caretaker
@@ -660,7 +754,7 @@ contract BuilderSideAuditPhase2Test is Test {
     function test_POC_operatorKeyInPhase2_proposesForAnyCaretakenBuilder() public {
         vm.startPrank(operator);
         for (uint256 i; i < 10; i++) {
-            arb.propose(alice, 10);
+            arb.propose(aliceId, 10);
         }
         vm.stopPrank();
         assertEq(arb.entryCount(), 10);
@@ -669,7 +763,7 @@ contract BuilderSideAuditPhase2Test is Test {
     /// Holds: payout is owner-controlled only; neither the GOVERNOR nor the
     /// caretaker nor the Safe can redirect a builder's claim.
     function test_OK_payoutOnlyOwnerControlled_inClaims() public {
-        _proposeAndFinalize(alice, 10);
+        _proposeAndFinalize(aliceId, 10);
         vm.warp(block.timestamp + EPOCH);
         pool.closeEpoch();
         vm.prank(onboarder);
@@ -682,8 +776,8 @@ contract BuilderSideAuditPhase2Test is Test {
         vm.expectRevert(CaretakerRegistry.NotOwner.selector);
         caretakers.setPayout(aliceId, safe);
         vm.prank(operator);
-        pool.claimFor(0, alice);
-        (, address to,,,,,) = ledger.streams(pool.streamIdOf(0, alice));
+        pool.claimFor(0, aliceId);
+        (, address to,,,,,) = ledger.streams(pool.streamIdOf(0, aliceId));
         assertEq(to, alice);
     }
 }

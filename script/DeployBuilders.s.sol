@@ -17,7 +17,9 @@ import {VerifiedBuilderBadge} from "../src/perennial/VerifiedBuilderBadge.sol";
 /// REGISTRAR, GOVERNOR, ISSUER). The optional ONBOARDER — a lower-security hot
 /// wallet for day-to-day onboarding from the admin page — gets ONLY badge
 /// ISSUER (issue) and CaretakerRegistry GOVERNOR (setCaretaker) — never REVOKER
-/// (burning a badge is Safe-only); the Safe
+/// (burning a badge is Safe-only), and never BuilderRegistry REGISTRAR, which
+/// also gates addProjectFor / setProjectActive and startRecovery (moving a
+/// builder to a new wallet must stay a Safe decision); the Safe
 /// can take both back in one transaction. The keeper OPERATOR gets badge STATUS
 /// (setLapsed). The deployer holds a role only inside this script, to grant
 /// them, then renounces: it holds nothing afterwards (asserted), so phase 1

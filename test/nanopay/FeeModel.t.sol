@@ -49,6 +49,7 @@ contract FeeModelTest is Test {
     address carol = address(0xCA201);
     address dave = address(0xDA5E);
     address builder = address(0xB111);
+    uint256 constant BUILDER_ID = 1; // `builder`'s id
     bytes32 feedId;
 
     uint256 constant DW = 1 hours;
@@ -76,7 +77,7 @@ contract FeeModelTest is Test {
     event VoidFeesPaid(
         bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 challengerReward, address challenger
     );
-    event ProtocolFeePaid(uint256 indexed epoch, address indexed builder, uint256 fee);
+    event ProtocolFeePaid(uint256 indexed epoch, uint256 indexed builderId, uint256 fee);
     event AgentFeeReleased(bytes32 indexed marketId, address indexed agent, uint256 amount);
 
     function setUp() public {
@@ -596,25 +597,25 @@ contract FeeModelTest is Test {
         pool.grantRole(pool.PROGRESS_ROLE(), address(this));
         vm.prank(alice);
         ledger.internalTransfer(address(pool), 1_000e6);
-        pool.addProgress(builder, 1);
+        pool.addProgress(BUILDER_ID, 1);
         vm.warp(vm.getBlockTimestamp() + 1 days + 1);
         pool.closeEpoch();
         assertEq(pool.PROTOCOL_FEE_BPS(), 100);
         assertEq(pool.PROTOCOL_TREASURY(), protocolTreasury);
-        assertEq(pool.claimable(0, builder), 990e6, "claimable is net");
+        assertEq(pool.claimable(0, BUILDER_ID), 990e6, "claimable is net");
 
         vm.expectEmit(true, true, false, true, address(pool));
-        emit ProtocolFeePaid(0, builder, 10e6);
-        uint256 net = pool.claimFor(0, builder);
+        emit ProtocolFeePaid(0, BUILDER_ID, 10e6);
+        uint256 net = pool.claimFor(0, BUILDER_ID);
         assertEq(net, 990e6);
         assertEq(ledger.balanceOf(protocolTreasury), 10e6, "1% to the protocol treasury");
-        (, address to,, uint256 cap,,,) = ledger.streams(pool.streamIdOf(0, builder));
+        (, address to,, uint256 cap,,,) = ledger.streams(pool.streamIdOf(0, BUILDER_ID));
         assertEq(to, builder);
         assertEq(cap, 990e6, "the stream carries 99%");
-        assertEq(pool.claimable(0, builder), 0);
+        assertEq(pool.claimable(0, BUILDER_ID), 0);
         assertEq(pool.unclaimedReserved(), 0);
         vm.warp(vm.getBlockTimestamp() + 2 hours);
-        ledger.settleStream(pool.streamIdOf(0, builder));
+        ledger.settleStream(pool.streamIdOf(0, BUILDER_ID));
         assertEq(ledger.balanceOf(builder), 990e6);
         _solvent();
     }

@@ -22,6 +22,8 @@ contract VerifiedBuilderBadgeTest is Test {
 
     event Locked(uint256 tokenId);
     event MetadataUpdate(uint256 _tokenId);
+    event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+    event Synced(uint256 indexed builderId, uint256 indexed serial, address from, address to);
 
     function setUp() public {
         builders = new BuilderRegistry(admin);
@@ -29,9 +31,9 @@ contract VerifiedBuilderBadgeTest is Test {
             builders, admin, keeper, "Arc Mainnet", "https://registrai.cc/badge/arc/", "https://registrai.cc/atlas/?builder="
         );
         vm.prank(alice);
-        aliceId = builders.registerBuilder("registrai:github:alice/app");
+        (aliceId,) = builders.registerBuilderWithProject("https://alice.dev", "github:alice/app");
         vm.prank(bob);
-        bobId = builders.registerBuilder("registrai:domain:bob.xyz");
+        (bobId,) = builders.registerBuilderWithProject("", "domain:bob.xyz");
     }
 
     function _issue(uint256 id) internal returns (uint256) {
@@ -87,39 +89,51 @@ contract VerifiedBuilderBadgeTest is Test {
         assertTrue(badge.hasRole(revoker, admin));
     }
 
-    /// Audit M-2: the badge certifies the source verified at issue; a later
-    /// profile change (or deactivation) shows Lapsed on-chain at once.
-    function test_badgeShowsVerifiedSource_andLapsesOnProfileChangeOrDeactivation() public {
+    /// Builders-with-projects: the badge names no project and ignores the free-form
+    /// profile; it reads Lapsed on the keeper flag or when the builder is inactive.
+    function test_isLapsed_keeperFlagOrDeactivation_notProfile() public {
         _issue(aliceId);
-        assertTrue(badge.isCurrent(1));
         assertFalse(badge.isLapsed(1));
 
         vm.prank(alice);
-        builders.updateProfile("registrai:github:ethereum/go-ethereum");
-        string memory j = _json(1);
-        assertEq(vm.parseJsonString(j, ".attributes[3].value"), "github:alice/app", "shows what was verified");
-        assertEq(vm.parseJsonString(j, ".attributes[0].value"), "Lapsed");
-        assertEq(vm.parseJsonString(j, ".image"), "https://registrai.cc/badge/arc/1-lapsed.jpg");
-        assertEq(badge.verifiedSource(1), "github:alice/app");
-        assertEq(badge.sourceOf(aliceId), "github:ethereum/go-ethereum", "sourceOf stays live");
-        assertFalse(badge.lapsed(1), "the keeper flag is untouched");
-        assertTrue(badge.isLapsed(1));
-
-        vm.prank(alice);
-        builders.updateProfile("registrai:github:alice/app"); // back to the verified link
-        assertFalse(badge.isLapsed(1));
+        builders.updateProfile("https://elsewhere.example");
+        assertFalse(badge.isLapsed(1), "profile is free-form: no effect");
 
         vm.prank(admin);
         builders.setActive(aliceId, false);
-        assertEq(vm.parseJsonString(_json(1), ".attributes[0].value"), "Lapsed");
+        assertTrue(badge.isLapsed(1), "deactivation lapses at once");
+        assertFalse(badge.lapsed(1), "the keeper flag is untouched");
+        string memory j = _json(1);
+        assertEq(vm.parseJsonString(j, ".attributes[0].value"), "Lapsed");
+        assertEq(vm.parseJsonString(j, ".image"), "https://registrai.cc/badge/arc/1-lapsed.jpg");
+
+        vm.prank(admin);
+        builders.setActive(aliceId, true);
+        assertFalse(badge.isLapsed(1), "reactivation restores it");
+
+        vm.prank(keeper);
+        badge.setLapsed(aliceId, true);
+        assertTrue(badge.isLapsed(1));
     }
 
-    function test_issueNeedsARegistraiClaim() public {
+    function test_issueNeedsAnActiveProject() public {
         vm.prank(carol);
-        uint256 id = builders.registerBuilder("ipfs://not-a-claim");
+        uint256 id = builders.registerBuilder("ipfs://no-project-yet");
         vm.prank(admin);
-        vm.expectRevert(VerifiedBuilderBadge.NotClaimed.selector);
+        vm.expectRevert(VerifiedBuilderBadge.NoProject.selector);
         badge.issue(id);
+
+        vm.prank(carol);
+        uint256 pid = builders.addProject("github:carol/app");
+        vm.prank(carol);
+        builders.removeProject(pid);
+        vm.prank(admin);
+        vm.expectRevert(VerifiedBuilderBadge.NoProject.selector);
+        badge.issue(id);
+
+        vm.prank(admin);
+        builders.setProjectActive(pid, true);
+        assertEq(_issue(id), 1);
     }
 
     function test_revokeClearsSerialData() public {
@@ -128,9 +142,8 @@ contract VerifiedBuilderBadgeTest is Test {
         badge.revoke(aliceId);
         assertEq(badge.builderOf(1), 0);
         assertEq(badge.issuedAt(1), 0);
-        assertEq(badge.verifiedProfileHash(1), bytes32(0));
-        assertEq(badge.verifiedSource(1), "");
-        assertFalse(badge.isCurrent(1));
+        assertFalse(badge.lapsed(1));
+        assertTrue(badge.isLapsed(1), "a burned serial reads lapsed");
     }
 
     function test_strangerCannotAnything() public {
@@ -291,9 +304,12 @@ contract VerifiedBuilderBadgeTest is Test {
         assertEq(vm.parseJsonString(j, ".attributes[0].value"), "Verified");
         assertEq(vm.parseJsonUint(j, ".attributes[1].value"), 1);
         assertEq(vm.parseJsonUint(j, ".attributes[2].value"), aliceId);
-        assertEq(vm.parseJsonString(j, ".attributes[3].value"), "github:alice/app");
-        assertEq(vm.parseJsonString(j, ".attributes[4].value"), "Arc Mainnet");
-        assertEq(vm.parseJsonUint(j, ".attributes[5].value"), 1_790_000_000);
+        assertEq(vm.parseJsonString(j, ".attributes[3].value"), "Arc Mainnet");
+        assertEq(vm.parseJsonUint(j, ".attributes[4].value"), 1_790_000_000);
+        assertEq(vm.parseJsonString(j, ".attributes[3].trait_type"), "Chain");
+        assertEq(vm.parseJsonString(j, ".attributes[4].trait_type"), "Issued");
+        assertFalse(vm.keyExistsJson(j, ".attributes[5]"), "five attributes: no project/source on-chain");
+        assertFalse(_contains(bytes(j), "github:alice/app"), "no source in metadata");
 
         vm.prank(keeper);
         badge.setLapsed(aliceId, true);
@@ -306,7 +322,7 @@ contract VerifiedBuilderBadgeTest is Test {
         for (uint256 i = 1; i <= 12; i++) {
             address w = address(uint160(0x1000 + i));
             vm.prank(w);
-            uint256 id = builders.registerBuilder("registrai:github:x/y");
+            (uint256 id,) = builders.registerBuilderWithProject("", "github:x/y");
             _issue(id);
         }
         // alice/bob hold none; serial 12 went to the 12th registration
@@ -314,30 +330,24 @@ contract VerifiedBuilderBadgeTest is Test {
         assertEq(vm.parseJsonString(_json(12), ".name"), "Registrai Verified Builder No. 012");
     }
 
-    /// The profile link is builder-controlled: quotes, backslashes and control
-    /// characters must not break (or inject into) the JSON.
-    function test_hostileProfileIsEscaped() public {
+    /// Builder-controlled strings (profile, project sources) never reach the
+    /// metadata; the admin-set strings are still JSON-escaped.
+    function test_hostileStringsCannotInject() public {
+        string memory hostile =
+            string.concat("a\"},{\"trait_type\":\"Status\",\"value\":\"Verified\\", string(hex"0a0d09"));
         vm.prank(carol);
-        uint256 id = builders.registerBuilder(
-            string.concat("registrai:github:a\"},{\"trait_type\":\"Status\",\"value\":\"Verified\\", string(hex"0a0d09")) // quote, backslash, \n\r\t
-        );
+        (uint256 id,) = builders.registerBuilderWithProject(hostile, string.concat("github:", hostile));
         uint256 serial = _issue(id);
         string memory j = _json(serial);
-        assertEq(
-            vm.parseJsonString(j, ".attributes[3].value"),
-            string.concat("github:a\"},{\"trait_type\":\"Status\",\"value\":\"Verified\\", string(hex"0a0d09"))
-        );
-        assertEq(vm.parseJsonString(j, ".attributes[4].value"), "Arc Mainnet", "no injected attribute");
-    }
+        assertFalse(_contains(bytes(j), bytes(hostile)), "builder strings are not rendered");
+        assertEq(vm.parseJsonString(j, ".attributes[3].value"), "Arc Mainnet");
 
-    function test_sourceOfNonRegistraiProfileIsEmpty() public {
-        vm.prank(carol);
-        uint256 id = builders.registerBuilder("ipfs://whatever");
-        assertEq(badge.sourceOf(id), "");
-        vm.prank(alice);
-        builders.updateProfile("registrai:");
-        assertEq(badge.sourceOf(aliceId), "");
-        assertEq(badge.sourceOf(bobId), "domain:bob.xyz");
+        VerifiedBuilderBadge b2 = new VerifiedBuilderBadge(builders, admin, keeper, hostile, "x/", "y/");
+        vm.prank(admin);
+        uint256 s2 = b2.issue(id);
+        string memory j2 = _decode(b2.tokenURI(s2));
+        assertEq(vm.parseJsonString(j2, ".attributes[3].value"), hostile, "chain label escaped");
+        assertFalse(vm.keyExistsJson(j2, ".attributes[5]"), "no injected attribute");
     }
 
     function test_setBasesByAdmin() public {
@@ -347,7 +357,127 @@ contract VerifiedBuilderBadgeTest is Test {
         assertEq(vm.parseJsonString(_json(1), ".image"), "ipfs://cid/1.jpg");
     }
 
+    // ───────────── sync (owner change) ─────────────
+
+    function _transfer(uint256 id, address from, address to) internal {
+        vm.prank(from);
+        builders.proposeOwner(to);
+        vm.prank(to);
+        builders.acceptOwnership(id);
+    }
+
+    function test_sync_afterTransfer_movesSameSerial_keepsData() public {
+        vm.warp(1_790_000_000);
+        _issue(bobId); // 1
+        uint256 s = _issue(aliceId); // 2
+        vm.prank(keeper);
+        badge.setLapsed(aliceId, true);
+        vm.warp(1_790_100_000);
+        _transfer(aliceId, alice, carol);
+        assertEq(badge.ownerOf(s), alice, "stale until synced");
+
+        vm.expectEmit(address(badge));
+        emit Transfer(alice, address(0), s);
+        vm.expectEmit(address(badge));
+        emit Transfer(address(0), carol, s);
+        vm.expectEmit(address(badge));
+        emit Locked(s);
+        vm.expectEmit(address(badge));
+        emit MetadataUpdate(s);
+        vm.expectEmit(address(badge));
+        emit Synced(aliceId, s, alice, carol);
+        vm.prank(makeAddr("anyone"));
+        badge.sync(aliceId);
+
+        assertEq(badge.ownerOf(s), carol);
+        assertEq(badge.balanceOf(alice), 0);
+        assertEq(badge.serialOf(aliceId), s, "same serial");
+        assertEq(badge.builderOf(s), aliceId);
+        assertEq(badge.issuedAt(s), 1_790_000_000, "issue date kept");
+        assertTrue(badge.lapsed(s), "lapsed flag kept");
+        assertEq(badge.nextSerial(), 3, "no new serial");
+        assertTrue(badge.locked(s));
+
+        // still soulbound for the new holder
+        vm.prank(carol);
+        vm.expectRevert(VerifiedBuilderBadge.Soulbound.selector);
+        badge.transferFrom(carol, alice, s);
+    }
+
+    function test_sync_afterRecovery() public {
+        uint256 s = _issue(aliceId);
+        address fresh = makeAddr("fresh");
+        vm.prank(admin);
+        builders.startRecovery(aliceId, fresh);
+        vm.warp(block.timestamp + builders.RECOVERY_DELAY());
+        builders.finishRecovery(aliceId);
+        badge.sync(aliceId);
+        assertEq(badge.ownerOf(s), fresh);
+        assertEq(badge.serialOf(aliceId), s);
+        assertFalse(badge.isLapsed(s));
+    }
+
+    function test_sync_noopWhenInSync_andNoBadgeReverts() public {
+        _issue(aliceId);
+        vm.recordLogs();
+        badge.sync(aliceId);
+        assertEq(vm.getRecordedLogs().length, 0, "no-op: no events");
+        assertEq(badge.ownerOf(1), alice);
+
+        vm.expectRevert(VerifiedBuilderBadge.NoBadge.selector);
+        badge.sync(bobId);
+        vm.expectRevert(VerifiedBuilderBadge.NoBadge.selector);
+        badge.sync(99);
+    }
+
+    function test_sync_cannotBeUsedToMoveElsewhere() public {
+        uint256 s = _issue(aliceId);
+        // no owner change: sync is a no-op and no other path moves the token
+        vm.prank(alice);
+        badge.sync(aliceId);
+        assertEq(badge.ownerOf(s), alice);
+        vm.prank(admin);
+        vm.expectRevert(VerifiedBuilderBadge.Soulbound.selector);
+        badge.transferFrom(alice, admin, s);
+    }
+
+    function test_sync_thenRevokeAndReissueGoesToCurrentOwner() public {
+        _issue(aliceId);
+        _transfer(aliceId, alice, carol);
+        badge.sync(aliceId);
+        vm.prank(admin);
+        badge.revoke(aliceId);
+        assertEq(badge.balanceOf(carol), 0);
+        assertEq(_issue(aliceId), 2);
+        assertEq(badge.ownerOf(2), carol);
+    }
+
     // ───────────── helpers ─────────────
+
+    function _decode(string memory uri) internal pure returns (string memory) {
+        bytes memory u = bytes(uri);
+        uint256 p = bytes("data:application/json;base64,").length;
+        bytes memory b64 = new bytes(u.length - p);
+        for (uint256 i; i < b64.length; i++) {
+            b64[i] = u[i + p];
+        }
+        return string(_b64decode(string(b64)));
+    }
+
+    function _contains(bytes memory hay, bytes memory needle) internal pure returns (bool) {
+        if (needle.length > hay.length) return false;
+        for (uint256 i; i + needle.length <= hay.length; i++) {
+            bool ok = true;
+            for (uint256 k; k < needle.length; k++) {
+                if (hay[i + k] != needle[k]) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) return true;
+        }
+        return false;
+    }
 
     function _b64decode(string memory s) internal pure returns (bytes memory) {
         bytes memory data = bytes(s);
