@@ -19,8 +19,9 @@ What it proves, on a throwaway anvil chain (31337) with anvil's public dev keys:
      exactly the UI's preview.
   4. The fees flow to the builder: arbiter proposal -> finalize -> closeEpoch ->
      claim -> stream -> the builder withdraws USDC.
-  5. Accounting closes: markets drain to dust, the 1% splits 30/20/50 to the unit,
-     a void refunds net cost minus 1% and pays a successful challenger the 20%.
+  5. Accounting closes: markets drain to dust, every trade's 1% splits 30/20/50 to the
+     unit, nothing is charged at settlement, a void refunds net cost (after fees) and pays
+     a successful challenger the agent's held 20%.
 
 Nothing here touches a real network: every step refuses a chain id other than 31337.
 """
@@ -54,11 +55,11 @@ EPOCH_LENGTH = 7200
 STREAM_WINDOW = 3600
 U = 10**6
 MINTED = ("operator", "resolver", "builder", "alice", "bob", "attacker", "watcher")
-FEE_BPS, CREATOR, AGENT = 100, 3000, 2000        # the landing page: 1% once, 30 / 20 / 50
+FEE_BPS, CREATOR, AGENT = 100, 3000, 2000        # the landing page: 1% of every trade, 30 / 20 / 50
 
 
 def split(c):
-    """What resolve/void pays out of a market with collateral c (exact contract rounding)."""
+    """The 1% trading fee on an amount c and its legs (exact contract rounding)."""
     fee = c * FEE_BPS // 10_000
     creator = fee * CREATOR // 10_000
     agent = fee * AGENT // 10_000
@@ -269,17 +270,17 @@ def rehearse(c, A):
     led = lambda who: c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", who)
     coll = lambda m: c.uint(MP, "collateralOf(bytes32)(uint256)", m)
 
+    escrow = lambda m: c.uint(MP, "agentEscrow(bytes32)(uint256)", m)
+
     def settles_with_split(label, m, creator_addr, action):
-        """Run `action` (a resolve) and prove the 1% was split 30/20/50 to the unit."""
-        C = coll(m)
+        """Run `action` (a resolve): nothing is charged at settlement; only the
+        agent's held 20% of the trading fees is released, to the agent."""
+        held = escrow(m)
         before = (led(creator_addr), led(A["operator"]), led(S["ProgressPool"]))
         out = action()
-        fee, cr, ag, cm = split(C)
         after = (led(creator_addr), led(A["operator"]), led(S["ProgressPool"]))
-        check(after[0] - before[0] == cr and after[1] - before[1] == ag and after[2] - before[2] == cm and fee > 0,
-              f"{label}: 1% of {C/U:.2f} collateral = {fee/U:.4f} -> creator {cr/U:.4f} / agent {ag/U:.4f} / commons {cm/U:.4f}")
-        check(c.uint(MP, "settledNet(bytes32)(uint256)", m) == C - fee and c.uint(MP, "settledGross(bytes32)(uint256)", m) == C,
-              f"{label}: winners and LP are paid on {(C - fee)/U:.4f} of {C/U:.4f} (net of the fee)")
+        check(held > 0 and after[1] - before[1] == held and after[0] == before[0] and after[2] == before[2] and escrow(m) == 0,
+              f"{label}: nothing charged at settlement; the agent's held 20% ({held/U:.4f}) released to it")
         return out
 
     print("== 4. m1 (YES): create via the UI path, trade, the builder ships, keeper settles")
@@ -290,8 +291,9 @@ def rehearse(c, A):
     M1 = m1["marketId"]
     b1 = ui("buy", "bob", marketId=M1, side="Yes", amount=str(20 * U))
     check(b1["quoteMatched"], f"bob buys YES 20 USDC -> {int(b1['sharesOut'])/U:.4f} shares, exactly the UI quote")
-    check(b1["fee"] == "0" and c.uint(MP, "netCost(bytes32,address)(uint256)", M1, A["bob"]) == 20 * U,
-          "no trading fee: the whole 20 USDC buys shares, net cost recorded as 20")
+    fee, cr, ag, cm = split(20 * U)
+    check(b1["fee"] == str(fee) and c.uint(MP, "netCost(bytes32,address)(uint256)", M1, A["bob"]) == 20 * U - fee,
+          f"1% trading fee: {fee/U:.2f} of bob's 20 (creator {cr/U:.2f} / agent held {ag/U:.2f} / commons {cm/U:.2f}); net cost 19.80")
     b2 = ui("buy", "alice", marketId=M1, side="No", amount=str(5 * U))
     check(b2["quoteMatched"], "alice buys NO 5 USDC at exactly the UI quote")
     s1 = ui("sell", "bob", marketId=M1, side="Yes", shares=str(int(b1["sharesOut"]) // 4))
@@ -336,13 +338,13 @@ def rehearse(c, A):
     # m2: the keeper is offline for m2's entire window (no ticks) -> voidable
     c.warp_to(int(m2["expiry"]) + SETTLEMENT_WINDOW + 60)
     check(ui("status", marketId=M2)["status"] == "voidable", "UI status: voidable when nothing settled in the window")
-    C2 = coll(M2)
+    held2 = escrow(M2)
     sink_before, agent_before = led(S["ProgressPool"]), led(A["operator"])
     v = ui("voidMarket", "bob", marketId=M2)
     check(ui("status", marketId=M2)["status"] == "voided", "a trader voids m2 through the UI path")
-    fee, cr, ag, cm = split(C2)
-    check(int(v["challengerReward"]) == 0 and led(S["ProgressPool"]) - sink_before == ag + cm and led(A["operator"]) == agent_before,
-          f"silent agent earns nothing: its 20% ({ag/U:.4f}) joins the commons' 50% ({cm/U:.4f})")
+    check(int(v["challengerReward"]) == 0 and held2 > 0 and led(S["ProgressPool"]) - sink_before == held2
+          and led(A["operator"]) == agent_before and escrow(M2) == 0,
+          f"silent agent earns nothing: its held 20% ({held2/U:.4f}) goes to the commons")
     r = keeper_tick()
     check(r["actions"] == [], "keeper: idempotent afterwards", r)
 
@@ -374,18 +376,16 @@ def rehearse(c, A):
           "independent resolver rules the answer Invalid: agent slashed and retired on that feed")
     c.warp_to(int(m4["expiry"]) + SETTLEMENT_WINDOW + 60)
     check(ui("status", marketId=M4)["status"] == "voidable", "no valid answer in the window: m4 is voidable")
-    C4 = coll(M4)
+    held4 = escrow(M4)
     w_before = led(A["watcher"])
     v = ui("voidMarket", "bob", marketId=M4)
-    fee, cr, ag, cm = split(C4)
-    check((v["challenger"] or "").lower() == A["watcher"].lower() and int(v["challengerReward"]) == ag
-          and led(A["watcher"]) - w_before == ag,
-          f"the watcher who proved the answer wrong receives the agent's 20% ({ag/U:.4f} USDC)")
+    check((v["challenger"] or "").lower() == A["watcher"].lower() and int(v["challengerReward"]) == held4 > 0
+          and led(A["watcher"]) - w_before == held4 and escrow(M4) == 0,
+          f"the watcher who proved the answer wrong receives the agent's held 20% ({held4/U:.4f} USDC)")
     for who, paid in (("bob", 10), ("alice", 4)):
         nc = c.uint(MP, "netCost(bytes32,address)(uint256)", M4, A[who])
-        exp = nc * (10_000 - FEE_BPS) // 10_000
-        check(nc == paid * U and c.uint(MP, "redeemable(bytes32,address)(uint256)", M4, A[who]) == exp,
-              f"{who}'s refund preview = net cost {paid} minus 1% = {exp/U:.2f}")
+        check(nc == paid * U - split(paid * U)[0] and c.uint(MP, "redeemable(bytes32,address)(uint256)", M4, A[who]) == nc,
+              f"{who}'s refund = net cost after the 1% trading fee: {paid} -> {nc/U:.2f}")
 
     print("== 6. everyone collects exactly the UI's preview")
     for m in (M1, M2, M3, M4):
@@ -409,7 +409,7 @@ def rehearse(c, A):
 
     print("== 7. the fees reach the builder: arbiter -> epoch -> stream -> withdraw")
     pot_before = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", S["ProgressPool"])
-    check(pot_before > 0, f"commons holds {pot_before/U:.4f} USDC: 50% of every resolution fee (+ the silent agent's 20%)")
+    check(pot_before > 0, f"commons holds {pot_before/U:.4f} USDC: 50% of every trading fee (+ the silent agent's held 20%)")
     c.send("operator", USDC, "approve(address,uint256)", S["NanoLedger"], 60 * U)
     c.send("operator", S["NanoLedger"], "deposit(uint256)", 60 * U)
     c.send("operator", S["NanoLedger"], "approveSpender(address,uint256)", S["ProgressArbiter"], 50 * U)
