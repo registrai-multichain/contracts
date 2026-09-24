@@ -60,7 +60,7 @@ contract PocRegressionTest is Test {
         markets = new MarketsPerennial(ledger, registry, attestation, builders, deployer, address(pool), WINDOW, GRACE);
         markets.setApprovedAgent(agent, true);
         markets.setApprovedResolver(resolver, true);
-        arb = new ProgressArbiter(ledger, pool, builders, caretakers, deployer, 300, 50e6, 10);
+        arb = new ProgressArbiter(ledger, pool, builders, caretakers, deployer, 300, 50e6, 10, 7 days);
         pool.grantRole(pool.PROGRESS_ROLE(), address(arb));
         arb.grantRole(arb.PROPOSER_ROLE(), caretaker);
         arb.grantRole(arb.RESOLVER_ROLE(), arbResolver);
@@ -152,5 +152,45 @@ contract PocRegressionTest is Test {
         vm.expectRevert(MarketsPerennial.ResolverNotApproved.selector);
         markets.createMarket(1, f, attacker, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
         assertFalse(markets.isApprovedFeed(f, attacker));
+    }
+
+    // ── M2: arbiter stakes are always recoverable ──
+
+    /// PoC: builder deactivated after propose -> finalize reverts forever and the
+    /// proposer's stake had no exit. Now closeInactive returns it.
+    function test_regression_arbiterStakeRecoverableWhenBuilderDeactivated() public {
+        caretakers.setCaretaker(1, caretaker);
+        vm.startPrank(caretaker);
+        arb.depositBond(50e6);
+        uint256 e = arb.propose(address(0xB111), 5);
+        vm.stopPrank();
+        builders.setActive(1, false);
+        vm.warp(block.timestamp + 301);
+        vm.expectRevert(ProgressPool.BuilderInactive.selector);
+        arb.finalize(e); // still cannot credit an inactive builder
+        arb.closeInactive(e); // anyone
+        assertEq(arb.availableBond(caretaker), 50e6, "stake recovered");
+        vm.prank(caretaker);
+        arb.withdrawBond(50e6);
+    }
+
+    /// PoC: a challenged entry with a silent resolver locked both stakes forever.
+    /// Now anyone expires it after RESOLVE_TIMEOUT and both stakes come back.
+    function test_regression_arbiterChallengeWithoutResolverExpires() public {
+        caretakers.setCaretaker(1, caretaker);
+        vm.startPrank(caretaker);
+        arb.depositBond(50e6);
+        uint256 e = arb.propose(address(0xB111), 5);
+        vm.stopPrank();
+        uint256 chBefore = ledger.balanceOf(challenger);
+        vm.prank(challenger);
+        arb.challenge(e);
+        vm.warp(block.timestamp + 365 days);
+        vm.expectRevert(ProgressArbiter.BadState.selector);
+        arb.finalize(e);
+        arb.expireChallenge(e);
+        assertEq(arb.availableBond(caretaker), 50e6, "proposer stake recovered");
+        assertEq(ledger.balanceOf(challenger), chBefore, "challenger stake recovered");
+        assertEq(pool.progressWeight(0, address(0xB111)), 0, "no weight");
     }
 }

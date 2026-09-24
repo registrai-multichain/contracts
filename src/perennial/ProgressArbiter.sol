@@ -21,6 +21,11 @@ contract ProgressArbiter is AccessControl {
     BuilderRegistry public immutable BUILDERS;
     CaretakerRegistry public immutable CARETAKERS;
 
+    /// @notice How long a challenged entry may wait for the resolver before
+    /// anyone can expire it (both stakes refunded, no weight credited). Fixed at
+    /// deploy so an absent resolver can never lock stakes forever.
+    uint256 public immutable RESOLVE_TIMEOUT;
+
     uint256 public challengeWindow;
     uint256 public stakePerProposal;
     uint256 public maxWeightPerProposal;
@@ -31,7 +36,9 @@ contract ProgressArbiter is AccessControl {
         Challenged,
         ResolvedValid,
         ResolvedInvalid,
-        Finalized
+        Finalized,
+        Closed, // builder went inactive: stakes returned, no weight credited
+        Expired // challenge outlived RESOLVE_TIMEOUT: both stakes returned, no weight
     }
 
     struct Entry {
@@ -46,6 +53,8 @@ contract ProgressArbiter is AccessControl {
     Entry[] public entries;
     mapping(address => uint256) public bondOf;
     mapping(address => uint256) public lockedBond;
+    /// @notice When entry `id` was challenged (0 if never).
+    mapping(uint256 => uint256) public challengedAt;
 
     event BondDeposited(address indexed proposer, uint256 amount);
     event BondWithdrawn(address indexed proposer, uint256 amount);
@@ -54,6 +63,8 @@ contract ProgressArbiter is AccessControl {
     event ProgressResolved(uint256 indexed id, bool valid);
     event ProgressFinalized(uint256 indexed id, address indexed builder, uint256 weight);
     event ParamsSet(uint256 challengeWindow, uint256 stakePerProposal);
+    event ProgressClosedInactive(uint256 indexed id, address indexed builder, bool challengerRefunded);
+    event ChallengeExpired(uint256 indexed id, address indexed challenger);
 
     error ZeroAddress();
     error BadState();
@@ -64,6 +75,8 @@ contract ProgressArbiter is AccessControl {
     error UnauthorizedCaretaker();
     error InvalidWeight();
     error InvalidParams();
+    error BuilderActive();
+    error TimeoutNotReached();
 
     constructor(
         NanoLedger ledger_,
@@ -73,14 +86,16 @@ contract ProgressArbiter is AccessControl {
         address admin,
         uint256 challengeWindow_,
         uint256 stakePerProposal_,
-        uint256 maxWeightPerProposal_
+        uint256 maxWeightPerProposal_,
+        uint256 resolveTimeout_
     ) {
         if (
             address(ledger_) == address(0) || address(pool_) == address(0) || address(builders_) == address(0)
                 || address(caretakers_) == address(0) || admin == address(0)
         ) revert ZeroAddress();
         if (maxWeightPerProposal_ == 0) revert InvalidWeight();
-        if (challengeWindow_ == 0 || stakePerProposal_ == 0) revert InvalidParams();
+        if (challengeWindow_ == 0 || stakePerProposal_ == 0 || resolveTimeout_ == 0) revert InvalidParams();
+        RESOLVE_TIMEOUT = resolveTimeout_;
         LEDGER = ledger_;
         POOL = pool_;
         BUILDERS = builders_;
@@ -140,6 +155,7 @@ contract ProgressArbiter is AccessControl {
         LEDGER.transferFromInternal(msg.sender, address(this), e.stake);
         e.challenger = msg.sender;
         e.state = State.Challenged;
+        challengedAt[id] = block.timestamp;
         emit ProgressChallenged(id, msg.sender);
     }
 
@@ -171,6 +187,46 @@ contract ProgressArbiter is AccessControl {
         e.state = State.Finalized;
         POOL.addProgress(e.builder, e.weight);
         emit ProgressFinalized(id, e.builder, e.weight);
+    }
+
+    /// @notice Close an entry whose builder has been deactivated, so finalize
+    /// (which credits the pool, and the pool refuses inactive builders) can never
+    /// succeed. The proposer's stake is unlocked and no weight is credited.
+    ///  - Proposed: permissionless once the challenge window has closed (a
+    ///    challenger keeps the whole window to contest it first).
+    ///  - ResolvedValid: permissionless (the challenger already lost its stake).
+    ///  - Challenged: RESOLVER_ROLE only, refunding the challenger's stake too;
+    ///    otherwise a proposer could dodge a pending slash. Without the resolver
+    ///    the entry is closed by expireChallenge after RESOLVE_TIMEOUT.
+    function closeInactive(uint256 id) external {
+        Entry storage e = entries[id];
+        if (BUILDERS.isActiveBuilder(e.builder)) revert BuilderActive();
+        State st = e.state;
+        if (st == State.Proposed) {
+            if (block.timestamp < e.maturesAt) revert WindowOpen();
+        } else if (st == State.Challenged) {
+            _checkRole(RESOLVER_ROLE);
+        } else if (st != State.ResolvedValid) {
+            revert BadState();
+        }
+        lockedBond[e.proposer] -= e.stake;
+        e.state = State.Closed;
+        bool refund = st == State.Challenged;
+        if (refund) LEDGER.internalTransfer(e.challenger, e.stake);
+        emit ProgressClosedInactive(id, e.builder, refund);
+    }
+
+    /// @notice Expire a challenge the resolver never ruled on. Permissionless once
+    /// RESOLVE_TIMEOUT has passed since the challenge: the proposer's stake is
+    /// unlocked, the challenger's stake is returned, no weight is credited.
+    function expireChallenge(uint256 id) external {
+        Entry storage e = entries[id];
+        if (e.state != State.Challenged) revert BadState();
+        if (block.timestamp < challengedAt[id] + RESOLVE_TIMEOUT) revert TimeoutNotReached();
+        lockedBond[e.proposer] -= e.stake;
+        e.state = State.Expired;
+        LEDGER.internalTransfer(e.challenger, e.stake);
+        emit ChallengeExpired(id, e.challenger);
     }
 
     function setParams(uint256 challengeWindow_, uint256 stakePerProposal_) external onlyRole(DEFAULT_ADMIN_ROLE) {

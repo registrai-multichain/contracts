@@ -37,6 +37,7 @@ contract DeployArbiter is Script {
         uint256 challengeWindow = vm.envOr("CHALLENGE_WINDOW", uint256(1 hours));
         uint256 stakePerProposal = vm.envOr("STAKE_PER_PROPOSAL", uint256(50e6));
         uint256 maxWeight = vm.envOr("MAX_WEIGHT_PER_PROPOSAL", uint256(10));
+        uint256 resolveTimeout = vm.envOr("RESOLVE_TIMEOUT", uint256(7 days));
 
         // Separation of duties is the whole point: the party that proposes
         // progress must not also be the party that adjudicates a challenge to it.
@@ -45,7 +46,7 @@ contract DeployArbiter is Script {
         vm.startBroadcast();
 
         arbiter = new ProgressArbiter(
-            ledger, pool, builders, caretakers, msg.sender, challengeWindow, stakePerProposal, maxWeight
+            ledger, pool, builders, caretakers, msg.sender, challengeWindow, stakePerProposal, maxWeight, resolveTimeout
         );
 
         // The arbiter becomes the ONLY writer of progress into the pool...
