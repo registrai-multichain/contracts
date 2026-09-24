@@ -19,6 +19,8 @@ import {RoleTable} from "../../script/lib/RoleTable.sol";
 import {DeployOracle} from "../../script/DeployOracle.s.sol";
 import {DeployNanoLedger} from "../../script/DeployNanoLedger.s.sol";
 import {DeployPerennial} from "../../script/DeployPerennial.s.sol";
+import {DeployBuilders} from "../../script/DeployBuilders.s.sol";
+import {VerifiedBuilderBadge} from "../../src/perennial/VerifiedBuilderBadge.sol";
 import {DeployArbiter} from "../../script/DeployArbiter.s.sol";
 import {DeployNanoStack} from "../../script/DeployNanoStack.s.sol";
 import {Handoff} from "../../script/Handoff.s.sol";
@@ -204,6 +206,113 @@ contract DeployScriptsTest is Test {
         assertTrue(pool.hasRole(PROGRESS, address(arbiter)));
         assertFalse(pool.hasRole(PROGRESS, admin));
         new VerifyRoles().verify(_stack(), admin, deployer);
+    }
+
+    // ───────────── phase 1: builders before markets ─────────────
+
+    function _buildersCfg() internal view returns (DeployBuilders.Config memory c) {
+        c.deployer = deployer;
+        c.admin = admin;
+        c.operator = proposer; // the keeper operator
+        c.chainLabel = "Arc Mainnet";
+        c.imageBase = "https://registrai.cc/badge/arc/";
+        c.externalBase = "https://registrai.cc/builders/?builder=";
+    }
+
+    /// Phase 1 puts only the builder side on chain (ADMIN holds everything, the
+    /// deployer nothing); builders register, get a caretaker and a badge; phase 2
+    /// runs the forced order reusing the registries and hands off cleanly.
+    function _phase1ThenMarkets() internal {
+        VerifiedBuilderBadge badge;
+        (builders, caretakers, badge) = new DeployBuilders().deploy(_buildersCfg());
+        assertFalse(builders.hasRole(DEFAULT_ADMIN, deployer));
+        assertFalse(caretakers.hasRole(GOVERNOR, deployer));
+        assertTrue(builders.hasRole(REGISTRAR, admin) && caretakers.hasRole(GOVERNOR, admin));
+        assertTrue(badge.hasRole(badge.STATUS_ROLE(), proposer) && !badge.hasRole(badge.ISSUER_ROLE(), proposer));
+
+        // the gallery's life before any market: claim, onboard, badge
+        address alice = makeAddr("alice");
+        vm.prank(alice);
+        uint256 id = builders.registerBuilder("registrai:github:alice/app");
+        vm.startPrank(admin);
+        caretakers.setCaretaker(id, proposer);
+        uint256 serial = badge.issue(id);
+        vm.stopPrank();
+
+        // phase 2: the forced order, reusing the registries
+        (registry, attestation, dispute) = new DeployOracle().deploy(
+            DeployOracle.Config({deployer: deployer, usdc: _usdcAddr(), minBond: 10e6, points: address(0)})
+        );
+        ledger = new DeployNanoLedger().deploy(DeployNanoLedger.Config({deployer: deployer, usdc: _usdcAddr()}));
+        DeployPerennial.Config memory pc = _perennialCfg();
+        pc.builders = address(builders);
+        pc.caretakers = address(caretakers);
+        (BuilderRegistry b2, CaretakerRegistry c2, ProgressPool p2, MarketsPerennial m2) = new DeployPerennial().deploy(pc);
+        (pool, perennial) = (p2, m2);
+        assertEq(address(b2), address(builders), "registry reused");
+        assertEq(address(c2), address(caretakers), "caretakers reused");
+        assertEq(address(pool.BUILDERS()), address(builders));
+        assertEq(address(perennial.BUILDERS()), address(builders));
+        arbiter = new DeployArbiter().deploy(_arbiterCfg());
+        (, v4) = new DeployNanoStack().deploy(_v4Cfg());
+        new Handoff().handoff(_stack(), admin, deployer);
+        _assertDeployerHoldsNothing();
+        new VerifyRoles().verify(_stack(), admin, deployer);
+
+        // everything done in phase 1 carried over
+        assertEq(builders.builderIdOf(alice), id);
+        assertTrue(caretakers.isCaretaker(id, proposer));
+        assertEq(badge.ownerOf(serial), alice);
+    }
+
+    function test_phase1Builders_thenMarketsReuseRegistries() public {
+        _phase1ThenMarkets();
+    }
+
+    function test_phase1Builders_onMainnetChainId() public {
+        vm.chainId(5042);
+        vm.etch(0x3600000000000000000000000000000000000000, address(usdc).code);
+        _phase1ThenMarkets();
+    }
+
+    function test_phase1Builders_refusesEOAAdminOnMainnetAndSharedKeys() public {
+        DeployBuilders d = new DeployBuilders();
+        DeployBuilders.Config memory c = _buildersCfg();
+        c.operator = admin;
+        vm.expectRevert(bytes("ADMIN and OPERATOR must differ: the operator may only set badge status"));
+        d.deploy(c);
+        c = _buildersCfg();
+        c.admin = deployer;
+        vm.expectRevert(bytes("ADMIN must not be the deployer"));
+        d.deploy(c);
+        vm.chainId(5042);
+        c = _buildersCfg();
+        c.admin = makeAddr("eoaAdmin");
+        vm.expectRevert(bytes("mainnet: ADMIN must be a contract (Safe/timelock), not an EOA"));
+        d.deploy(c);
+    }
+
+    function test_perennial_reuseNeedsBothMatchingRegistries() public {
+        (registry, attestation, dispute) = new DeployOracle().deploy(
+            DeployOracle.Config({deployer: deployer, usdc: _usdcAddr(), minBond: 10e6, points: address(0)})
+        );
+        ledger = new DeployNanoLedger().deploy(DeployNanoLedger.Config({deployer: deployer, usdc: _usdcAddr()}));
+        (BuilderRegistry b1, CaretakerRegistry c1,) = new DeployBuilders().deploy(_buildersCfg());
+        (, CaretakerRegistry cOther,) = new DeployBuilders().deploy(_buildersCfg());
+        DeployPerennial p = new DeployPerennial();
+
+        DeployPerennial.Config memory pc = _perennialCfg();
+        pc.builders = address(b1);
+        vm.expectRevert(bytes("BUILDER_REGISTRY and CARETAKER_REGISTRY: both or neither"));
+        p.deploy(pc);
+
+        pc.caretakers = address(cOther);
+        vm.expectRevert(bytes("CARETAKER_REGISTRY belongs to a different BuilderRegistry"));
+        p.deploy(pc);
+
+        pc.caretakers = address(c1);
+        (BuilderRegistry b,,,) = p.deploy(pc);
+        assertEq(address(b), address(b1));
     }
 
     /// The same order on chainid 5042, with every mainnet validation active.

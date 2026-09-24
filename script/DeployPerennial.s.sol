@@ -30,6 +30,10 @@ import {CaretakerRegistry} from "../src/perennial/CaretakerRegistry.sol";
 ///                                         the deployer on mainnet
 ///      APPROVED_AGENT      MAINNET [deployer] agent allowed to settle markets
 ///      DISPUTE_RESOLVER    MAINNET [deployer] resolver feeds must name
+///      BUILDER_REGISTRY, CARETAKER_REGISTRY   optional, both or neither: reuse the
+///                          phase-1 registries (DeployBuilders.s.sol) instead of
+///                          deploying new ones, so builder ids, caretakers and
+///                          badges carry over into the markets.
 contract DeployPerennial is DeployBase {
     struct Config {
         address deployer;
@@ -43,6 +47,9 @@ contract DeployPerennial is DeployBase {
         address protocolTreasury;
         address approvedAgent;
         address disputeResolver;
+        /// Existing phase-1 registries; zero = deploy new ones.
+        address builders;
+        address caretakers;
     }
 
     function run()
@@ -78,6 +85,8 @@ contract DeployPerennial is DeployBase {
         c.protocolTreasury = _addrReq("PROTOCOL_TREASURY", deployer);
         c.approvedAgent = _addrReq("APPROVED_AGENT", deployer);
         c.disputeResolver = _addrReq("DISPUTE_RESOLVER", deployer);
+        c.builders = vm.envOr("BUILDER_REGISTRY", address(0));
+        c.caretakers = vm.envOr("CARETAKER_REGISTRY", address(0));
     }
 
     function deploy(Config memory c)
@@ -97,9 +106,24 @@ contract DeployPerennial is DeployBase {
             require(c.protocolTreasury != c.deployer, "mainnet: PROTOCOL_TREASURY must not be the deployer");
         }
 
+        bool reuse = c.builders != address(0) || c.caretakers != address(0);
+        if (reuse) {
+            require(c.builders != address(0) && c.caretakers != address(0), "BUILDER_REGISTRY and CARETAKER_REGISTRY: both or neither");
+            require(c.builders.code.length > 0 && c.caretakers.code.length > 0, "phase-1 registry has no code");
+            require(
+                address(CaretakerRegistry(c.caretakers).BUILDERS()) == c.builders,
+                "CARETAKER_REGISTRY belongs to a different BuilderRegistry"
+            );
+        }
+
         vm.startBroadcast(c.deployer);
-        builderReg = new BuilderRegistry(c.deployer);
-        caretakers = new CaretakerRegistry(builderReg, c.deployer);
+        if (reuse) {
+            builderReg = BuilderRegistry(c.builders);
+            caretakers = CaretakerRegistry(c.caretakers);
+        } else {
+            builderReg = new BuilderRegistry(c.deployer);
+            caretakers = new CaretakerRegistry(builderReg, c.deployer);
+        }
         pool = new ProgressPool(
             NanoLedger(c.ledger), builderReg, caretakers, c.deployer, c.epochLength, c.streamWindow, c.protocolTreasury
         );
