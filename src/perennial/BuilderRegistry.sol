@@ -9,6 +9,10 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 /// gates the (later) quadratic distribution and is false until linked.
 contract BuilderRegistry is AccessControl {
     bytes32 public constant REGISTRAR_ROLE = keccak256("REGISTRAR_ROLE");
+    /// Builder-controlled strings are rendered on-chain (the badge's tokenURI):
+    /// bounded so no builder can price its own metadata out of eth_call.
+    uint256 public constant MAX_PROFILE_LEN = 256;
+    uint256 public constant MAX_IDENTITY_LEN = 1024;
 
     struct Builder {
         address owner;
@@ -31,6 +35,7 @@ contract BuilderRegistry is AccessControl {
     error NotRegistered();
     error NotOwner();
     error ZeroAddress();
+    error TooLong();
 
     constructor(address admin) {
         if (admin == address(0)) revert ZeroAddress();
@@ -47,6 +52,7 @@ contract BuilderRegistry is AccessControl {
         returns (uint256 id)
     {
         if (builder == address(0)) revert ZeroAddress();
+        if (bytes(profileURI).length > MAX_PROFILE_LEN) revert TooLong();
         if (builderIdOf[builder] != 0) revert AlreadyRegistered();
         id = nextId++;
         builders[id] = Builder({
@@ -57,6 +63,7 @@ contract BuilderRegistry is AccessControl {
     }
 
     function registerBuilder(string calldata profileURI) external returns (uint256 id) {
+        if (bytes(profileURI).length > MAX_PROFILE_LEN) revert TooLong();
         if (builderIdOf[msg.sender] != 0) revert AlreadyRegistered();
         id = nextId++;
         builders[id] = Builder({
@@ -71,6 +78,7 @@ contract BuilderRegistry is AccessControl {
     }
 
     function updateProfile(string calldata profileURI) external {
+        if (bytes(profileURI).length > MAX_PROFILE_LEN) revert TooLong();
         uint256 id = builderIdOf[msg.sender];
         if (id == 0) revert NotRegistered();
         builders[id].profileURI = profileURI;
@@ -88,6 +96,7 @@ contract BuilderRegistry is AccessControl {
     /// @notice Bind to a KYA/identity proof. Verification of the proof is left to
     /// the identity layer; storing it is what flips isUniqueBuilder true.
     function linkIdentity(bytes calldata kyaProof) external {
+        if (kyaProof.length > MAX_IDENTITY_LEN) revert TooLong();
         uint256 id = builderIdOf[msg.sender];
         if (id == 0) revert NotRegistered();
         builders[id].linkedIdentity = kyaProof;

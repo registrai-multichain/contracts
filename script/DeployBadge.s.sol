@@ -67,6 +67,7 @@ contract DeployBadge is DeployBase {
         vm.stopBroadcast();
 
         require(badge.hasRole(badge.ISSUER_ROLE(), c.admin), "admin lacks ISSUER");
+        require(badge.hasRole(badge.REVOKER_ROLE(), c.admin), "admin lacks REVOKER");
         require(badge.hasRole(badge.DEFAULT_ADMIN_ROLE(), c.admin), "admin lacks DEFAULT_ADMIN");
         require(badge.hasRole(badge.STATUS_ROLE(), c.operator), "operator lacks STATUS");
         require(!badge.hasRole(badge.ISSUER_ROLE(), c.operator), "operator must not issue");

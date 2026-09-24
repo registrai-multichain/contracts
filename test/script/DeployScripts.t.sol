@@ -97,7 +97,13 @@ contract DeployScriptsTest is Test {
             DeployOracle.Config({deployer: deployer, usdc: _usdcAddr(), minBond: 10e6, points: address(0)})
         );
         ledger = new DeployNanoLedger().deploy(DeployNanoLedger.Config({deployer: deployer, usdc: _usdcAddr()}));
-        (builders, caretakers, pool, perennial) = new DeployPerennial().deploy(_perennialCfg());
+        DeployPerennial.Config memory pc = _perennialCfg();
+        if (block.chainid == 5042) {
+            // mainnet: the builder side is phase 1; markets must reuse it
+            (BuilderRegistry b1, CaretakerRegistry c1,) = new DeployBuilders().deploy(_buildersCfg());
+            (pc.builders, pc.caretakers) = (address(b1), address(c1));
+        }
+        (builders, caretakers, pool, perennial) = new DeployPerennial().deploy(pc);
         arbiter = new DeployArbiter().deploy(_arbiterCfg());
         (, v4) = new DeployNanoStack().deploy(_v4Cfg());
     }
@@ -269,6 +275,14 @@ contract DeployScriptsTest is Test {
         new Handoff().handoff(_stack(), admin, deployer);
         _assertDeployerHoldsNothing();
         new VerifyRoles().verify(_stack(), admin, deployer);
+        if (block.chainid == 5042) {
+            // audit M-1: on mainnet the hot wallet must lose setCaretaker before markets
+            OnboarderCheck chk = new OnboarderCheck();
+            vm.expectRevert(bytes("mainnet: revoke the ONBOARDER's CaretakerRegistry GOVERNOR before markets"));
+            chk.check(_stack(), onboarder);
+            vm.prank(admin);
+            caretakers.revokeRole(GOVERNOR, onboarder);
+        }
         new OnboarderCheck().check(_stack(), onboarder);
 
         // everything done in phase 1 carried over
@@ -322,7 +336,8 @@ contract DeployScriptsTest is Test {
         vm.startPrank(onboarder);
         ct.setCaretaker(id, proposer);
         badge.issue(id);
-        badge.revoke(id);
+        vm.expectRevert();
+        badge.revoke(id); // REVOKER stays with the Safe (audit L-3)
         vm.expectRevert();
         b.setActive(id, false); // REGISTRAR stays with the Safe
         vm.expectRevert();
@@ -334,6 +349,11 @@ contract DeployScriptsTest is Test {
         vm.expectRevert();
         badge.setLapsed(id, true);
         vm.stopPrank();
+
+        assertFalse(badge.hasRole(badge.REVOKER_ROLE(), onboarder));
+        assertTrue(badge.hasRole(badge.REVOKER_ROLE(), admin));
+        vm.prank(admin);
+        badge.revoke(id);
 
         vm.startPrank(admin);
         badge.revokeRole(issuer, onboarder);

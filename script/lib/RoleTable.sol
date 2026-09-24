@@ -144,6 +144,9 @@ abstract contract RoleTable is DeployBase {
         require(address(ProgressArbiter(s.arbiter).POOL()) == s.pool, "arbiter pool");
         require(MarketsPerennial(s.perennial).commons() == s.pool, "perennial commons");
         require(address(ProgressPool(s.pool).BUILDERS()) == s.builders, "pool builders");
+        require(address(ProgressPool(s.pool).CARETAKERS()) == s.caretakers, "pool caretakers");
+        require(address(ProgressArbiter(s.arbiter).BUILDERS()) == s.builders, "arbiter builders");
+        require(address(ProgressArbiter(s.arbiter).CARETAKERS()) == s.caretakers, "arbiter caretakers");
         require(address(CaretakerRegistry(s.caretakers).BUILDERS()) == s.builders, "caretakers builders");
         require(address(MarketsPerennial(s.perennial).BUILDERS()) == s.builders, "perennial builders");
 
@@ -161,18 +164,20 @@ abstract contract RoleTable is DeployBase {
 
     /// @notice Phase 2 guard for the phase-1 ONBOARDER (a hot wallet with badge
     /// ISSUER + CaretakerRegistry GOVERNOR): it must hold no other admin-type role
-    /// anywhere in the market stack, and never progress/proposer/resolver. Its
-    /// CaretakerRegistry GOVERNOR is allowed but logged — the owner keeps or
-    /// revokes it deliberately before markets open.
+    /// anywhere in the market stack, and never progress/proposer/resolver. On
+    /// mainnet its CaretakerRegistry GOVERNOR must be revoked too (it decides who
+    /// can draw from the commons once markets exist); elsewhere it is logged.
     function _verifyOnboarder(Stack memory s, address onboarder, bool print) internal view {
         if (onboarder == address(0)) return;
         (address[] memory where, bytes32[] memory roles, string[] memory names) = _adminRoles(s);
         for (uint256 i; i < where.length; i++) {
             bool h = _has(where[i], roles[i], onboarder);
             if (where[i] == s.caretakers && roles[i] == GOVERNOR) {
-                if (print) {
-                    console2.log(string.concat("ONBOARDER CaretakerRegistry GOVERNOR (setCaretaker) = ", _b(h), "  <- keep or revoke before markets"));
-                }
+                // With markets live, setCaretaker decides who the operator may
+                // propose progress for — i.e. who draws from the commons. A hot
+                // wallet must not hold that on mainnet (audit M-1).
+                if (_isMainnet()) require(!h, "mainnet: revoke the ONBOARDER's CaretakerRegistry GOVERNOR before markets");
+                if (print) console2.log(string.concat("ONBOARDER CaretakerRegistry GOVERNOR (setCaretaker) = ", _b(h)));
                 continue;
             }
             require(!h, string.concat("ONBOARDER holds ", names[i]));

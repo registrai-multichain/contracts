@@ -16,7 +16,8 @@ import {VerifiedBuilderBadge} from "../src/perennial/VerifiedBuilderBadge.sol";
 /// Roles: ADMIN (the Safe) holds every admin role (DEFAULT_ADMIN everywhere,
 /// REGISTRAR, GOVERNOR, ISSUER). The optional ONBOARDER — a lower-security hot
 /// wallet for day-to-day onboarding from the admin page — gets ONLY badge
-/// ISSUER (issue/revoke) and CaretakerRegistry GOVERNOR (setCaretaker); the Safe
+/// ISSUER (issue) and CaretakerRegistry GOVERNOR (setCaretaker) — never REVOKER
+/// (burning a badge is Safe-only); the Safe
 /// can take both back in one transaction. The keeper OPERATOR gets badge STATUS
 /// (setLapsed). The deployer holds a role only inside this script, to grant
 /// them, then renounces: it holds nothing afterwards (asserted), so phase 1
@@ -104,8 +105,10 @@ contract DeployBuilders is DeployBase {
             badge = new VerifiedBuilderBadge(builders, c.deployer, c.operator, c.chainLabel, c.imageBase, c.externalBase);
             badge.grantRole(da, c.admin);
             badge.grantRole(badge.ISSUER_ROLE(), c.admin);
+            badge.grantRole(badge.REVOKER_ROLE(), c.admin);
             badge.grantRole(badge.ISSUER_ROLE(), c.onboarder);
             badge.renounceRole(badge.ISSUER_ROLE(), c.deployer);
+            badge.renounceRole(badge.REVOKER_ROLE(), c.deployer);
             badge.renounceRole(da, c.deployer);
         }
         vm.stopBroadcast();
@@ -113,13 +116,17 @@ contract DeployBuilders is DeployBase {
         // ADMIN holds everything, the deployer nothing, the operator only badge STATUS.
         require(builders.hasRole(da, c.admin) && builders.hasRole(builders.REGISTRAR_ROLE(), c.admin), "admin lacks builder roles");
         require(caretakers.hasRole(da, c.admin) && caretakers.hasRole(caretakers.GOVERNOR_ROLE(), c.admin), "admin lacks caretaker roles");
-        require(badge.hasRole(da, c.admin) && badge.hasRole(badge.ISSUER_ROLE(), c.admin), "admin lacks badge roles");
+        require(
+            badge.hasRole(da, c.admin) && badge.hasRole(badge.ISSUER_ROLE(), c.admin) && badge.hasRole(badge.REVOKER_ROLE(), c.admin),
+            "admin lacks badge roles"
+        );
         require(badge.hasRole(badge.STATUS_ROLE(), c.operator), "operator lacks badge STATUS");
         require(!badge.hasRole(badge.ISSUER_ROLE(), c.operator) && !badge.hasRole(da, c.operator), "operator must only set status");
         require(
             !builders.hasRole(da, c.deployer) && !builders.hasRole(builders.REGISTRAR_ROLE(), c.deployer)
                 && !caretakers.hasRole(da, c.deployer) && !caretakers.hasRole(caretakers.GOVERNOR_ROLE(), c.deployer)
-                && !badge.hasRole(da, c.deployer) && !badge.hasRole(badge.ISSUER_ROLE(), c.deployer),
+                && !badge.hasRole(da, c.deployer) && !badge.hasRole(badge.ISSUER_ROLE(), c.deployer)
+                && !badge.hasRole(badge.REVOKER_ROLE(), c.deployer),
             "deployer holds a role"
         );
         require(address(caretakers.BUILDERS()) == address(builders) && address(badge.BUILDERS()) == address(builders), "wiring");
@@ -130,7 +137,8 @@ contract DeployBuilders is DeployBase {
             );
             require(
                 !badge.hasRole(da, c.onboarder) && !caretakers.hasRole(da, c.onboarder) && !builders.hasRole(da, c.onboarder)
-                    && !builders.hasRole(builders.REGISTRAR_ROLE(), c.onboarder) && !badge.hasRole(badge.STATUS_ROLE(), c.onboarder),
+                    && !builders.hasRole(builders.REGISTRAR_ROLE(), c.onboarder) && !badge.hasRole(badge.STATUS_ROLE(), c.onboarder)
+                    && !badge.hasRole(badge.REVOKER_ROLE(), c.onboarder),
                 "onboarder must hold only ISSUER + GOVERNOR"
             );
         }

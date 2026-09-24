@@ -62,13 +62,75 @@ contract VerifiedBuilderBadgeTest is Test {
 
     function test_keeperCannotIssueOrRevoke() public {
         bytes32 issuer = badge.ISSUER_ROLE();
+        bytes32 revoker = badge.REVOKER_ROLE();
         vm.prank(keeper);
         vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, keeper, issuer));
         badge.issue(aliceId);
         _issue(aliceId);
         vm.prank(keeper);
-        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, keeper, issuer));
+        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, keeper, revoker));
         badge.revoke(aliceId);
+    }
+
+    /// Audit L-3: issuing and revoking are separate; an issuer-only wallet cannot burn.
+    function test_issuerWithoutRevokerCannotBurn() public {
+        address onboarder = makeAddr("onboarder");
+        bytes32 issuer = badge.ISSUER_ROLE();
+        bytes32 revoker = badge.REVOKER_ROLE();
+        vm.prank(admin);
+        badge.grantRole(issuer, onboarder);
+        vm.prank(onboarder);
+        badge.issue(aliceId);
+        vm.prank(onboarder);
+        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, onboarder, revoker));
+        badge.revoke(aliceId);
+        assertTrue(badge.hasRole(revoker, admin));
+    }
+
+    /// Audit M-2: the badge certifies the source verified at issue; a later
+    /// profile change (or deactivation) shows Lapsed on-chain at once.
+    function test_badgeShowsVerifiedSource_andLapsesOnProfileChangeOrDeactivation() public {
+        _issue(aliceId);
+        assertTrue(badge.isCurrent(1));
+        assertFalse(badge.isLapsed(1));
+
+        vm.prank(alice);
+        builders.updateProfile("registrai:github:ethereum/go-ethereum");
+        string memory j = _json(1);
+        assertEq(vm.parseJsonString(j, ".attributes[3].value"), "github:alice/app", "shows what was verified");
+        assertEq(vm.parseJsonString(j, ".attributes[0].value"), "Lapsed");
+        assertEq(vm.parseJsonString(j, ".image"), "https://registrai.cc/badge/arc/1-lapsed.jpg");
+        assertEq(badge.verifiedSource(1), "github:alice/app");
+        assertEq(badge.sourceOf(aliceId), "github:ethereum/go-ethereum", "sourceOf stays live");
+        assertFalse(badge.lapsed(1), "the keeper flag is untouched");
+        assertTrue(badge.isLapsed(1));
+
+        vm.prank(alice);
+        builders.updateProfile("registrai:github:alice/app"); // back to the verified link
+        assertFalse(badge.isLapsed(1));
+
+        vm.prank(admin);
+        builders.setActive(aliceId, false);
+        assertEq(vm.parseJsonString(_json(1), ".attributes[0].value"), "Lapsed");
+    }
+
+    function test_issueNeedsARegistraiClaim() public {
+        vm.prank(carol);
+        uint256 id = builders.registerBuilder("ipfs://not-a-claim");
+        vm.prank(admin);
+        vm.expectRevert(VerifiedBuilderBadge.NotClaimed.selector);
+        badge.issue(id);
+    }
+
+    function test_revokeClearsSerialData() public {
+        _issue(aliceId);
+        vm.prank(admin);
+        badge.revoke(aliceId);
+        assertEq(badge.builderOf(1), 0);
+        assertEq(badge.issuedAt(1), 0);
+        assertEq(badge.verifiedProfileHash(1), bytes32(0));
+        assertEq(badge.verifiedSource(1), "");
+        assertFalse(badge.isCurrent(1));
     }
 
     function test_strangerCannotAnything() public {

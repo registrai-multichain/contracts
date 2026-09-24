@@ -104,12 +104,20 @@ contract DeployPerennial is DeployBase {
             require(c.approvedAgent != c.deployer, "mainnet: APPROVED_AGENT must not be the deployer");
             require(c.disputeResolver != c.approvedAgent, "mainnet: agent must not resolve its own disputes");
             require(c.protocolTreasury != c.deployer, "mainnet: PROTOCOL_TREASURY must not be the deployer");
+            // Phase 1 put the builder side on chain first; forgetting the reuse
+            // env here would silently fork builders, caretakers and badges.
+            require(
+                c.builders != address(0) && c.caretakers != address(0),
+                "mainnet: BUILDER_REGISTRY and CARETAKER_REGISTRY (phase 1) are required"
+            );
         }
 
         bool reuse = c.builders != address(0) || c.caretakers != address(0);
         if (reuse) {
             require(c.builders != address(0) && c.caretakers != address(0), "BUILDER_REGISTRY and CARETAKER_REGISTRY: both or neither");
             require(c.builders.code.length > 0 && c.caretakers.code.length > 0, "phase-1 registry has no code");
+            // BuilderRegistry has no immutables: its runtime code is exactly ours.
+            require(c.builders.codehash == keccak256(type(BuilderRegistry).runtimeCode), "BUILDER_REGISTRY is not this BuilderRegistry");
             require(
                 address(CaretakerRegistry(c.caretakers).BUILDERS()) == c.builders,
                 "CARETAKER_REGISTRY belongs to a different BuilderRegistry"

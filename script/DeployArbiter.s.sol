@@ -80,6 +80,9 @@ contract DeployArbiter is DeployBase {
             require(c.proposer != c.deployer && c.resolver != c.deployer, "mainnet: deployer must not propose/resolve");
         }
         ProgressPool pool = ProgressPool(c.pool);
+        // The arbiter must gate proposals on the SAME registries the pool pays by.
+        require(address(pool.BUILDERS()) == c.builders, "BUILDER_REGISTRY is not the pool's");
+        require(address(pool.CARETAKERS()) == c.caretakers, "CARETAKER_REGISTRY is not the pool's");
 
         vm.startBroadcast(c.deployer);
         arbiter = new ProgressArbiter(

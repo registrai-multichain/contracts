@@ -20,11 +20,16 @@ interface IERC5192 {
 /// builder's BuilderRegistry owner (which never changes). Token ids are serials
 /// in issue order ("No. 007") and are never reused.
 ///
-/// Trust split: the ISSUER (the admin Safe, in the same onboarding batch that
-/// assigns the caretaker) is the only one who can create or revoke a badge. The
-/// STATUS role (the keeper's operator key) can only flip an issued badge between
-/// verified and lapsed as the builder's off-chain proof comes and goes — a
-/// leaked keeper key cannot mint a single badge.
+/// Trust split: ISSUER (the Safe, and optionally the onboarder hot wallet)
+/// creates badges; REVOKER (the Safe only) burns them, so a leaked onboarder
+/// key cannot destroy anyone's number. STATUS (the keeper's operator key) can
+/// only flip an issued badge between verified and lapsed as the builder's
+/// off-chain proof comes and goes — it cannot mint, move or burn.
+///
+/// A badge certifies what was verified at issue: the builder's profile link is
+/// fingerprinted then, and the metadata shows the source as verified. If the
+/// builder later changes its profile link, or is deactivated, the badge reads
+/// Lapsed on-chain immediately — no keeper needed.
 ///
 /// Metadata is fully on-chain (data: JSON); only the artwork is hosted:
 /// `imageBase + serial + ("-lapsed")? + ".jpg"`.
@@ -33,6 +38,7 @@ contract VerifiedBuilderBadge is ERC721, AccessControl, IERC5192 {
 
     bytes32 public constant ISSUER_ROLE = keccak256("ISSUER_ROLE");
     bytes32 public constant STATUS_ROLE = keccak256("STATUS_ROLE");
+    bytes32 public constant REVOKER_ROLE = keccak256("REVOKER_ROLE");
 
     BuilderRegistry public immutable BUILDERS;
     string public chainLabel; // e.g. "Arc Mainnet"
@@ -44,6 +50,8 @@ contract VerifiedBuilderBadge is ERC721, AccessControl, IERC5192 {
     mapping(uint256 => uint256) public builderOf; // serial => builderId
     mapping(uint256 => bool) public lapsed; // serial => proof currently lapsed
     mapping(uint256 => uint64) public issuedAt; // serial => timestamp
+    mapping(uint256 => bytes32) public verifiedProfileHash; // serial => keccak256(profileURI) at issue
+    mapping(uint256 => string) private _verifiedSource; // serial => source at issue
 
     event Issued(uint256 indexed builderId, uint256 indexed serial, address indexed owner);
     event Revoked(uint256 indexed builderId, uint256 indexed serial);
@@ -59,6 +67,7 @@ contract VerifiedBuilderBadge is ERC721, AccessControl, IERC5192 {
     error AlreadyIssued();
     error NoBadge();
     error Soulbound();
+    error NotClaimed();
 
     constructor(
         BuilderRegistry builders_,
@@ -77,33 +86,43 @@ contract VerifiedBuilderBadge is ERC721, AccessControl, IERC5192 {
         externalBase = externalBase_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(ISSUER_ROLE, admin);
+        _grantRole(REVOKER_ROLE, admin);
         _grantRole(STATUS_ROLE, statusOperator);
     }
 
     // ───────────────────────────── issuer ─────────────────────────────
 
-    /// @notice Issue the next serial to `builderId`'s registry owner.
+    /// @notice Issue the next serial to `builderId`'s registry owner, fixing the
+    /// `registrai:` profile link it was verified with.
     function issue(uint256 builderId) external onlyRole(ISSUER_ROLE) returns (uint256 serial) {
-        address owner = BUILDERS.ownerOf(builderId);
+        (address owner, string memory uri,,, bool active) = BUILDERS.builders(builderId);
         if (owner == address(0)) revert NotRegistered();
-        if (!BUILDERS.isActiveBuilderId(builderId)) revert InactiveBuilder();
+        if (!active) revert InactiveBuilder();
         if (serialOf[builderId] != 0) revert AlreadyIssued();
+        string memory source = _sourceFrom(uri);
+        if (bytes(source).length == 0) revert NotClaimed();
         serial = nextSerial++;
         serialOf[builderId] = serial;
         builderOf[serial] = builderId;
         issuedAt[serial] = uint64(block.timestamp);
+        verifiedProfileHash[serial] = keccak256(bytes(uri));
+        _verifiedSource[serial] = source;
         _mint(owner, serial);
         emit Locked(serial);
         emit Issued(builderId, serial, owner);
     }
 
     /// @notice Burn a badge (e.g. a claim found to be fraudulent). The serial is
-    /// retired for good; a later re-issue gets a new serial.
-    function revoke(uint256 builderId) external onlyRole(ISSUER_ROLE) {
+    /// retired for good; a later re-issue gets a new serial. Safe only.
+    function revoke(uint256 builderId) external onlyRole(REVOKER_ROLE) {
         uint256 serial = serialOf[builderId];
         if (serial == 0) revert NoBadge();
         delete serialOf[builderId];
+        delete builderOf[serial];
         delete lapsed[serial];
+        delete issuedAt[serial];
+        delete verifiedProfileHash[serial];
+        delete _verifiedSource[serial];
         _burn(serial);
         emit Revoked(builderId, serial);
     }
@@ -155,10 +174,35 @@ contract VerifiedBuilderBadge is ERC721, AccessControl, IERC5192 {
 
     // ───────────────────────────── metadata ─────────────────────────────
 
-    /// @notice The builder's claimed source ("github:owner/repo" / "domain:host"),
-    /// read live from the registry profile link; "" if it is not a registrai: link.
+    /// @notice The builder's CURRENT claimed source ("github:owner/repo" /
+    /// "domain:host"), read live from the registry profile link; "" if it is not
+    /// a registrai: link. The badge itself shows `verifiedSource`.
     function sourceOf(uint256 builderId) public view returns (string memory) {
         (, string memory uri,,,) = BUILDERS.builders(builderId);
+        return _sourceFrom(uri);
+    }
+
+    /// @notice The source as verified when the badge was issued.
+    function verifiedSource(uint256 serial) external view returns (string memory) {
+        return _verifiedSource[serial];
+    }
+
+    /// @notice Whether the builder still stands where it was verified: active,
+    /// and the same profile link as at issue.
+    function isCurrent(uint256 serial) public view returns (bool) {
+        uint256 builderId = builderOf[serial];
+        if (builderId == 0) return false;
+        (, string memory uri,,, bool active) = BUILDERS.builders(builderId);
+        return active && keccak256(bytes(uri)) == verifiedProfileHash[serial];
+    }
+
+    /// @notice What the badge shows: lapsed by the keeper (proof gone), or no
+    /// longer current (profile link changed / builder deactivated).
+    function isLapsed(uint256 serial) public view returns (bool) {
+        return lapsed[serial] || !isCurrent(serial);
+    }
+
+    function _sourceFrom(string memory uri) internal pure returns (string memory) {
         bytes memory b = bytes(uri);
         bytes memory prefix = "registrai:";
         if (b.length <= prefix.length) return "";
@@ -175,16 +219,16 @@ contract VerifiedBuilderBadge is ERC721, AccessControl, IERC5192 {
     function tokenURI(uint256 serial) public view override returns (string memory) {
         _requireOwned(serial);
         uint256 builderId = builderOf[serial];
-        bool isLapsed = lapsed[serial];
+        bool shownLapsed = isLapsed(serial);
         string memory no = _pad3(serial);
-        string memory status = isLapsed ? "Lapsed" : "Verified";
+        string memory status = shownLapsed ? "Lapsed" : "Verified";
         string memory json = string.concat(
             '{"name":"Registrai Verified Builder No. ',
             no,
             '","description":"Soulbound badge for a builder who proved control of their project to Registrai. ',
-            "Non-transferable. Shows Lapsed while the builder's proof is missing.",
+            "Non-transferable. Shows Lapsed while the builder's proof is missing or its profile no longer matches.",
             '","image":"',
-            _escape(string.concat(imageBase, serial.toString(), isLapsed ? "-lapsed" : "", ".jpg")),
+            _escape(string.concat(imageBase, serial.toString(), shownLapsed ? "-lapsed" : "", ".jpg")),
             '","external_url":"',
             _escape(string.concat(externalBase, builderId.toString())),
             '","attributes":[',
@@ -207,7 +251,7 @@ contract VerifiedBuilderBadge is ERC721, AccessControl, IERC5192 {
             '},{"trait_type":"Builder ID","display_type":"number","value":',
             builderId.toString(),
             '},{"trait_type":"Source","value":"',
-            _escape(sourceOf(builderId)),
+            _escape(_verifiedSource[serial]),
             '"},{"trait_type":"Chain","value":"',
             _escape(chainLabel),
             '"},{"trait_type":"Issued","display_type":"date","value":',
