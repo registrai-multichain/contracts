@@ -19,7 +19,8 @@ What it proves, on a throwaway anvil chain (31337) with anvil's public dev keys:
      exactly the UI's preview.
   4. The fees flow to the builder: arbiter proposal -> finalize -> closeEpoch ->
      claim -> stream -> the builder withdraws USDC.
-  5. Accounting closes: markets and escrow drain to dust, nothing is stuck.
+  5. Accounting closes: markets drain to dust, the 1% splits 30/20/50 to the unit,
+     a void refunds net cost minus 1% and pays a successful challenger the 20%.
 
 Nothing here touches a real network: every step refuses a chain id other than 31337.
 """
@@ -52,6 +53,16 @@ ARB_CHALLENGE = 600
 EPOCH_LENGTH = 7200
 STREAM_WINDOW = 3600
 U = 10**6
+MINTED = ("operator", "resolver", "builder", "alice", "bob", "attacker", "watcher")
+FEE_BPS, CREATOR, AGENT = 100, 3000, 2000        # the landing page: 1% once, 30 / 20 / 50
+
+
+def split(c):
+    """What resolve/void pays out of a market with collateral c (exact contract rounding)."""
+    fee = c * FEE_BPS // 10_000
+    creator = fee * CREATOR // 10_000
+    agent = fee * AGENT // 10_000
+    return fee, creator, agent, fee - creator - agent
 
 PASS, FAIL = [], []
 
@@ -74,7 +85,7 @@ class Chain:
     def __init__(self):
         s = socket.socket(); s.bind(("127.0.0.1", 0)); self.port = s.getsockname()[1]; s.close()
         self.rpc = f"http://127.0.0.1:{self.port}"
-        self.proc = subprocess.Popen(["anvil", "--port", str(self.port), "--silent"])
+        self.proc = subprocess.Popen(["anvil", "--port", str(self.port), "--silent", "--accounts", "12"])
         for _ in range(50):
             if run(["cast", "chain-id", "--rpc-url", self.rpc], ok=False).stdout.strip() == "31337":
                 break
@@ -119,6 +130,11 @@ def main():
         if not shutil.which(tool):
             raise SystemExit(f"missing tool: {tool}")
     c = Chain()
+    # two more dev accounts from anvil's public test mnemonic: a second builder and an
+    # independent watcher who challenges a wrong answer
+    mn = "test test test test test test test test test test test junk"
+    for name, idx in (("builder2", 10), ("watcher", 11)):
+        KEYS[name] = run(["cast", "wallet", "private-key", "--mnemonic", mn, "--mnemonic-index", str(idx)]).stdout.strip()
     A = {k: c.addr(k) for k in KEYS}
     try:
         rehearse(c, A)
@@ -146,7 +162,7 @@ def rehearse(c, A):
     art = CONTRACTS / "out" / "test" / "MockUSDC.sol" / "MockUSDC.json"   # several tests define a MockUSDC; take test/MockUSDC.sol
     code = json.loads(art.read_text())["deployedBytecode"]["object"]
     run(["cast", "rpc", "anvil_setCode", USDC, code, "--rpc-url", c.rpc])
-    for who in ("operator", "resolver", "builder", "alice", "bob", "attacker"):
+    for who in MINTED:
         c.send("deployer", USDC, "mint(address,uint256)", A[who], 1_000 * U)
     check(c.uint(USDC, "balanceOf(address)(uint256)", A["alice"]) == 1_000 * U, "USDC live at 0x3600 on the local chain")
 
@@ -158,7 +174,8 @@ def rehearse(c, A):
     log = forge_script(c, "DeployNanoLedger", common)
     S["NanoLedger"] = grab(log, "NanoLedger")
     log = forge_script(c, "DeployPerennial", {**common, "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"],
-                       "NANO_LEDGER": S["NanoLedger"], "EPOCH_LENGTH": str(EPOCH_LENGTH), "STREAM_WINDOW": str(STREAM_WINDOW)})
+                       "NANO_LEDGER": S["NanoLedger"], "EPOCH_LENGTH": str(EPOCH_LENGTH), "STREAM_WINDOW": str(STREAM_WINDOW),
+                       "PROTOCOL_TREASURY": A["treasury"]})
     for k in ("BuilderRegistry", "CaretakerRegistry", "ProgressPool", "MarketsPerennial"):
         S[k] = grab(log, k)
     log = forge_script(c, "DeployArbiter", {**common, "NANO_LEDGER": S["NanoLedger"], "PROGRESS_POOL": S["ProgressPool"],
@@ -167,7 +184,7 @@ def rehearse(c, A):
                        "STAKE_PER_PROPOSAL": str(50 * U), "MAX_WEIGHT_PER_PROPOSAL": "10", "RESOLVE_TIMEOUT": str(RESOLUTION_GRACE)})
     S["ProgressArbiter"] = grab(log, "ProgressArbiter")
     log = forge_script(c, "DeployNanoStack", {**common, "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"],
-                       "NANO_LEDGER": S["NanoLedger"], "FORFEIT_SINK": S["ProgressPool"], "TREASURY": A["treasury"]})
+                       "NANO_LEDGER": S["NanoLedger"], "TREASURY": A["treasury"]})
     S["MarketsV4"] = grab(log, "MarketsV4")
     stack = {"ADMIN": A["admin"], "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"], "NANO_LEDGER": S["NanoLedger"],
              "BUILDER_REGISTRY": S["BuilderRegistry"], "CARETAKER_REGISTRY": S["CaretakerRegistry"],
@@ -248,6 +265,23 @@ def rehearse(c, A):
     def keeper_tick():
         return tick(keeper, A["operator"], providers, kstate, SETTLEMENT_WINDOW)
 
+    MP = S["MarketsPerennial"]
+    led = lambda who: c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", who)
+    coll = lambda m: c.uint(MP, "collateralOf(bytes32)(uint256)", m)
+
+    def settles_with_split(label, m, creator_addr, action):
+        """Run `action` (a resolve) and prove the 1% was split 30/20/50 to the unit."""
+        C = coll(m)
+        before = (led(creator_addr), led(A["operator"]), led(S["ProgressPool"]))
+        out = action()
+        fee, cr, ag, cm = split(C)
+        after = (led(creator_addr), led(A["operator"]), led(S["ProgressPool"]))
+        check(after[0] - before[0] == cr and after[1] - before[1] == ag and after[2] - before[2] == cm and fee > 0,
+              f"{label}: 1% of {C/U:.2f} collateral = {fee/U:.4f} -> creator {cr/U:.4f} / agent {ag/U:.4f} / commons {cm/U:.4f}")
+        check(c.uint(MP, "settledNet(bytes32)(uint256)", m) == C - fee and c.uint(MP, "settledGross(bytes32)(uint256)", m) == C,
+              f"{label}: winners and LP are paid on {(C - fee)/U:.4f} of {C/U:.4f} (net of the fee)")
+        return out
+
     print("== 4. m1 (YES): create via the UI path, trade, the builder ships, keeper settles")
     for who in ("alice", "bob"):
         ui("deposit", who, amount=str(300 * U))
@@ -256,6 +290,8 @@ def rehearse(c, A):
     M1 = m1["marketId"]
     b1 = ui("buy", "bob", marketId=M1, side="Yes", amount=str(20 * U))
     check(b1["quoteMatched"], f"bob buys YES 20 USDC -> {int(b1['sharesOut'])/U:.4f} shares, exactly the UI quote")
+    check(b1["fee"] == "0" and c.uint(MP, "netCost(bytes32,address)(uint256)", M1, A["bob"]) == 20 * U,
+          "no trading fee: the whole 20 USDC buys shares, net cost recorded as 20")
     b2 = ui("buy", "alice", marketId=M1, side="No", amount=str(5 * U))
     check(b2["quoteMatched"], "alice buys NO 5 USDC at exactly the UI quote")
     s1 = ui("sell", "bob", marketId=M1, side="Yes", shares=str(int(b1["sharesOut"]) // 4))
@@ -283,7 +319,7 @@ def rehearse(c, A):
 
     c.warp_to(c.now() + FEED_WINDOW + 60)            # m1's attestation leaves its dispute window
     check(ui("status", marketId=M1)["status"] == "resolvable", "UI status: resolvable once the attestation is final")
-    r = keeper_tick()
+    r = settles_with_split("m1 resolve", M1, A["alice"], keeper_tick)
     check(("resolve", M1.lower()) in [(a[0], a[1].lower()) for a in r["actions"]], "keeper resolves m1", r)
     st = ui("status", marketId=M1)
     check(st["status"] == "resolved-yes" and st["yesWon"], "m1 resolved YES (count 1 >= 1)")
@@ -292,7 +328,7 @@ def rehearse(c, A):
     r = keeper_tick()                                # count still 1: the builder did not ship again
     check("attest" in [a[0] for a in r["actions"]], "keeper attests the unchanged count for m3's window", r)
     c.warp_to(c.now() + FEED_WINDOW + 60)
-    r = keeper_tick()
+    r = settles_with_split("m3 resolve", M3, A["bob"], keeper_tick)
     check(("resolve", M3.lower()) in [(a[0], a[1].lower()) for a in r["actions"]], "keeper resolves m3", r)
     st = ui("status", marketId=M3)
     check(st["status"] == "resolved-no" and not st["yesWon"], "m3 resolved NO (count 1 < 2)")
@@ -300,23 +336,63 @@ def rehearse(c, A):
     # m2: the keeper is offline for m2's entire window (no ticks) -> voidable
     c.warp_to(int(m2["expiry"]) + SETTLEMENT_WINDOW + 60)
     check(ui("status", marketId=M2)["status"] == "voidable", "UI status: voidable when nothing settled in the window")
-    escrow2 = c.uint(S["MarketsPerennial"], "agentEscrow(bytes32)(uint256)", M2)
-    sink_before = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", S["ProgressPool"])
-    ui("voidMarket", "bob", marketId=M2)
+    C2 = coll(M2)
+    sink_before, agent_before = led(S["ProgressPool"]), led(A["operator"])
+    v = ui("voidMarket", "bob", marketId=M2)
     check(ui("status", marketId=M2)["status"] == "voided", "a trader voids m2 through the UI path")
-    check(c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", S["ProgressPool"]) - sink_before == escrow2 and escrow2 > 0,
-          f"m2's escrowed agent fee ({escrow2/U:.4f}) forfeited to the commons")
+    fee, cr, ag, cm = split(C2)
+    check(int(v["challengerReward"]) == 0 and led(S["ProgressPool"]) - sink_before == ag + cm and led(A["operator"]) == agent_before,
+          f"silent agent earns nothing: its 20% ({ag/U:.4f}) joins the commons' 50% ({cm/U:.4f})")
     r = keeper_tick()
     check(r["actions"] == [], "keeper: idempotent afterwards", r)
 
+    print("== 5b. m4 (VOID by challenge): our agent answers wrong, a watcher proves it, and is paid")
+    c.send("builder2", S["BuilderRegistry"], "registerBuilder(string)", "github.com/example/second")
+    bid2 = c.uint(S["BuilderRegistry"], "builderIdOf(address)(uint256)", A["builder2"])
+    c.send("admin", S["CaretakerRegistry"], "setCaretaker(uint256,address)", bid2, A["operator"])
+    meth2 = run(["cast", "keccak", "example/second-ships-release"]).stdout.strip()
+    c.send("operator", USDC, "approve(address,uint256)", S["Registry"], fp["bond"])
+    r = json.loads(c.send("operator", S["Registry"], "createFeed(string,bytes32,uint256,uint256,address)",
+                          "example/second-ships-release", meth2, fp["bond"], fp["window"], fp["resolver"]).stdout)
+    feed2 = next(l["topics"][1] for l in r["logs"] if l["address"].lower() == S["Registry"].lower())
+    c.send("operator", S["Registry"], "registerAgent(bytes32,bytes32,uint256)", feed2, meth2, fp["bond"])
+    m4 = ui("create", "alice", builderId=bid2, feedId=feed2, expiryIn=7200, liquidity=str(10 * U))
+    M4 = m4["marketId"]
+    check(ui("buy", "bob", marketId=M4, side="Yes", amount=str(10 * U))["quoteMatched"], "bob buys YES 10 on m4 at the UI quote")
+    check(ui("buy", "alice", marketId=M4, side="No", amount=str(4 * U))["quoteMatched"], "alice buys NO 4 on m4 at the UI quote")
+    c.warp_to(int(m4["expiry"]) + 5)
+    # the second builder shipped nothing (count 0), but our agent attests 5 — a wrong answer that would pay YES
+    r = json.loads(c.send("operator", S["Attestation"], "attest(bytes32,int256,bytes32)", feed2, 5, "0x" + "ab" * 32).stdout)
+    att = next(l["topics"][1] for l in r["logs"] if l["address"].lower() == S["Attestation"].lower())
+    stake = c.uint(S["Dispute"], "challengeStake(bytes32)(uint256)", att)
+    c.send("watcher", USDC, "approve(address,uint256)", S["Dispute"], stake)
+    r = json.loads(c.send("watcher", S["Dispute"], "challenge(bytes32,bytes32)", att, "0x" + "cd" * 32).stdout)
+    did = next(l["topics"][1] for l in r["logs"] if l["address"].lower() == S["Dispute"].lower())
+    c.send("resolver", S["Dispute"], "resolve(bytes32,uint8)", did, 2)          # AttestationInvalid
+    check(c.call(S["Dispute"], "invalidatedBy(bytes32)(address)", att).lower() == A["watcher"].lower()
+          and c.call(S["Registry"], "isActiveAgent(bytes32,address)(bool)", feed2, A["operator"]) == "false",
+          "independent resolver rules the answer Invalid: agent slashed and retired on that feed")
+    c.warp_to(int(m4["expiry"]) + SETTLEMENT_WINDOW + 60)
+    check(ui("status", marketId=M4)["status"] == "voidable", "no valid answer in the window: m4 is voidable")
+    C4 = coll(M4)
+    w_before = led(A["watcher"])
+    v = ui("voidMarket", "bob", marketId=M4)
+    fee, cr, ag, cm = split(C4)
+    check((v["challenger"] or "").lower() == A["watcher"].lower() and int(v["challengerReward"]) == ag
+          and led(A["watcher"]) - w_before == ag,
+          f"the watcher who proved the answer wrong receives the agent's 20% ({ag/U:.4f} USDC)")
+    for who, paid in (("bob", 10), ("alice", 4)):
+        nc = c.uint(MP, "netCost(bytes32,address)(uint256)", M4, A[who])
+        exp = nc * (10_000 - FEE_BPS) // 10_000
+        check(nc == paid * U and c.uint(MP, "redeemable(bytes32,address)(uint256)", M4, A[who]) == exp,
+              f"{who}'s refund preview = net cost {paid} minus 1% = {exp/U:.2f}")
+
     print("== 6. everyone collects exactly the UI's preview")
-    for m in (M1, M2, M3):
+    for m in (M1, M2, M3, M4):
         for who in ("alice", "bob"):
-            y = c.uint(S["MarketsPerennial"], "yesBalance(bytes32,address)(uint256)", m, A[who])
-            n = c.uint(S["MarketsPerennial"], "noBalance(bytes32,address)(uint256)", m, A[who])
-            st = ui("status", marketId=m)
-            # the UI's redeemPayout rule: winners' shares on resolve, (yes+no)/2 on void
-            preview = (y + n) // 2 if st["phase"] == 2 else (y if st["yesWon"] else n)
+            y = c.uint(MP, "yesBalance(bytes32,address)(uint256)", m, A[who])
+            n = c.uint(MP, "noBalance(bytes32,address)(uint256)", m, A[who])
+            preview = c.uint(MP, "redeemable(bytes32,address)(uint256)", m, A[who])   # what the panel shows
             if preview == 0:
                 # the panel disables the button ("nothing to redeem"); the contract agrees
                 if y or n:
@@ -325,19 +401,15 @@ def rehearse(c, A):
                 continue
             res = ui("redeem", who, marketId=m)
             check(res["previewMatched"], f"{who} redeems {m[:8]}: {int(res['payout'])/U:.4f} USDC = UI preview")
-    for m, who in ((M1, "alice"), (M3, "bob"), (M2, "alice")):
+    for m, who in ((M1, "alice"), (M3, "bob"), (M2, "alice"), (M4, "alice")):
         res = ui("claimLP", who, marketId=m)
         check(int(res["payout"]) > 0, f"creator {who} claims LP on {m[:8]}: {int(res['payout'])/U:.4f} USDC")
-    for m in (M1, M2, M3):
-        check(c.uint(S["MarketsPerennial"], "agentEscrow(bytes32)(uint256)", m) == 0, f"escrow of {m[:8]} is empty")
     dust = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", S["MarketsPerennial"])
     check(dust <= 10, f"MarketsPerennial holds only dust after every exit ({dust} units)")
-    agent_paid = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", A["operator"])
-    check(agent_paid > 0, f"agent earned its released fee for m1 and m3 ({agent_paid/U:.4f} USDC in the ledger)")
 
     print("== 7. the fees reach the builder: arbiter -> epoch -> stream -> withdraw")
     pot_before = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", S["ProgressPool"])
-    check(pot_before > 0, f"commons holds {pot_before/U:.4f} USDC of trading fees + forfeits")
+    check(pot_before > 0, f"commons holds {pot_before/U:.4f} USDC: 50% of every resolution fee (+ the silent agent's 20%)")
     c.send("operator", USDC, "approve(address,uint256)", S["NanoLedger"], 60 * U)
     c.send("operator", S["NanoLedger"], "deposit(uint256)", 60 * U)
     c.send("operator", S["NanoLedger"], "approveSpender(address,uint256)", S["ProgressArbiter"], 50 * U)
@@ -353,8 +425,13 @@ def rehearse(c, A):
     c.warp_to(c.now() + EPOCH_LENGTH + 5)
     c.send("alice", S["ProgressPool"], "closeEpoch()")
     claimable = c.uint(S["ProgressPool"], "claimable(uint256,address)(uint256)", epoch, A["builder"])
-    check(claimable == pot_before, f"sole builder's claimable = the whole pot ({claimable/U:.4f} USDC)")
+    protocol_cut = pot_before * 100 // 10_000
+    check(claimable == pot_before - protocol_cut,
+          f"sole builder's claimable = the whole pot minus Registrai's 1% ({claimable/U:.4f} of {pot_before/U:.4f})")
+    treasury_before = led(A["treasury"])
     r = json.loads(c.send("builder", S["ProgressPool"], "claim(uint256)", epoch).stdout)
+    check(led(A["treasury"]) - treasury_before == protocol_cut,
+          f"Registrai's 1% monitoring fee ({protocol_cut/U:.6f} USDC) reached the protocol treasury")
     sid = c.uint(S["ProgressPool"], "streamIdOf(uint256,address)(uint256)", epoch, A["builder"])
     c.warp_to(c.now() + STREAM_WINDOW + 120)
     c.send("alice", S["NanoLedger"], "settleStream(uint256)", sid)
@@ -366,11 +443,13 @@ def rehearse(c, A):
 
     print("== 8. accounting")
     # every USDC unit minted is somewhere accountable: wallets + ledger (which backs all internal balances)
-    minted = 6 * 1_000 * U
+    minted = len(MINTED) * 1_000 * U
     wallets = sum(c.uint(USDC, "balanceOf(address)(uint256)", A[w]) for w in KEYS)
     ledger_held = c.uint(USDC, "balanceOf(address)(uint256)", S["NanoLedger"])
     registry_held = c.uint(USDC, "balanceOf(address)(uint256)", S["Registry"])
-    check(wallets + ledger_held + registry_held == minted,
+    dispute_held = c.uint(USDC, "balanceOf(address)(uint256)", S["Dispute"])
+    check(dispute_held == 0, "no stake left stuck in Dispute after the ruling")
+    check(wallets + ledger_held + registry_held + dispute_held == minted,
           f"USDC conserved: wallets {wallets/U:.2f} + ledger {ledger_held/U:.2f} + bonds {registry_held/U:.2f} = {minted/U:.0f}")
     total_owed = c.uint(S["NanoLedger"], "totalOwed()(uint256)")
     check(ledger_held >= total_owed, f"ledger solvent: holds {ledger_held} >= owes {total_owed}")
