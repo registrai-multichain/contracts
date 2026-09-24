@@ -27,7 +27,7 @@ set -euo pipefail
 TOKEN_MESSENGER=0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d
 MESSAGE_TRANSMITTER=0x81D40F21F12A8F0E3252Bccb954D722d4c464B64
 ARC_DOMAIN=26
-ARC_RPC="${ARC_RPC:-https://rpc.arc-scan.org}"
+ARC_RPC="${ARC_RPC:-https://rpc.mainnet.arc.io}"   # Circle canonical endpoint only
 IRIS=https://iris-api.circle.com
 
 case "${1:-}" in
