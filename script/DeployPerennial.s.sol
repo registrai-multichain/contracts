@@ -13,8 +13,9 @@ import {CaretakerRegistry} from "../src/perennial/CaretakerRegistry.sol";
 
 /// @notice Step 3 of the mainnet order. Deploys Perennial: BuilderRegistry +
 ///         CaretakerRegistry + ProgressPool (the commons) + MarketsPerennial
-///         (whose treasury leg routes to the pool), over the NanoLedger and the
-///         oracle stack. The deployer holds every admin role until Handoff.s.sol.
+///         (whose commons leg of the 1% resolution fee routes to the pool), over
+///         the NanoLedger and the oracle stack. Fees are fixed in code (no fee
+///         inputs). The deployer holds every admin role until Handoff.s.sol.
 ///
 /// @dev env (MAINNET = required on 5042, no default; else default in brackets):
 ///      REGISTRY, ATTESTATION, NANO_LEDGER      always required
@@ -24,10 +25,6 @@ import {CaretakerRegistry} from "../src/perennial/CaretakerRegistry.sol";
 ///      STREAM_WINDOW       MAINNET [30d]  claim vesting window, seconds
 ///      SETTLEMENT_WINDOW   MAINNET [24h]  immutable, 1h..7d
 ///      RESOLUTION_GRACE    MAINNET [7d]   immutable, 1d..30d
-///      PERENNIAL_FEE_CREATOR_BPS / PERENNIAL_FEE_TREASURY_BPS / PERENNIAL_FEE_AGENT_BPS
-///                          MAINNET [20/35/15] must sum to 70
-///      PERENNIAL_FORFEIT_SINK MAINNET ["commons"] "commons" (= the new pool) or
-///                                         an address; never the deployer on mainnet
 ///      PROTOCOL_TREASURY   MAINNET [deployer] receives the pool's 1% fee on
 ///                                         every builder payout; immutable; never
 ///                                         the deployer on mainnet
@@ -43,10 +40,6 @@ contract DeployPerennial is DeployBase {
         uint256 streamWindow;
         uint256 settlementWindow;
         uint256 resolutionGrace;
-        uint256 feeCreatorBps;
-        uint256 feeTreasuryBps;
-        uint256 feeAgentBps;
-        address forfeitSink; // address(0) = the commons (the pool deployed here)
         address protocolTreasury;
         address approvedAgent;
         address disputeResolver;
@@ -63,7 +56,6 @@ contract DeployPerennial is DeployBase {
         console2.log("ProgressPool:     ", address(pool));
         console2.log("MarketsPerennial: ", address(markets));
         console2.log("  commons -> pool:", markets.commons());
-        console2.log("  forfeitSink:", markets.forfeitSink());
         console2.log("  protocolTreasury:", c.protocolTreasury);
         console2.log("  epochLength:", c.epochLength);
         console2.log("  streamWindow:", c.streamWindow);
@@ -83,11 +75,6 @@ contract DeployPerennial is DeployBase {
         c.streamWindow = _uintReq("STREAM_WINDOW", 30 days);
         c.settlementWindow = _uintReq("SETTLEMENT_WINDOW", 24 hours);
         c.resolutionGrace = _uintReq("RESOLUTION_GRACE", 7 days);
-        c.feeCreatorBps = _uintReq("PERENNIAL_FEE_CREATOR_BPS", 20);
-        c.feeTreasuryBps = _uintReq("PERENNIAL_FEE_TREASURY_BPS", 35);
-        c.feeAgentBps = _uintReq("PERENNIAL_FEE_AGENT_BPS", 15);
-        string memory sink = _strReq("PERENNIAL_FORFEIT_SINK", "commons");
-        c.forfeitSink = keccak256(bytes(sink)) == keccak256("commons") ? address(0) : vm.parseAddress(sink);
         c.protocolTreasury = _addrReq("PROTOCOL_TREASURY", deployer);
         c.approvedAgent = _addrReq("APPROVED_AGENT", deployer);
         c.disputeResolver = _addrReq("DISPUTE_RESOLVER", deployer);
@@ -107,7 +94,6 @@ contract DeployPerennial is DeployBase {
             require(c.disputeResolver != c.deployer, "mainnet: DISPUTE_RESOLVER must not be the deployer");
             require(c.approvedAgent != c.deployer, "mainnet: APPROVED_AGENT must not be the deployer");
             require(c.disputeResolver != c.approvedAgent, "mainnet: agent must not resolve its own disputes");
-            require(c.forfeitSink != c.deployer, "mainnet: forfeit sink must not be the deployer");
             require(c.protocolTreasury != c.deployer, "mainnet: PROTOCOL_TREASURY must not be the deployer");
         }
 
@@ -127,8 +113,6 @@ contract DeployPerennial is DeployBase {
             c.settlementWindow,
             c.resolutionGrace
         );
-        markets.setFeeSplit(c.feeCreatorBps, c.feeTreasuryBps, c.feeAgentBps);
-        if (c.forfeitSink != address(0)) markets.setForfeitSink(c.forfeitSink);
         markets.setApprovedAgent(c.approvedAgent, true);
         markets.setApprovedResolver(c.disputeResolver, true);
         vm.stopBroadcast();

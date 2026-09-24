@@ -10,9 +10,9 @@ import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 import {SettlementPolicy} from "../../src/nanopay/SettlementPolicy.sol";
 
-/// The common markets share the settlement policy. The V4-specific part is the
-/// fee: it flows through a NanoLedger pool claimable at any time, so the agent's
-/// cut has to be carved out of the pool and escrowed rather than accrued.
+/// The common markets share the settlement policy (and the fee model) with
+/// MarketsPerennial. The V4-specific part: the 50% leg goes to the Registrai
+/// TREASURY, which also takes the agent's 20% on a void nobody challenged.
 contract MarketsV4SettlementTest is Test {
     MockUSDC usdc;
     Registry registry;
@@ -24,7 +24,6 @@ contract MarketsV4SettlementTest is Test {
     address oracle = address(0x0AC1E);
     address resolver = address(0xBEEF);
     address treasury = address(0x7AEA);
-    address sink = address(0x51F);
     address creator = address(0xC0FFEE);
     address yesTaker = address(0x7A4E);
     address noTaker = address(0x7A4F);
@@ -44,10 +43,8 @@ contract MarketsV4SettlementTest is Test {
         registry.wire(address(attestation), address(dispute));
         attestation.wire(address(dispute));
         ledger = new NanoLedger(usdc, address(this));
-        markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, WINDOW, GRACE, 40, 20, 10);
-        markets.setApprovedAgent(oracle, true);
+        markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, WINDOW, GRACE);
         markets.setApprovedResolver(resolver, true);
-        ledger.setSource(address(markets), true);
 
         usdc.mint(oracle, 10_000e6);
         vm.startPrank(oracle);
@@ -121,19 +118,17 @@ contract MarketsV4SettlementTest is Test {
         markets.resolve(id);
     }
 
-    function test_silentAgent_voids_andPaysHalfPerShare() public {
+    function test_silentAgent_voids_andRefundsNetCostMinusOnePercent() public {
         bytes32 id = _market();
         _trade(id);
-        uint256 y = markets.yesBalance(id, yesTaker);
-        uint256 n = markets.noBalance(id, noTaker);
         vm.warp(_expiry(id) + WINDOW + 1);
         markets.voidMarket(id);
         vm.prank(yesTaker);
-        assertEq(markets.redeem(id), y / 2);
+        assertEq(markets.redeem(id), 990e6, "1000 in, 990 back");
         vm.prank(noTaker);
-        assertEq(markets.redeem(id), n / 2);
+        assertEq(markets.redeem(id), 693e6, "700 in, 693 back");
         vm.prank(creator);
-        markets.claimLP(id);
+        assertEq(markets.claimLP(id), 990e6, "the LP seed, minus 1%");
         _solvent();
         assertLe(ledger.balanceOf(address(markets)), 2, "only rounding dust remains");
     }
@@ -167,113 +162,68 @@ contract MarketsV4SettlementTest is Test {
 
     function test_constructorRejectsBadParams() public {
         vm.expectRevert(SettlementPolicy.BadSettlementParams.selector);
-        new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, 0, GRACE, 40, 20, 10);
-    }
-
-    function test_constructorRejectsZeroSink() public {
-        vm.expectRevert(MarketsV4.ZeroAddress.selector);
-        new MarketsV4(ledger, registry, attestation, address(this), treasury, address(0), WINDOW, GRACE, 40, 20, 10);
+        new MarketsV4(ledger, registry, attestation, address(this), treasury, 0, GRACE);
     }
 
     /// L7: a zero treasury is a ZeroAddress error, not AmountTooLow.
     function test_constructorRejectsZeroTreasury() public {
         vm.expectRevert(MarketsV4.ZeroAddress.selector);
-        new MarketsV4(ledger, registry, attestation, address(this), address(0), sink, WINDOW, GRACE, 40, 20, 10);
+        new MarketsV4(ledger, registry, attestation, address(this), address(0), WINDOW, GRACE);
     }
 
-    function test_constructorRejectsSplitNotSummingToTotal() public {
-        vm.expectRevert(MarketsV4.BadSplit.selector);
-        new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, WINDOW, GRACE, 40, 20, 11);
-        vm.expectRevert(MarketsV4.BadSplit.selector);
-        new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, WINDOW, GRACE, 0, 0, 0);
+    /// The split is fixed in code (no deploy input): 1% of C, 30 / 20 / 50.
+    function test_feeIsFixedInCode() public view {
+        assertEq(markets.RESOLUTION_FEE_BPS(), 100);
+        assertEq(markets.CREATOR_SHARE_BPS(), 3000);
+        assertEq(markets.AGENT_SHARE_BPS(), 2000);
+        assertEq(markets.TREASURY_SHARE_BPS(), 5000);
+        assertEq(markets.BPS(), 10_000);
+        assertEq(markets.TREASURY(), treasury);
     }
 
-    /// The split is a deploy input: a 30 / 25 / 15 market pays exactly that.
-    function test_customSplitIsHonoured() public {
-        MarketsV4 m2 = new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, WINDOW, GRACE, 30, 25, 15);
-        assertEq(m2.FEE_BPS_CREATOR(), 30);
-        assertEq(m2.FEE_BPS_AGENT(), 25);
-        assertEq(m2.FEE_BPS_TREASURY(), 15);
-        ledger.setSource(address(m2), true);
-        m2.setApprovedAgent(oracle, true);
-        m2.setApprovedResolver(resolver, true);
-        vm.startPrank(creator);
-        ledger.approveSpender(address(m2), type(uint256).max);
-        bytes32 id = m2.createMarket(feedId, oracle, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
-        vm.stopPrank();
-        vm.startPrank(yesTaker);
-        ledger.approveSpender(address(m2), type(uint256).max);
-        m2.buy(id, MarketsV4.Outcome.Yes, 10_000e6, 0); // fee 70 USDC
-        vm.stopPrank();
-        assertEq(m2.agentEscrow(id), 25e6);
-        assertEq(ledger.claimablePool(id, creator), 30e6);
-        assertEq(ledger.claimablePool(id, treasury), 15e6);
-    }
+    // ───────────── the fee, paid at settlement ─────────────
 
-    // ───────────── the fee, carved out of the pool ─────────────
-
-    /// 70 bps total: creator 40, agent 20, treasury 10. The pool now carries
-    /// only creator and treasury; the agent's 20 is escrowed.
-    function test_agentCutIsEscrowed_andThePoolPaysOnlyCreatorAndTreasury() public {
-        bytes32 id = _market();
-        vm.prank(yesTaker);
-        markets.buy(id, MarketsV4.Outcome.Yes, 7_000e6, 0); // fee 49 USDC
-
-        assertEq(markets.agentEscrow(id), 14e6, "20/70 of 49");
-        assertEq(ledger.claimablePool(id, oracle), 0, "the agent has no share in the pool");
-
-        uint256 c0 = ledger.balanceOf(creator);
-        vm.prank(creator);
-        ledger.claim(id);
-        assertApproxEqAbs(ledger.balanceOf(creator) - c0, 28e6, 1, "creator 40/70 of 49");
-        uint256 t0 = ledger.balanceOf(treasury);
-        vm.prank(treasury);
-        ledger.claim(id);
-        assertApproxEqAbs(ledger.balanceOf(treasury) - t0, 7e6, 1, "treasury 10/70 of 49");
-        _solvent();
-    }
-
+    /// Nothing is paid while trading; at resolve the agent is paid its 20%
+    /// directly (no escrow, no pool).
     function test_agentPaidOnResolve() public {
         bytes32 id = _market();
-        _trade(id);
-        uint256 escrow = markets.agentEscrow(id);
-        uint256 before = ledger.balanceOf(oracle);
+        _trade(id); // C = 1000 + 1000 + 700 = 2700, fee 27
+        assertEq(ledger.balanceOf(oracle), 0);
+        assertEq(ledger.balanceOf(treasury), 0);
         vm.warp(_expiry(id) + 1);
         _attest(120_000);
         vm.warp(block.timestamp + DW);
         markets.resolve(id);
-        assertEq(ledger.balanceOf(oracle) - before, escrow);
+        assertEq(ledger.balanceOf(oracle), 54e5, "20% of 27");
+        assertEq(ledger.balanceOf(treasury), 135e5, "50% of 27");
         _solvent();
     }
 
-    function test_agentForfeitsOnVoid() public {
+    /// Void with no successful challenge: the agent's 20% goes to the treasury.
+    function test_silentAgentVoid_agentLegToTreasury() public {
         bytes32 id = _market();
         _trade(id);
-        uint256 escrow = markets.agentEscrow(id);
-        uint256 before = ledger.balanceOf(oracle);
+        uint256 c0 = ledger.balanceOf(creator);
         vm.warp(_expiry(id) + WINDOW + 1);
         markets.voidMarket(id);
-        assertEq(ledger.balanceOf(oracle), before);
-        assertEq(ledger.balanceOf(sink), escrow);
+        assertEq(ledger.balanceOf(oracle), 0, "the agent keeps nothing for a market it failed");
+        assertEq(ledger.balanceOf(treasury), 189e5, "50% + 20% of 27");
+        assertEq(ledger.balanceOf(creator) - c0, 81e5, "creator 30% of 27");
     }
 
-    /// Creator and agent the same wallet: previously their shares were summed in
-    /// the pool. Now the creator part pools and the agent part escrows, so the
-    /// total is unchanged when the market settles.
-    function test_creatorIsAgent_totalUnchangedWhenSettled() public {
+    /// Creator and agent the same wallet: it collects both legs when it settles.
+    function test_creatorIsAgent_collectsBothLegsWhenSettled() public {
         _fundAs(oracle);
         vm.prank(oracle);
         bytes32 id = markets.createMarket(feedId, oracle, int256(100_000), MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
         vm.prank(yesTaker);
-        markets.buy(id, MarketsV4.Outcome.Yes, 7_000e6, 0); // fee 49
+        markets.buy(id, MarketsV4.Outcome.Yes, 9_000e6, 0); // C = 10000, fee 100
         vm.warp(_expiry(id) + 1);
         _attest(120_000);
         vm.warp(block.timestamp + DW);
         uint256 b0 = ledger.balanceOf(oracle);
         markets.resolve(id);
-        vm.prank(oracle);
-        ledger.claim(id);
-        assertApproxEqAbs(ledger.balanceOf(oracle) - b0, 42e6, 2, "40 + 20 of 70, as before");
+        assertEq(ledger.balanceOf(oracle) - b0, 50e6, "30 + 20 of 100");
     }
 
     function _fundAs(address a) internal {
@@ -299,7 +249,7 @@ contract MarketsV4SettlementTest is Test {
         uint256 paid;
         address[3] memory who = [yesTaker, noTaker, sniper];
         for (uint256 i; i < 3; i++) {
-            if (markets.yesBalance(id, who[i]) + markets.noBalance(id, who[i]) > 1) {
+            if (markets.redeemable(id, who[i]) > 0) {
                 vm.prank(who[i]);
                 paid += markets.redeem(id);
             }

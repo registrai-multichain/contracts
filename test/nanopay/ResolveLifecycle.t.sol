@@ -16,7 +16,7 @@ import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 /// @notice The RESOLVE path under interleaved buys and sells: after a random
 /// trading history the agent attests, the market resolves, every holder
 /// redeems, the LP claims — the market's ledger balance must cover all of it,
-/// leave only rounding dust, and the agent escrow must end at zero.
+/// leave only rounding dust, and the 1% resolution fee must be paid in full.
 /// (The reviewer's testFuzz_lifecycleSolvent covered the void path.)
 contract ResolveLifecycleTest is Test {
     MockUSDC usdc;
@@ -25,6 +25,8 @@ contract ResolveLifecycleTest is Test {
     NanoLedger ledger;
     MarketsPerennial perennial;
     MarketsV4 v4;
+    ProgressPool pool;
+    address treasury = address(0x7EA);
 
     address agent = address(0x0AC1E);
     address resolver = address(0xBEEF);
@@ -47,16 +49,12 @@ contract ResolveLifecycleTest is Test {
         BuilderRegistry builders = new BuilderRegistry(address(this));
         CaretakerRegistry caretakers = new CaretakerRegistry(builders, address(this));
         builders.registerFor(address(0xB111), "b1");
-        ProgressPool pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours, address(0x7EA5));
+        pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours, address(0x7EA5));
         perennial =
             new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), 24 hours, 7 days);
-        v4 = new MarketsV4(
-            ledger, registry, attestation, address(this), address(0x7EA), address(pool), 24 hours, 7 days, 40, 20, 10
-        );
-        ledger.setSource(address(v4), true);
+        v4 = new MarketsV4(ledger, registry, attestation, address(this), treasury, 24 hours, 7 days);
         perennial.setApprovedAgent(agent, true);
         perennial.setApprovedResolver(resolver, true);
-        v4.setApprovedAgent(agent, true);
         v4.setApprovedResolver(resolver, true);
 
         usdc.mint(agent, 1_000e6);
@@ -110,29 +108,36 @@ contract ResolveLifecycleTest is Test {
             }
         }
 
+        uint256 c = perennial.collateralOf(id);
+        assertEq(ledger.balanceOf(address(perennial)), c, "no fee skimmed while trading");
         vm.warp(t0 + LIFE);
         vm.prank(agent);
         attestation.attest(feedId, value, keccak256("v"));
         vm.warp(t0 + LIFE + DW);
+        uint256 agentBefore = ledger.balanceOf(agent);
+        uint256 poolBefore = ledger.balanceOf(address(pool));
         perennial.resolve(id);
         bool yesWon = perennial.getMarket(id).yesWon;
         assertEq(yesWon, value >= 1);
-        assertEq(perennial.agentEscrow(id), 0, "escrow released");
+        uint256 fee = c / 100;
+        assertEq(ledger.balanceOf(agent) - agentBefore, fee * 2000 / 10_000, "agent leg paid");
+        assertEq(ledger.balanceOf(address(pool)) - poolBefore, fee - fee * 3000 / 10_000 - fee * 2000 / 10_000);
+        assertEq(ledger.balanceOf(address(perennial)), c - fee, "exactly the fee left the market");
 
         // everything owed to winners and the LP is covered by the market's balance
         uint256 owed = perennial.lpPotAtResolution(id);
         for (uint256 i; i < traders.length; i++) {
-            owed += yesWon ? perennial.yesBalance(id, traders[i]) : perennial.noBalance(id, traders[i]);
+            owed += perennial.redeemable(id, traders[i]);
         }
         assertGe(ledger.balanceOf(address(perennial)), owed, "market cannot cover its winners + LP");
 
         for (uint256 i; i < traders.length; i++) {
             uint256 win = yesWon ? perennial.yesBalance(id, traders[i]) : perennial.noBalance(id, traders[i]);
-            if (win == 0) continue;
+            if (win * (c - fee) / c == 0) continue;
             uint256 before = ledger.balanceOf(traders[i]);
             vm.prank(traders[i]);
-            assertEq(perennial.redeem(id), win);
-            assertEq(ledger.balanceOf(traders[i]) - before, win, "winner paid 1 per share");
+            assertEq(perennial.redeem(id), win * (c - fee) / c);
+            assertEq(ledger.balanceOf(traders[i]) - before, win * (c - fee) / c, "winner paid net / gross per share");
         }
         vm.prank(creator);
         perennial.claimLP(id);
@@ -163,25 +168,30 @@ contract ResolveLifecycleTest is Test {
             }
         }
 
+        uint256 c = v4.collateralOf(id);
+        assertEq(ledger.balanceOf(address(v4)), c, "no fee skimmed while trading");
         vm.warp(t0 + LIFE);
         vm.prank(agent);
         attestation.attest(feedId, value, keccak256("v"));
         vm.warp(t0 + LIFE + DW);
+        uint256 treasuryBefore = ledger.balanceOf(treasury);
         v4.resolve(id);
         bool yesWon = v4.getMarket(id).yesWon;
-        assertEq(v4.agentEscrow(id), 0, "escrow released");
+        uint256 fee = c / 100;
+        assertEq(ledger.balanceOf(treasury) - treasuryBefore, fee - fee * 3000 / 10_000 - fee * 2000 / 10_000);
+        assertEq(ledger.balanceOf(address(v4)), c - fee, "exactly the fee left the market");
 
         uint256 owed = v4.lpPotAtResolution(id);
         for (uint256 i; i < traders.length; i++) {
-            owed += yesWon ? v4.yesBalance(id, traders[i]) : v4.noBalance(id, traders[i]);
+            owed += v4.redeemable(id, traders[i]);
         }
         assertGe(ledger.balanceOf(address(v4)), owed, "market cannot cover its winners + LP");
 
         for (uint256 i; i < traders.length; i++) {
             uint256 win = yesWon ? v4.yesBalance(id, traders[i]) : v4.noBalance(id, traders[i]);
-            if (win == 0) continue;
+            if (win * (c - fee) / c == 0) continue;
             vm.prank(traders[i]);
-            assertEq(v4.redeem(id), win);
+            assertEq(v4.redeem(id), win * (c - fee) / c);
         }
         vm.prank(creator);
         v4.claimLP(id);

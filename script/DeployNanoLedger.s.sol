@@ -7,9 +7,9 @@ import {DeployBase} from "./lib/DeployBase.sol";
 import {NanoLedger} from "../src/nanopay/NanoLedger.sol";
 
 /// @notice Step 2 of the mainnet order. Deploys NanoLedger, the on-chain
-///         nanopayment settlement layer, with the deployer as admin/governor so
-///         the following steps can wire it (DeployNanoStack registers MarketsV4
-///         as a source).
+///         nanopayment settlement layer, with the deployer as admin/governor
+///         until Handoff. (No market needs a ledger role: neither market kind
+///         creates fee pools, so MarketsV4 is no longer a ledger source.)
 ///
 /// Admin handoff is NOT done here. `script/Handoff.s.sol` is the single handoff
 /// for the whole stack and runs last. The old HANDOFF=true path (a timelock

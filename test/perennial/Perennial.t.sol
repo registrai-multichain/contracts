@@ -12,9 +12,10 @@ import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
-/// Full Perennial loop: fees from a builder market flow to the commons
-/// (ProgressPool), progress is recorded per builder, the epoch closes, and
-/// builders claim a progress-weighted share. Ledger solvency holds throughout.
+/// Full Perennial loop: the resolution fee of a builder market flows to the
+/// commons (ProgressPool), progress is recorded per builder, the epoch closes,
+/// and builders claim a progress-weighted share, minus the 1% protocol fee.
+/// Ledger solvency holds throughout.
 contract PerennialTest is Test {
     MockUSDC usdc;
     Registry registry;
@@ -93,6 +94,18 @@ contract PerennialTest is Test {
         );
     }
 
+    /// A settled market: L 10 + 1990 bought -> C 2000, fee 20, commons 10.
+    function _fundCommons() internal returns (bytes32 id) {
+        id = _market();
+        vm.prank(taker);
+        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_990e6, 0);
+        vm.warp(markets.getMarket(id).expiry + 1);
+        vm.prank(oracle);
+        attestation.attest(feedId, int256(123_456), bytes32("ih"));
+        vm.warp(block.timestamp + DW);
+        markets.resolve(id);
+    }
+
     // ── BuilderRegistry ──
 
     function test_builderRegistry() public {
@@ -122,18 +135,22 @@ contract PerennialTest is Test {
     function test_marketFees_fundTheCommons() public {
         bytes32 id = _market();
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // fee 14, commons 7
-        assertEq(ledger.balanceOf(address(pool)), 7e6, "commons funded by market fee");
-        assertEq(pool.pendingPot(), 7e6);
+        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_990e6, 0);
+        assertEq(ledger.balanceOf(address(pool)), 0, "no fee while trading");
+        vm.warp(markets.getMarket(id).expiry + 1);
+        vm.prank(oracle);
+        attestation.attest(feedId, int256(123_456), bytes32("ih"));
+        vm.warp(block.timestamp + DW);
+        markets.resolve(id);
+        assertEq(ledger.balanceOf(address(pool)), 10e6, "commons funded by the resolution fee");
+        assertEq(pool.pendingPot(), 10e6);
         _solvent();
     }
 
     // ── full distribution loop ──
 
     function test_progress_distribution() public {
-        bytes32 id = _market();
-        vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // commons gets 7 USDC
+        _fundCommons(); // commons gets 10 USDC
 
         // keeper records verified progress: builderA weight 3, builderB weight 1
         pool.addProgress(builderA, 3);
@@ -142,14 +159,14 @@ contract PerennialTest is Test {
 
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
-        assertEq(pool.epochPot(0), 7e6, "pot snapshotted");
+        assertEq(pool.epochPot(0), 10e6, "pot snapshotted");
+        assertEq(pool.claimable(0, builderA), 7_425e3, "claimable is net of the 1% protocol fee");
 
-        assertEq(pool.claimable(0, builderA), 5_197_500, "claimable is net of the 1% protocol fee");
         uint256 a = pool.claimFor(0, builderA);
         uint256 b = pool.claimFor(0, builderB);
-        assertEq(a, 5_197_500, "A share 3/4 of 7 USDC, minus 1%");
-        assertEq(b, 1_732_500, "B share 1/4 of 7 USDC, minus 1%");
-        assertEq(ledger.balanceOf(protocolTreasury), 70_000, "1% of 7 USDC to the protocol treasury");
+        assertEq(a, 7_425e3, "A share 3/4 of 10 USDC, minus 1%");
+        assertEq(b, 2_475e3, "B share 1/4 of 10 USDC, minus 1%");
+        assertEq(ledger.balanceOf(protocolTreasury), 100e3, "1% of 10 USDC to the protocol treasury");
         // funds stream, not lump: nothing withdrawable yet
         assertEq(ledger.balanceOf(builderA), 0, "no instant credit");
 
@@ -158,8 +175,8 @@ contract PerennialTest is Test {
         vm.warp(pool.epochStart() + 2 * WINDOW);
         ledger.settleStream(idA);
         ledger.settleStream(idB);
-        assertEq(ledger.balanceOf(builderA), 5_197_500, "A fully streamed");
-        assertEq(ledger.balanceOf(builderB), 1_732_500, "B fully streamed");
+        assertEq(ledger.balanceOf(builderA), 7_425e3, "A fully streamed");
+        assertEq(ledger.balanceOf(builderB), 2_475e3, "B fully streamed");
         _solvent();
 
         vm.expectRevert(ProgressPool.AlreadyClaimed.selector);
@@ -169,9 +186,7 @@ contract PerennialTest is Test {
     }
 
     function test_claimFor_creditsBuilderNotCaller() public {
-        bytes32 id = _market();
-        vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // commons 7
+        _fundCommons(); // commons 10
 
         pool.addProgress(builderA, 3);
         pool.addProgress(builderB, 1);
@@ -181,22 +196,20 @@ contract PerennialTest is Test {
         address caretaker = address(0xCA4E);
         vm.prank(caretaker);
         uint256 a = pool.claimFor(0, builderA);
-        assertEq(a, 5_197_500, "A share, net");
+        assertEq(a, 7_425e3, "A share, net");
         uint256 streamId = pool.streamIdOf(0, builderA);
         (, address to,, uint256 cap,,,) = ledger.streams(streamId);
         assertEq(to, builderA, "stream pays the builder");
-        assertEq(cap, 5_197_500, "stream cap = share minus the protocol fee");
+        assertEq(cap, 7_425e3, "stream cap = share minus the protocol fee");
         assertEq(ledger.balanceOf(caretaker), 0, "caretaker got nothing");
         vm.warp(pool.epochStart() + 2 * WINDOW);
         ledger.settleStream(streamId);
-        assertEq(ledger.balanceOf(builderA), 5_197_500, "builder credited after settle");
+        assertEq(ledger.balanceOf(builderA), 7_425e3, "builder credited after settle");
         _solvent();
     }
 
     function test_claimFor_doubleClaimReverts() public {
-        bytes32 id = _market();
-        vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0);
+        _fundCommons();
         pool.addProgress(builderA, 1);
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
@@ -207,9 +220,7 @@ contract PerennialTest is Test {
     }
 
     function test_claimFor_noProgressReverts() public {
-        bytes32 id = _market();
-        vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0);
+        _fundCommons();
         pool.addProgress(builderA, 1);
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
@@ -226,14 +237,12 @@ contract PerennialTest is Test {
     }
 
     function test_closeEpoch_noProgressRollsOver() public {
-        bytes32 id = _market();
-        vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // commons 7
+        _fundCommons(); // commons 10
         // no progress this epoch
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
         assertEq(pool.epochPot(0), 0, "nothing allocated");
-        assertEq(pool.pendingPot(), 7e6, "funds roll into next epoch");
+        assertEq(pool.pendingPot(), 10e6, "funds roll into next epoch");
         _solvent();
     }
 
@@ -243,26 +252,22 @@ contract PerennialTest is Test {
     }
 
     function test_claimFor_partialSettle() public {
-        bytes32 id = _market();
-        vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0);
+        _fundCommons();
         pool.addProgress(builderA, 1);
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
 
-        pool.claimFor(0, builderA); // share 7e6, streams 6.93e6
+        pool.claimFor(0, builderA); // share 10e6, streams 9.9e6
         uint256 streamId = pool.streamIdOf(0, builderA);
         vm.warp(pool.epochStart() + WINDOW / 2);
         ledger.settleStream(streamId);
         uint256 half = ledger.balanceOf(builderA);
-        assertApproxEqAbs(half, 3_465e3, 1e5, "about half streamed at half window");
+        assertApproxEqAbs(half, 495e4, 1e5, "about half streamed at half window");
         _solvent();
     }
 
     function test_pendingPot_unchangedByClaim() public {
-        bytes32 id = _market();
-        vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0);
+        _fundCommons();
         pool.addProgress(builderA, 1);
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();

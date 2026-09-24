@@ -102,10 +102,6 @@ contract DeployScriptsTest is Test {
         c.streamWindow = 30 days;
         c.settlementWindow = 24 hours;
         c.resolutionGrace = 7 days;
-        c.feeCreatorBps = 20;
-        c.feeTreasuryBps = 35;
-        c.feeAgentBps = 15;
-        c.forfeitSink = address(0); // commons
         c.protocolTreasury = protocolTreasury;
         c.approvedAgent = agent;
         c.disputeResolver = disputeResolver;
@@ -132,13 +128,8 @@ contract DeployScriptsTest is Test {
         c.attestation = address(attestation);
         c.ledger = address(ledger);
         c.treasury = treasury;
-        c.forfeitSink = address(pool);
         c.settlementWindow = 24 hours;
         c.resolutionGrace = 7 days;
-        c.feeCreatorBps = 40;
-        c.feeAgentBps = 20;
-        c.feeTreasuryBps = 10;
-        c.approvedAgent = agent;
         c.disputeResolver = disputeResolver;
     }
 
@@ -193,9 +184,13 @@ contract DeployScriptsTest is Test {
         _deployAll();
         // before Handoff the deployer holds the admin roles (the wiring needs them)
         assertTrue(pool.hasRole(DEFAULT_ADMIN, deployer));
-        assertTrue(ledger.isSource(address(v4)));
-        assertEq(perennial.forfeitSink(), address(pool));
+        assertFalse(ledger.isSource(address(v4)), "V4 needs no ledger role");
+        assertEq(perennial.commons(), address(pool));
         assertEq(pool.PROTOCOL_TREASURY(), protocolTreasury);
+        assertEq(v4.TREASURY(), treasury);
+        assertTrue(perennial.approvedAgent(agent));
+        assertTrue(perennial.approvedResolver(disputeResolver));
+        assertTrue(v4.approvedResolver(disputeResolver));
         assertTrue(perennial.isApprovedFeed(bytes32(0), agent) == false);
 
         new Handoff().handoff(_stack(), admin, deployer);
@@ -410,6 +405,18 @@ contract DeployScriptsTest is Test {
         p.deploy(c);
     }
 
+    /// VerifyRoles refuses a stack whose V4 was (needlessly) made a ledger source.
+    function test_verifyRoles_refusesV4AsLedgerSource() public {
+        _deployAll();
+        new Handoff().handoff(_stack(), admin, deployer);
+        vm.prank(admin);
+        ledger.setSource(address(v4), true);
+        VerifyRoles v = new VerifyRoles();
+        RoleTable.Stack memory st = _stack();
+        vm.expectRevert(bytes("v4 is a ledger source (it needs no ledger role)"));
+        v.verify(st, admin, deployer);
+    }
+
     function test_nanoStack_mainnetRefusesDeployerTreasuryAndFreshLedger() public {
         vm.chainId(5042);
         vm.etch(0x3600000000000000000000000000000000000000, address(usdc).code);
@@ -422,6 +429,10 @@ contract DeployScriptsTest is Test {
         c = _v4Cfg();
         c.ledger = address(0);
         vm.expectRevert(bytes("mainnet: NANO_LEDGER must be the shared ledger"));
+        n.deploy(c);
+        c = _v4Cfg();
+        c.disputeResolver = deployer;
+        vm.expectRevert(bytes("mainnet: DISPUTE_RESOLVER must not be the deployer"));
         n.deploy(c);
     }
 

@@ -139,7 +139,8 @@ abstract contract RoleTable is DeployBase {
         require(address(MarketsV4(s.v4).LEDGER()) == s.ledger, "v4 ledger: one shared ledger");
         require(address(MarketsPerennial(s.perennial).ATTESTATION()) == s.attestation, "perennial attestation");
         require(address(MarketsV4(s.v4).ATTESTATION()) == s.attestation, "v4 attestation");
-        require(NanoLedger(s.ledger).isSource(s.v4), "v4 not a ledger source");
+        // Neither market creates fee pools: no market needs to be a ledger source.
+        require(!NanoLedger(s.ledger).isSource(s.v4), "v4 is a ledger source (it needs no ledger role)");
         require(address(ProgressArbiter(s.arbiter).POOL()) == s.pool, "arbiter pool");
         require(MarketsPerennial(s.perennial).commons() == s.pool, "perennial commons");
         require(address(ProgressPool(s.pool).BUILDERS()) == s.builders, "pool builders");
@@ -150,9 +151,10 @@ abstract contract RoleTable is DeployBase {
             // Allowlist entries are not roles, but the deployer must not be a vetted oracle.
             require(!MarketsPerennial(s.perennial).approvedAgent(deployer), "deployer is an approved agent (perennial)");
             require(!MarketsPerennial(s.perennial).approvedResolver(deployer), "deployer is an approved resolver (perennial)");
-            require(!MarketsV4(s.v4).approvedAgent(deployer), "deployer is an approved agent (v4)");
+            // V4 agents are permissionless; only its resolver allowlist is vetted.
             require(!MarketsV4(s.v4).approvedResolver(deployer), "deployer is an approved resolver (v4)");
-            // The protocol fee recipient is immutable: it must not be the deployer's key.
+            // Fee recipients are immutable: they must not be the deployer's key.
+            require(MarketsV4(s.v4).TREASURY() != deployer, "deployer is the V4 treasury");
             require(ProgressPool(s.pool).PROTOCOL_TREASURY() != deployer, "deployer is the protocol treasury");
         }
     }

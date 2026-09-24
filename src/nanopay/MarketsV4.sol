@@ -10,29 +10,31 @@ import {NanoLedger} from "./NanoLedger.sol";
 import {SettlementPolicy} from "./SettlementPolicy.sol";
 
 /// @title MarketsV4. A binary prediction market settled entirely on NanoLedger.
-/// @notice Same constant-product AMM as Markets, but ALL value moves as
-///         NanoLedger internal-balance accounting instead of ERC20 transfers:
-///           - collateral in: ledger.transferFromInternal(trader -> this)
-///           - collateral out / payouts: ledger.internalTransfer(this -> trader)
-///           - the per-trade fee: ONE ledger.accrue(marketId, fee) write that
-///             distributes to creator/treasury by share; recipients claim
-///             lazily via ledger.claim(marketId). The agent's cut is NOT in the
-///             pool (a pool is claimable at any time, so an agent that never
-///             settled would still be paid): it is escrowed per market and
-///             released on resolve, or forfeited to FORFEIT_SINK on void.
-///         So a trade does zero ERC20 transfers and one fee write instead of
-///         three pushes, and traders/creators just hold ledger balances. Real
-///         USDC only crosses at NanoLedger.deposit/withdraw. Settlement rules —
-///         which attestation decides a market, and when it voids instead — live
-///         in SettlementPolicy, shared with MarketsPerennial.
+/// @notice Common markets. Same constant-product AMM as Markets, but ALL value
+///         moves as NanoLedger internal-balance accounting instead of ERC20
+///         transfers: collateral in via ledger.transferFromInternal(trader ->
+///         this), payouts via ledger.internalTransfer(this -> recipient). Real
+///         USDC only crosses at NanoLedger.deposit/withdraw. Traders approve
+///         MarketsV4 on the ledger (approveSpender) before trading. MarketsV4
+///         needs no ledger role (it creates no fee pools).
 ///
-/// MarketsV4 must be registered as a NanoLedger source (setSource) so it can
-/// create + credit fee pools. Traders approve MarketsV4 on the ledger
-/// (approveSpender) before trading.
+///         Fees: NO per-trade fee. One resolution fee of RESOLUTION_FEE_BPS (1%)
+///         of the market's collateral pot C, charged once at settlement: 30% to
+///         the market creator, 20% to the bonded agent that settled it, 50% to
+///         the Registrai TREASURY (the rounding remainder). Winners redeem
+///         shares * (C - fee) / C; the LP gets its reserve on the same terms.
 ///
-/// Governance is limited to the oracle allowlist (GOVERNOR_ROLE): which agents
-/// and dispute resolvers a new market may settle on. Fees, treasury and the
-/// forfeit sink stay immutable.
+///         Void: a market that cannot be settled voids (SettlementPolicy, shared
+///         with MarketsPerennial). The same 1% is charged; its 20% agent leg
+///         goes to the challenger who got the agent's reading ruled Invalid,
+///         else to the treasury. Every trader is refunded its net cost minus 1%
+///         (pro rata only if earlier sellers took profits larger than the LP
+///         seed); the LP gets the rest.
+///
+///         Agents are permissionless: any agent registered and active on the
+///         feed may settle a market. Governance (GOVERNOR_ROLE) is limited to
+///         the allowlist of dispute resolvers a market's feed may name, and a
+///         feed whose agent is its own resolver is always refused.
 contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     enum Outcome { Yes, No }
     enum Comparator { GreaterThan, GreaterOrEqual, LessThan, LessOrEqual }
@@ -55,22 +57,20 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     NanoLedger public immutable LEDGER;
     Registry public immutable REGISTRY;
     Attestation public immutable ATTESTATION;
+    /// @notice The Registrai treasury: receives the 50% leg. Immutable.
     address public immutable TREASURY;
-    /// @notice Receives a voided market's escrowed agent fee. Immutable; must not
-    /// be protocol revenue, or the penalty is void.
-    address public immutable FORFEIT_SINK;
 
     bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
 
     uint256 public constant MIN_LIQUIDITY = 5e6;
-    /// @notice Per-trade fee split, fixed at deploy (must sum to FEE_BPS_TOTAL).
-    /// The mainnet split is an owner decision and a required input of
-    /// DeployNanoStack; testnet uses 40 / 20 / 10.
-    uint256 public immutable FEE_BPS_CREATOR;
-    uint256 public immutable FEE_BPS_AGENT;
-    uint256 public immutable FEE_BPS_TREASURY;
-    uint256 public constant FEE_BPS_TOTAL = 70;
-    uint256 private constant BPS = 10_000;
+    /// @notice The resolution fee: 1% of the market's collateral pot, once.
+    uint256 public constant RESOLUTION_FEE_BPS = 100;
+    /// @notice Shares of the resolution fee (of BPS). The agent's 20% becomes the
+    /// challenger reward on void; the treasury takes the rounding remainder.
+    uint256 public constant CREATOR_SHARE_BPS = 3000;
+    uint256 public constant AGENT_SHARE_BPS = 2000;
+    uint256 public constant TREASURY_SHARE_BPS = 5000;
+    uint256 public constant BPS = 10_000;
 
     mapping(bytes32 => Market) internal _markets;
     mapping(bytes32 => mapping(address => uint256)) public yesBalance;
@@ -79,10 +79,23 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     mapping(bytes32 => mapping(address => uint256)) public lpShares;
     mapping(bytes32 => uint256) public totalLpShares;
     mapping(bytes32 => uint256) public lpPotAtResolution;
-    /// @notice Agent-cut fees held until the market settles.
-    mapping(bytes32 => uint256) public agentEscrow;
-    /// @notice Governor allowlist of bonded agents a market may settle on.
-    mapping(address => bool) public approvedAgent;
+
+    /// @notice C: all collateral backing a market (== YES supply == NO supply).
+    mapping(bytes32 => uint256) public collateralOf;
+    /// @notice What a trader has put in and not yet taken out (never below 0;
+    /// the LP seed is not a trader cost).
+    mapping(bytes32 => mapping(address => uint256)) public netCost;
+    /// @notice Sum of every trader's netCost.
+    mapping(bytes32 => uint256) public totalNetCost;
+    /// @notice At resolve: C, and C minus the resolution fee. Winners redeem
+    /// shares * settledNet / settledGross.
+    mapping(bytes32 => uint256) public settledGross;
+    mapping(bytes32 => uint256) public settledNet;
+    /// @notice At void: what traders share (net cost minus 1%, capped by what the
+    /// market holds), and the totalNetCost it is shared over.
+    mapping(bytes32 => uint256) public voidTraderPool;
+    mapping(bytes32 => uint256) public voidNetCostTotal;
+
     /// @notice Governor allowlist of dispute resolvers a market's feed may name.
     /// A feed's resolver is fixed at Registry.createFeed (no setter) and Dispute
     /// snapshots it per challenge, so checking it once at market creation is sound.
@@ -91,13 +104,14 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     event MarketCreated(bytes32 indexed marketId, address indexed creator, bytes32 indexed feedId, address agent, int256 threshold, Comparator comparator, uint256 expiry, uint256 liquidity);
     event Bought(bytes32 indexed marketId, address indexed buyer, Outcome outcome, uint256 collateralIn, uint256 sharesOut, uint256 fee);
     event Sold(bytes32 indexed marketId, address indexed seller, Outcome outcome, uint256 sharesIn, uint256 collateralOut, uint256 fee);
+    event FeesPaid(bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 agentFee);
     event Resolved(bytes32 indexed marketId, bool yesWon, int256 value);
     event Redeemed(bytes32 indexed marketId, address indexed holder, uint256 payout);
     event LPClaimed(bytes32 indexed marketId, address indexed lp, uint256 payout);
     event MarketVoided(bytes32 indexed marketId);
-    event AgentFeeReleased(bytes32 indexed marketId, address indexed agent, uint256 amount);
-    event AgentFeeForfeited(bytes32 indexed marketId, address indexed sink, uint256 amount);
-    event AgentApprovalSet(address indexed agent, bool approved);
+    event VoidFeesPaid(
+        bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 challengerReward, address challenger
+    );
     event ResolverApprovalSet(address indexed resolver, bool approved);
 
     error MarketMissing();
@@ -116,8 +130,6 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     error NoLPShares();
     error ZeroAddress();
     error ReserveDepleted();
-    error BadSplit();
-    error AgentNotApproved();
     error ResolverNotApproved();
     error SelfResolvedFeed();
 
@@ -127,20 +139,10 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         Attestation attestation_,
         address admin,
         address treasury_,
-        address forfeitSink_,
         uint256 settlementWindow_,
-        uint256 resolutionGrace_,
-        uint256 feeBpsCreator_,
-        uint256 feeBpsAgent_,
-        uint256 feeBpsTreasury_
+        uint256 resolutionGrace_
     ) SettlementPolicy(settlementWindow_, resolutionGrace_) {
-        if (treasury_ == address(0)) revert ZeroAddress();
-        if (feeBpsCreator_ + feeBpsAgent_ + feeBpsTreasury_ != FEE_BPS_TOTAL) revert BadSplit();
-        FEE_BPS_CREATOR = feeBpsCreator_;
-        FEE_BPS_AGENT = feeBpsAgent_;
-        FEE_BPS_TREASURY = feeBpsTreasury_;
-        if (forfeitSink_ == address(0) || admin == address(0)) revert ZeroAddress();
-        FORFEIT_SINK = forfeitSink_;
+        if (treasury_ == address(0) || admin == address(0)) revert ZeroAddress();
         LEDGER = ledger_;
         REGISTRY = registry_;
         ATTESTATION = attestation_;
@@ -179,50 +181,22 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         });
         lpShares[marketId][msg.sender] = liquidity;
         totalLpShares[marketId] = liquidity;
-
-        // fee pool: creator / treasury bps, deduped by address. The agent's cut
-        // is escrowed instead (see _chargeFee).
-        LEDGER.createPool(marketId);
-        _setFeeShares(marketId, msg.sender);
+        collateralOf[marketId] = liquidity;
 
         emit MarketCreated(marketId, msg.sender, feedId, agent, threshold, comparator, expiry, liquidity);
     }
 
-    /// @dev Refuse a market whose oracle the governor has not vetted: both the
-    /// agent that attests and the resolver that adjudicates disputes on its feed.
-    /// Without this, anyone could open a market on a feed where they are agent
-    /// AND resolver and settle it however they like. Checked at creation only:
+    /// @dev Agents are permissionless (createMarket already requires the agent to
+    /// be registered and active on the feed). The dispute resolver is not: the
+    /// feed must name a governor-approved resolver, and never its own agent —
+    /// otherwise anyone could open a market on a feed where they attest AND
+    /// adjudicate, and settle it however they like. Checked at creation only:
     /// the feed's resolver cannot change afterwards, and revoking an approval
     /// must not strand markets already open (they settle or void as before).
     function _requireApprovedOracle(bytes32 feedId, address agent) internal view {
-        if (!approvedAgent[agent]) revert AgentNotApproved();
         address resolver = REGISTRY.getFeed(feedId).resolver;
         if (!approvedResolver[resolver]) revert ResolverNotApproved();
-        // Both lists are vetted separately, so one address approved on both would
-        // otherwise pass on a feed it attests AND adjudicates: the self-resolved
-        // oracle this allowlist exists to refuse. The pairing is checked here, not
-        // only in the deploy script, because approvals change after deploy.
         if (resolver == agent) revert SelfResolvedFeed();
-    }
-
-    function _setFeeShares(bytes32 marketId, address creator) internal {
-        if (creator == TREASURY) {
-            LEDGER.setShares(marketId, creator, FEE_BPS_CREATOR + FEE_BPS_TREASURY);
-        } else {
-            LEDGER.setShares(marketId, creator, FEE_BPS_CREATOR);
-            LEDGER.setShares(marketId, TREASURY, FEE_BPS_TREASURY);
-        }
-    }
-
-    /// @dev Escrow the agent's cut, pool the rest. Pool shares are creator:treasury bps, so
-    /// pooling the remainder pays creator and treasury exactly their bps of the
-    /// whole fee.
-    function _chargeFee(bytes32 marketId, uint256 fee) internal {
-        if (fee == 0) return;
-        uint256 aFee = (fee * FEE_BPS_AGENT) / FEE_BPS_TOTAL;
-        if (aFee > 0) agentEscrow[marketId] += aFee;
-        uint256 pooled = fee - aFee;
-        if (pooled > 0) LEDGER.accrue(marketId, pooled);
     }
 
     // ───────────────────────────── trade ─────────────────────────────
@@ -236,14 +210,14 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         if (block.timestamp >= m.expiry) revert MarketExpired();
         if (collateralIn == 0) revert LiquidityTooLow();
 
-        // pull full collateral into this market's ledger account, then skim fee
         LEDGER.transferFromInternal(msg.sender, address(this), collateralIn);
-        uint256 fee = (collateralIn * FEE_BPS_TOTAL) / BPS;
-        uint256 effectiveIn = collateralIn - fee;
-        _chargeFee(marketId, fee);
+        collateralOf[marketId] += collateralIn;
+        netCost[marketId][msg.sender] += collateralIn;
+        totalNetCost[marketId] += collateralIn;
 
-        uint256 yesAfterMint = m.yesReserve + effectiveIn;
-        uint256 noAfterMint = m.noReserve + effectiveIn;
+        // no trading fee: the whole deposit mints a full YES + NO set
+        uint256 yesAfterMint = m.yesReserve + collateralIn;
+        uint256 noAfterMint = m.noReserve + collateralIn;
         uint256 k = m.yesReserve * m.noReserve;
 
         if (outcome == Outcome.Yes) {
@@ -260,7 +234,7 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         if (sharesOut == 0) revert AmountTooLow();
         if (m.yesReserve == 0 || m.noReserve == 0) revert ReserveDepleted();
         if (sharesOut < minSharesOut) revert SlippageExceeded();
-        emit Bought(marketId, msg.sender, outcome, collateralIn, sharesOut, fee);
+        emit Bought(marketId, msg.sender, outcome, collateralIn, sharesOut, 0);
     }
 
     function sell(bytes32 marketId, Outcome outcome, uint256 sharesIn, uint256 minCollateralOut)
@@ -289,19 +263,46 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         // Round in the protocol's favour: the exact payout is (sumAB - sqrt(disc)) / 2;
         // ceiling the root and flooring the halving can only pay less, so k never
         // decreases on a sell (a floored root could pay 1 unit over the curve).
-        uint256 grossOut = (sumAB - Math.sqrt(disc, Math.Rounding.Ceil)) / 2;
-
-        uint256 fee = (grossOut * FEE_BPS_TOTAL) / BPS;
-        collateralOut = grossOut - fee;
+        collateralOut = (sumAB - Math.sqrt(disc, Math.Rounding.Ceil)) / 2;
         if (collateralOut < minCollateralOut) revert SlippageExceeded();
 
-        m.yesReserve = yesPostSell - grossOut;
-        m.noReserve = noPostSell - grossOut;
+        m.yesReserve = yesPostSell - collateralOut;
+        m.noReserve = noPostSell - collateralOut;
         if (m.yesReserve == 0 || m.noReserve == 0) revert ReserveDepleted();
 
-        _chargeFee(marketId, fee);
+        _recordSell(marketId, collateralOut);
         if (collateralOut > 0) LEDGER.internalTransfer(msg.sender, collateralOut);
-        emit Sold(marketId, msg.sender, outcome, sharesIn, collateralOut, fee);
+        emit Sold(marketId, msg.sender, outcome, sharesIn, collateralOut, 0);
+    }
+
+    /// @dev A sell burns `out` of each side, so C falls by `out`. The seller's net
+    /// cost falls by at most what it still has in: a profit beyond it is not a
+    /// negative cost.
+    function _recordSell(bytes32 marketId, uint256 out) internal {
+        collateralOf[marketId] -= out;
+        uint256 nc = netCost[marketId][msg.sender];
+        uint256 d = out < nc ? out : nc;
+        if (d > 0) {
+            netCost[marketId][msg.sender] = nc - d;
+            totalNetCost[marketId] -= d;
+        }
+    }
+
+    /// @dev The resolution fee on C: 30% creator, 20% agent leg, treasury the
+    /// remainder (so rounding never strands a unit).
+    function _feeLegs(uint256 c)
+        internal
+        pure
+        returns (uint256 fee, uint256 creatorFee, uint256 agentFee, uint256 treasuryFee)
+    {
+        fee = (c * RESOLUTION_FEE_BPS) / BPS;
+        creatorFee = (fee * CREATOR_SHARE_BPS) / BPS;
+        agentFee = (fee * AGENT_SHARE_BPS) / BPS;
+        treasuryFee = fee - creatorFee - agentFee;
+    }
+
+    function _pay(address to, uint256 amount) internal {
+        if (amount > 0) LEDGER.internalTransfer(to, amount);
     }
 
     // ───────────────────────── resolve / claim ─────────────────────────
@@ -318,21 +319,28 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         bool yesWon = _evaluate(value, m.threshold, m.comparator);
         m.yesWon = yesWon;
         m.phase = Phase.Resolved;
-        lpPotAtResolution[marketId] = yesWon ? m.yesReserve : m.noReserve;
+
+        uint256 c = collateralOf[marketId];
+        (uint256 fee, uint256 creatorFee, uint256 agentFee, uint256 treasuryFee) = _feeLegs(c);
+        uint256 net = c - fee;
+        settledGross[marketId] = c;
+        settledNet[marketId] = net;
+        lpPotAtResolution[marketId] = ((yesWon ? m.yesReserve : m.noReserve) * net) / c;
         emit Resolved(marketId, yesWon, value);
 
-        uint256 fee = agentEscrow[marketId];
-        if (fee > 0) {
-            agentEscrow[marketId] = 0;
-            LEDGER.internalTransfer(m.agent, fee);
-            emit AgentFeeReleased(marketId, m.agent, fee);
-        }
+        _pay(m.creator, creatorFee);
+        _pay(m.agent, agentFee);
+        _pay(TREASURY, treasuryFee);
+        emit FeesPaid(marketId, creatorFee, treasuryFee, agentFee);
     }
 
     /// @notice Close a market that can no longer be settled. Anyone may call it.
-    /// @dev Half a unit per YES and per NO share; LPs share half the combined
-    /// reserves. Solvent by construction (each side's supply equals the
-    /// collateral held). The escrowed agent fee is forfeited to FORFEIT_SINK.
+    /// @dev The 1% fee is still charged: creator 30%, treasury 50%, and the agent's
+    /// 20% goes to the challenger that got the agent's reading ruled Invalid in
+    /// the settlement window (else to the treasury). Traders then share
+    /// traderPool = min(totalNetCost * 99%, C - fee), each pro rata to its net
+    /// cost; the LP gets what is left. Solvent by construction: the payouts sum
+    /// to at most C - fee, which is what the market holds after the fee.
     function voidMarket(bytes32 marketId) external nonReentrant {
         Market storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
@@ -341,15 +349,23 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         if (state != Settlement.Voidable) revert NotVoidable();
 
         m.phase = Phase.Voided;
-        lpPotAtResolution[marketId] = (m.yesReserve + m.noReserve) / 2;
+        uint256 c = collateralOf[marketId];
+        (uint256 fee, uint256 creatorFee, uint256 agentFee, uint256 treasuryFee) = _feeLegs(c);
+        uint256 avail = c - fee;
+        uint256 tnc = totalNetCost[marketId];
+        uint256 traderPool = (tnc * (BPS - RESOLUTION_FEE_BPS)) / BPS;
+        if (traderPool > avail) traderPool = avail;
+        voidTraderPool[marketId] = traderPool;
+        voidNetCostTotal[marketId] = tnc;
+        lpPotAtResolution[marketId] = avail - traderPool;
         emit MarketVoided(marketId);
 
-        uint256 fee = agentEscrow[marketId];
-        if (fee > 0) {
-            agentEscrow[marketId] = 0;
-            LEDGER.internalTransfer(FORFEIT_SINK, fee);
-            emit AgentFeeForfeited(marketId, FORFEIT_SINK, fee);
-        }
+        address challenger = _challengerOf(ATTESTATION, m.feedId, m.agent, m.expiry);
+        if (challenger == address(0)) treasuryFee += agentFee;
+        _pay(m.creator, creatorFee);
+        _pay(TREASURY, treasuryFee);
+        if (challenger != address(0)) _pay(challenger, agentFee);
+        emit VoidFeesPaid(marketId, creatorFee, treasuryFee, challenger == address(0) ? 0 : agentFee, challenger);
     }
 
     function _evaluate(int256 value, int256 threshold, Comparator c) internal pure returns (bool) {
@@ -363,17 +379,10 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         Market storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
         if (m.phase == Phase.Trading) revert NotResolved();
-        if (m.phase == Phase.Voided) {
-            payout = (yesBalance[marketId][msg.sender] + noBalance[marketId][msg.sender]) / 2;
-            yesBalance[marketId][msg.sender] = 0;
-            noBalance[marketId][msg.sender] = 0;
-        } else if (m.yesWon) {
-            payout = yesBalance[marketId][msg.sender];
-            yesBalance[marketId][msg.sender] = 0;
-        } else {
-            payout = noBalance[marketId][msg.sender];
-            noBalance[marketId][msg.sender] = 0;
-        }
+        payout = _redeemable(marketId, m, msg.sender);
+        yesBalance[marketId][msg.sender] = 0;
+        noBalance[marketId][msg.sender] = 0;
+        netCost[marketId][msg.sender] = 0;
         if (payout == 0) revert InsufficientShares();
         LEDGER.internalTransfer(msg.sender, payout);
         emit Redeemed(marketId, msg.sender, payout);
@@ -391,13 +400,22 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
         emit LPClaimed(marketId, msg.sender, payout);
     }
 
-    // ──────────────────────────── governor ────────────────────────────
-
-    function setApprovedAgent(address agent, bool approved) external onlyRole(GOVERNOR_ROLE) {
-        if (agent == address(0)) revert ZeroAddress();
-        approvedAgent[agent] = approved;
-        emit AgentApprovalSet(agent, approved);
+    /// @dev Resolved: winning shares * settledNet / settledGross. Voided: net cost
+    /// * voidTraderPool / voidNetCostTotal. Trading: 0.
+    function _redeemable(bytes32 marketId, Market storage m, address who) internal view returns (uint256) {
+        if (m.phase == Phase.Resolved) {
+            uint256 shares = m.yesWon ? yesBalance[marketId][who] : noBalance[marketId][who];
+            return (shares * settledNet[marketId]) / settledGross[marketId];
+        }
+        if (m.phase == Phase.Voided) {
+            uint256 total = voidNetCostTotal[marketId];
+            if (total == 0) return 0;
+            return (netCost[marketId][who] * voidTraderPool[marketId]) / total;
+        }
+        return 0;
     }
+
+    // ──────────────────────────── governor ────────────────────────────
 
     function setApprovedResolver(address resolver, bool approved) external onlyRole(GOVERNOR_ROLE) {
         if (resolver == address(0)) revert ZeroAddress();
@@ -408,12 +426,26 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     // ───────────────────────────── views ─────────────────────────────
 
     /// @notice True when a market on `feedId` settled by `agent` passes the oracle
-    /// allowlist: the feed exists, the agent is approved, and the feed's resolver
-    /// is approved. (createMarket additionally needs the agent registered and
-    /// active on the feed and a settleable dispute window.)
+    /// rules: the feed exists, the agent is registered and active on it, the
+    /// feed's resolver is approved, and the agent is not its own resolver.
+    /// (createMarket additionally needs a settleable dispute window.)
     function isApprovedFeed(bytes32 feedId, address agent) external view returns (bool) {
         Registry.Feed memory f = REGISTRY.getFeed(feedId);
-        return f.exists && approvedAgent[agent] && approvedResolver[f.resolver] && f.resolver != agent;
+        return f.exists && REGISTRY.isActiveAgent(feedId, agent) && approvedResolver[f.resolver]
+            && f.resolver != agent;
+    }
+
+    /// @notice What `redeem` would pay `who` now (0 while trading).
+    function redeemable(bytes32 marketId, address who) external view returns (uint256) {
+        return _redeemable(marketId, _markets[marketId], who);
+    }
+
+    /// @notice What `claimLP` would pay `who` now (0 while trading).
+    function claimableLP(bytes32 marketId, address who) external view returns (uint256) {
+        if (_markets[marketId].phase == Phase.Trading) return 0;
+        uint256 total = totalLpShares[marketId];
+        if (total == 0) return 0;
+        return (lpShares[marketId][who] * lpPotAtResolution[marketId]) / total;
     }
 
     /// @notice Where a market stands in settlement, and the settling value once

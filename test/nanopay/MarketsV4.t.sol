@@ -10,9 +10,9 @@ import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 
 /// MarketsV4 lifecycle on NanoLedger: create/buy/sell settle as internal
-/// accounting, fees accrue with one write and are claimed from the ledger,
-/// oracle resolution + redeem + LP claim pay into ledger balances. Ledger
-/// solvency holds throughout.
+/// accounting with no trading fee, the 1% resolution fee is paid at settlement
+/// (creator 30 / agent 20 / treasury 50), oracle resolution + redeem + LP claim
+/// pay into ledger balances. Ledger solvency holds throughout.
 contract MarketsV4Test is Test {
     MockUSDC usdc;
     Registry registry;
@@ -39,10 +39,9 @@ contract MarketsV4Test is Test {
         attestation.wire(address(dispute));
 
         ledger = new NanoLedger(usdc, address(this));
-        markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, address(0x51F), 1 hours, 1 days, 40, 20, 10);
-        markets.setApprovedAgent(oracle, true);
+        markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, 1 hours, 1 days);
         markets.setApprovedResolver(resolver, true);
-        ledger.setSource(address(markets), true);
+        // no ledger role: V4 creates no fee pools
 
         // bonded agent + feed (creator == agent in v2)
         usdc.mint(oracle, 1_000e6);
@@ -94,9 +93,9 @@ contract MarketsV4Test is Test {
         markets.createMarket(bytes32("nope"), oracle, 0, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 1 hours, 1_000e6);
     }
 
-    // ───────────── buy: fee = one accrual write ─────────────
+    // ───────────── buy: no trading fee ─────────────
 
-    function test_buy_settlesOnLedger_andAccruesFeeOnce() public {
+    function test_buy_settlesOnLedger_noTradeFee() public {
         bytes32 id = _market();
         uint256 takerBefore = ledger.balanceOf(taker);
 
@@ -104,13 +103,11 @@ contract MarketsV4Test is Test {
         uint256 shares = markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, 0);
         assertGt(shares, 0);
         assertEq(ledger.balanceOf(taker), takerBefore - 1_000e6, "collateral debited from ledger balance");
-
-        // fee = 1000 * 70bps = 7 USDC: creator 4 and treasury 1 accrue to the pool;
-        // the agent's 2 is escrowed until it settles the market.
-        assertEq(markets.LEDGER().claimablePool(id, creator), 4e6, "creator fee accrued");
-        assertEq(markets.LEDGER().claimablePool(id, oracle), 0, "agent not in the pool");
-        assertEq(markets.agentEscrow(id), 2e6, "agent fee escrowed");
-        assertEq(markets.LEDGER().claimablePool(id, treasury), 1e6, "treasury fee accrued");
+        assertEq(ledger.balanceOf(address(markets)), 2_000e6, "every unit stays in the market");
+        assertEq(markets.collateralOf(id), 2_000e6);
+        assertEq(markets.netCost(id, taker), 1_000e6);
+        assertEq(ledger.balanceOf(treasury), 0, "no fee at trade time");
+        assertEq(ledger.balanceOf(oracle), 0, "no fee at trade time");
         _solvent();
     }
 
@@ -121,17 +118,20 @@ contract MarketsV4Test is Test {
         markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, type(uint256).max);
     }
 
-    function test_feeClaim_fromLedger() public {
+    /// The fee is paid once, at resolve, straight to ledger balances: nothing to claim.
+    function test_resolveFee_paidToLedgerBalances() public {
         bytes32 id = _market();
         vm.prank(taker);
-        markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, 0);
-
+        markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, 0); // C = 2000, fee 20
         uint256 creatorBefore = ledger.balanceOf(creator);
-        vm.prank(creator);
-        uint256 owed = ledger.claim(id);
-        assertEq(owed, 4e6);
-        assertEq(ledger.balanceOf(creator), creatorBefore + 4e6, "fee claimed to ledger balance");
-        assertEq(ledger.claimablePool(id, creator), 0, "checkpoint advanced");
+        vm.warp(block.timestamp + 2 hours + 1);
+        vm.prank(oracle);
+        attestation.attest(feedId, int256(123_456), bytes32("ih"));
+        vm.warp(block.timestamp + DW);
+        markets.resolve(id);
+        assertEq(ledger.balanceOf(creator) - creatorBefore, 6e6, "creator 30% of 20");
+        assertEq(ledger.balanceOf(oracle), 4e6, "agent 20% of 20");
+        assertEq(ledger.balanceOf(treasury), 10e6, "treasury 50% of 20");
         _solvent();
     }
 
@@ -147,6 +147,8 @@ contract MarketsV4Test is Test {
         uint256 out = markets.sell(id, MarketsV4.Outcome.Yes, shares, 0);
         assertGt(out, 0);
         assertEq(ledger.balanceOf(taker), takerBefore + out, "proceeds credited to ledger balance");
+        assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id), "no fee skimmed");
+        assertEq(markets.netCost(id, taker), 1_000e6 - (out < 1_000e6 ? out : 1_000e6));
         _solvent();
     }
 
@@ -171,7 +173,7 @@ contract MarketsV4Test is Test {
         uint256 takerBefore = ledger.balanceOf(taker);
         vm.prank(taker);
         uint256 payout = markets.redeem(id);
-        assertEq(payout, shares, "winning shares redeem 1:1");
+        assertEq(payout, (shares * 2_970e6) / 3_000e6, "winning shares redeem at net / gross (C = 3000, fee 30)");
         assertEq(ledger.balanceOf(taker), takerBefore + payout);
 
         // creator claims LP pot
@@ -198,11 +200,9 @@ contract MarketsV4Test is Test {
         markets.buy(id, MarketsV4.Outcome.Yes, 3_000e6, 0);
         vm.prank(creator);
         markets.buy(id, MarketsV4.Outcome.No, 1_500e6, 0);
-        vm.prank(creator);
-        ledger.claim(id); // claim creator + (creator!=others) fees
-        vm.prank(treasury);
-        // treasury has no ledger deposit but can still claim fees into a balance
-        ledger.claim(id);
+        assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id));
+        assertEq(markets.collateralOf(id), 5_500e6);
+        assertEq(markets.totalNetCost(id), 4_500e6);
         _solvent();
     }
 }

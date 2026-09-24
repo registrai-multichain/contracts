@@ -14,8 +14,10 @@ import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
-/// @notice B1: a market may only settle on a governor-approved agent whose feed
-/// names a governor-approved dispute resolver. Same rule on both market kinds.
+/// @notice B1: a market's feed must name a governor-approved dispute resolver
+/// that is not its own agent, on both market kinds. Perennial additionally
+/// requires a governor-approved agent; common markets (V4) are open to any
+/// agent registered and active on the feed.
 contract OracleAllowlistTest is Test {
     MockUSDC usdc;
     Registry registry;
@@ -54,8 +56,7 @@ contract OracleAllowlistTest is Test {
         pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours, address(0x7EA5));
         perennial =
             new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), WINDOW, GRACE);
-        v4 = new MarketsV4(ledger, registry, attestation, address(this), address(0x7EA), address(pool), WINDOW, GRACE, 40, 20, 10);
-        ledger.setSource(address(v4), true);
+        v4 = new MarketsV4(ledger, registry, attestation, address(this), address(0x7EA), WINDOW, GRACE);
 
         usdc.mint(agent, 1_000e6);
         vm.startPrank(agent);
@@ -76,7 +77,6 @@ contract OracleAllowlistTest is Test {
     function _approveBoth(bool on) internal {
         perennial.setApprovedAgent(agent, on);
         perennial.setApprovedResolver(resolver, on);
-        v4.setApprovedAgent(agent, on);
         v4.setApprovedResolver(resolver, on);
     }
 
@@ -94,20 +94,27 @@ contract OracleAllowlistTest is Test {
 
     // ── create is gated ──
 
-    function test_unapprovedAgent_reverts() public {
+    function test_unapprovedAgent_revertsOnPerennial_butV4IsPermissionless() public {
         perennial.setApprovedResolver(resolver, true);
         v4.setApprovedResolver(resolver, true);
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.AgentNotApproved.selector);
         perennial.createMarket(1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        // V4 has no agent allowlist: any active registered agent on the feed
+        assertTrue(v4.getMarket(_createV4()).createdAt != 0);
+    }
+
+    /// V4 still refuses an agent that is not registered and active on the feed.
+    function test_v4_unregisteredAgent_reverts() public {
+        v4.setApprovedResolver(resolver, true);
         vm.prank(creator);
-        vm.expectRevert(MarketsV4.AgentNotApproved.selector);
-        v4.createMarket(feedId, agent, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        vm.expectRevert(MarketsV4.AgentNotRegistered.selector);
+        v4.createMarket(feedId, stranger, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        assertFalse(v4.isApprovedFeed(feedId, stranger), "not registered on the feed");
     }
 
     function test_unapprovedResolver_reverts() public {
         perennial.setApprovedAgent(agent, true);
-        v4.setApprovedAgent(agent, true);
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.ResolverNotApproved.selector);
         perennial.createMarket(1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
@@ -131,7 +138,6 @@ contract OracleAllowlistTest is Test {
         vm.stopPrank();
         perennial.setApprovedAgent(agent, true);
         perennial.setApprovedResolver(agent, true);
-        v4.setApprovedAgent(agent, true);
         v4.setApprovedResolver(agent, true);
 
         assertFalse(perennial.isApprovedFeed(selfFeed, agent));
@@ -150,7 +156,6 @@ contract OracleAllowlistTest is Test {
         assertFalse(perennial.isApprovedFeed(feedId, agent));
         assertFalse(v4.isApprovedFeed(feedId, agent));
         perennial.setApprovedAgent(agent, true);
-        v4.setApprovedAgent(agent, true);
         assertFalse(perennial.isApprovedFeed(feedId, agent), "resolver still unapproved");
         assertFalse(v4.isApprovedFeed(feedId, agent), "resolver still unapproved");
         perennial.setApprovedResolver(resolver, true);
@@ -160,6 +165,7 @@ contract OracleAllowlistTest is Test {
         assertFalse(perennial.isApprovedFeed(bytes32("missing"), agent), "unknown feed");
         assertFalse(v4.isApprovedFeed(bytes32("missing"), agent), "unknown feed");
         assertFalse(perennial.isApprovedFeed(feedId, stranger), "other agent");
+        assertFalse(v4.isApprovedFeed(feedId, stranger), "other agent is not registered on the feed");
     }
 
     // ── governance ──
@@ -171,8 +177,6 @@ contract OracleAllowlistTest is Test {
         perennial.setApprovedAgent(agent, true);
         vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, role));
         perennial.setApprovedResolver(resolver, true);
-        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, role));
-        v4.setApprovedAgent(agent, true);
         vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, role));
         v4.setApprovedResolver(resolver, true);
         vm.stopPrank();
@@ -193,7 +197,14 @@ contract OracleAllowlistTest is Test {
 
     function test_v4_constructorRejectsZeroAdmin() public {
         vm.expectRevert(MarketsV4.ZeroAddress.selector);
-        new MarketsV4(ledger, registry, attestation, address(0), address(0x7EA), address(pool), WINDOW, GRACE, 40, 20, 10);
+        new MarketsV4(ledger, registry, attestation, address(0), address(0x7EA), WINDOW, GRACE);
+    }
+
+    function test_v4_hasNoAgentAllowlist() public {
+        (bool ok,) = address(v4).call(abi.encodeWithSignature("setApprovedAgent(address,bool)", agent, true));
+        assertFalse(ok, "setApprovedAgent removed from V4");
+        (ok,) = address(v4).call(abi.encodeWithSignature("approvedAgent(address)", agent));
+        assertFalse(ok, "approvedAgent removed from V4");
     }
 
     // ── revoking never strands an open market ──
@@ -218,6 +229,9 @@ contract OracleAllowlistTest is Test {
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.AgentNotApproved.selector);
         perennial.createMarket(1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, later, 100e6);
+        vm.prank(creator);
+        vm.expectRevert(MarketsV4.ResolverNotApproved.selector);
+        v4.createMarket(feedId, agent, 1, MarketsV4.Comparator.GreaterOrEqual, later, 100e6);
     }
 
     function test_revoke_existingMarketsStillVoid() public {
