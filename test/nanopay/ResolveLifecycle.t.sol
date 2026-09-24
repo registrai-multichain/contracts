@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {Test} from "forge-std/Test.sol";
+import {MockUSDC} from "../MockUSDC.sol";
+import {Registry} from "../../src/Registry.sol";
+import {Attestation} from "../../src/Attestation.sol";
+import {Dispute} from "../../src/Dispute.sol";
+import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
+import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
+import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
+import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
+import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
+import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
+
+/// @notice The RESOLVE path under interleaved buys and sells: after a random
+/// trading history the agent attests, the market resolves, every holder
+/// redeems, the LP claims — the market's ledger balance must cover all of it,
+/// leave only rounding dust, and the agent escrow must end at zero.
+/// (The reviewer's testFuzz_lifecycleSolvent covered the void path.)
+contract ResolveLifecycleTest is Test {
+    MockUSDC usdc;
+    Registry registry;
+    Attestation attestation;
+    NanoLedger ledger;
+    MarketsPerennial perennial;
+    MarketsV4 v4;
+
+    address agent = address(0x0AC1E);
+    address resolver = address(0xBEEF);
+    address creator = address(0xC0FFEE);
+    address[4] traders = [address(0x7A1), address(0x7A2), address(0x7A3), address(0x7A4)];
+    bytes32 feedId;
+
+    uint256 constant DW = 1 hours;
+    uint256 constant LIFE = 10 hours;
+    uint256 constant DUST = 10;
+
+    function setUp() public {
+        usdc = new MockUSDC();
+        registry = new Registry(usdc, 10e6);
+        attestation = new Attestation(registry);
+        Dispute dispute = new Dispute(registry, attestation, usdc);
+        registry.wire(address(attestation), address(dispute));
+        attestation.wire(address(dispute));
+        ledger = new NanoLedger(usdc, address(this));
+        BuilderRegistry builders = new BuilderRegistry(address(this));
+        CaretakerRegistry caretakers = new CaretakerRegistry(builders, address(this));
+        builders.registerFor(address(0xB111), "b1");
+        ProgressPool pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours);
+        perennial =
+            new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), 24 hours, 7 days);
+        v4 = new MarketsV4(
+            ledger, registry, attestation, address(this), address(0x7EA), address(pool), 24 hours, 7 days, 40, 20, 10
+        );
+        ledger.setSource(address(v4), true);
+        perennial.setApprovedAgent(agent, true);
+        perennial.setApprovedResolver(resolver, true);
+        v4.setApprovedAgent(agent, true);
+        v4.setApprovedResolver(resolver, true);
+
+        usdc.mint(agent, 1_000e6);
+        vm.startPrank(agent);
+        usdc.approve(address(registry), type(uint256).max);
+        feedId = registry.createFeed("f", keccak256("m"), 10e6, DW, resolver);
+        registry.registerAgent(feedId, keccak256("m"), 100e6);
+        vm.stopPrank();
+
+        _fund(creator);
+        for (uint256 i; i < traders.length; i++) {
+            _fund(traders[i]);
+        }
+    }
+
+    function _fund(address a) internal {
+        usdc.mint(a, 1_000_000e6);
+        vm.startPrank(a);
+        usdc.approve(address(ledger), type(uint256).max);
+        ledger.deposit(500_000e6);
+        ledger.approveSpender(address(perennial), type(uint256).max);
+        ledger.approveSpender(address(v4), type(uint256).max);
+        vm.stopPrank();
+    }
+
+    function _solventLedger() internal view {
+        assertEq(usdc.balanceOf(address(ledger)), ledger.totalOwed(), "ledger insolvent");
+    }
+
+    function testFuzz_perennial_resolveSolvent(uint256 seed, uint8 n, int256 value, uint256 liq) public {
+        n = uint8(bound(n, 1, 40));
+        liq = bound(liq, 5e6, 50_000e6);
+        value = bound(value, -1, 2);
+        uint256 t0 = vm.getBlockTimestamp();
+        vm.prank(creator);
+        bytes32 id =
+            perennial.createMarket(1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, t0 + LIFE, liq);
+
+        for (uint256 i; i < n; i++) {
+            uint256 r = uint256(keccak256(abi.encode(seed, i)));
+            address who = traders[r % traders.length];
+            MarketsPerennial.Outcome o = (r >> 8) % 2 == 0 ? MarketsPerennial.Outcome.Yes : MarketsPerennial.Outcome.No;
+            if ((r >> 16) % 3 == 0) {
+                uint256 bal = o == MarketsPerennial.Outcome.Yes ? perennial.yesBalance(id, who) : perennial.noBalance(id, who);
+                if (bal == 0) continue;
+                vm.prank(who);
+                try perennial.sell(id, o, bound(r >> 32, 1, bal), 0) {} catch {}
+            } else {
+                vm.prank(who);
+                try perennial.buy(id, o, bound(r >> 32, 1, 20_000e6), 0) {} catch {}
+            }
+        }
+
+        vm.warp(t0 + LIFE);
+        vm.prank(agent);
+        attestation.attest(feedId, value, keccak256("v"));
+        vm.warp(t0 + LIFE + DW);
+        perennial.resolve(id);
+        bool yesWon = perennial.getMarket(id).yesWon;
+        assertEq(yesWon, value >= 1);
+        assertEq(perennial.agentEscrow(id), 0, "escrow released");
+
+        // everything owed to winners and the LP is covered by the market's balance
+        uint256 owed = perennial.lpPotAtResolution(id);
+        for (uint256 i; i < traders.length; i++) {
+            owed += yesWon ? perennial.yesBalance(id, traders[i]) : perennial.noBalance(id, traders[i]);
+        }
+        assertGe(ledger.balanceOf(address(perennial)), owed, "market cannot cover its winners + LP");
+
+        for (uint256 i; i < traders.length; i++) {
+            uint256 win = yesWon ? perennial.yesBalance(id, traders[i]) : perennial.noBalance(id, traders[i]);
+            if (win == 0) continue;
+            uint256 before = ledger.balanceOf(traders[i]);
+            vm.prank(traders[i]);
+            assertEq(perennial.redeem(id), win);
+            assertEq(ledger.balanceOf(traders[i]) - before, win, "winner paid 1 per share");
+        }
+        vm.prank(creator);
+        perennial.claimLP(id);
+        assertLe(ledger.balanceOf(address(perennial)), DUST, "only dust left");
+        _solventLedger();
+    }
+
+    function testFuzz_v4_resolveSolvent(uint256 seed, uint8 n, int256 value, uint256 liq) public {
+        n = uint8(bound(n, 1, 40));
+        liq = bound(liq, 5e6, 50_000e6);
+        value = bound(value, -1, 2);
+        uint256 t0 = vm.getBlockTimestamp();
+        vm.prank(creator);
+        bytes32 id = v4.createMarket(feedId, agent, 1, MarketsV4.Comparator.GreaterOrEqual, t0 + LIFE, liq);
+
+        for (uint256 i; i < n; i++) {
+            uint256 r = uint256(keccak256(abi.encode(seed, i)));
+            address who = traders[r % traders.length];
+            MarketsV4.Outcome o = (r >> 8) % 2 == 0 ? MarketsV4.Outcome.Yes : MarketsV4.Outcome.No;
+            if ((r >> 16) % 3 == 0) {
+                uint256 bal = o == MarketsV4.Outcome.Yes ? v4.yesBalance(id, who) : v4.noBalance(id, who);
+                if (bal == 0) continue;
+                vm.prank(who);
+                try v4.sell(id, o, bound(r >> 32, 1, bal), 0) {} catch {}
+            } else {
+                vm.prank(who);
+                try v4.buy(id, o, bound(r >> 32, 1, 20_000e6), 0) {} catch {}
+            }
+        }
+
+        vm.warp(t0 + LIFE);
+        vm.prank(agent);
+        attestation.attest(feedId, value, keccak256("v"));
+        vm.warp(t0 + LIFE + DW);
+        v4.resolve(id);
+        bool yesWon = v4.getMarket(id).yesWon;
+        assertEq(v4.agentEscrow(id), 0, "escrow released");
+
+        uint256 owed = v4.lpPotAtResolution(id);
+        for (uint256 i; i < traders.length; i++) {
+            owed += yesWon ? v4.yesBalance(id, traders[i]) : v4.noBalance(id, traders[i]);
+        }
+        assertGe(ledger.balanceOf(address(v4)), owed, "market cannot cover its winners + LP");
+
+        for (uint256 i; i < traders.length; i++) {
+            uint256 win = yesWon ? v4.yesBalance(id, traders[i]) : v4.noBalance(id, traders[i]);
+            if (win == 0) continue;
+            vm.prank(traders[i]);
+            assertEq(v4.redeem(id), win);
+        }
+        vm.prank(creator);
+        v4.claimLP(id);
+        assertLe(ledger.balanceOf(address(v4)), DUST, "only dust left");
+        _solventLedger();
+    }
+}
