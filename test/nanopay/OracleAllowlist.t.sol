@@ -122,6 +122,28 @@ contract OracleAllowlistTest is Test {
         assertTrue(v4.getMarket(_createV4()).createdAt != 0);
     }
 
+    /// One address approved as BOTH agent and resolver must still not be able to
+    /// open a market on a feed where it adjudicates its own attestations.
+    function test_selfResolvedFeed_reverts_evenWhenApprovedOnBothLists() public {
+        vm.startPrank(agent);
+        bytes32 selfFeed = registry.createFeed("self", keccak256("s"), 10e6, DW, agent);
+        registry.registerAgent(selfFeed, keccak256("s"), 100e6);
+        vm.stopPrank();
+        perennial.setApprovedAgent(agent, true);
+        perennial.setApprovedResolver(agent, true);
+        v4.setApprovedAgent(agent, true);
+        v4.setApprovedResolver(agent, true);
+
+        assertFalse(perennial.isApprovedFeed(selfFeed, agent));
+        assertFalse(v4.isApprovedFeed(selfFeed, agent));
+        vm.prank(creator);
+        vm.expectRevert(MarketsPerennial.SelfResolvedFeed.selector);
+        perennial.createMarket(1, selfFeed, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        vm.prank(creator);
+        vm.expectRevert(MarketsV4.SelfResolvedFeed.selector);
+        v4.createMarket(selfFeed, agent, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+    }
+
     // ── isApprovedFeed ──
 
     function test_isApprovedFeed() public {

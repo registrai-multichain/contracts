@@ -119,6 +119,7 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     error BadSplit();
     error AgentNotApproved();
     error ResolverNotApproved();
+    error SelfResolvedFeed();
 
     constructor(
         NanoLedger ledger_,
@@ -195,7 +196,13 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     /// must not strand markets already open (they settle or void as before).
     function _requireApprovedOracle(bytes32 feedId, address agent) internal view {
         if (!approvedAgent[agent]) revert AgentNotApproved();
-        if (!approvedResolver[REGISTRY.getFeed(feedId).resolver]) revert ResolverNotApproved();
+        address resolver = REGISTRY.getFeed(feedId).resolver;
+        if (!approvedResolver[resolver]) revert ResolverNotApproved();
+        // Both lists are vetted separately, so one address approved on both would
+        // otherwise pass on a feed it attests AND adjudicates: the self-resolved
+        // oracle this allowlist exists to refuse. The pairing is checked here, not
+        // only in the deploy script, because approvals change after deploy.
+        if (resolver == agent) revert SelfResolvedFeed();
     }
 
     function _setFeeShares(bytes32 marketId, address creator) internal {
@@ -406,7 +413,7 @@ contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     /// active on the feed and a settleable dispute window.)
     function isApprovedFeed(bytes32 feedId, address agent) external view returns (bool) {
         Registry.Feed memory f = REGISTRY.getFeed(feedId);
-        return f.exists && approvedAgent[agent] && approvedResolver[f.resolver];
+        return f.exists && approvedAgent[agent] && approvedResolver[f.resolver] && f.resolver != agent;
     }
 
     /// @notice Where a market stands in settlement, and the settling value once
