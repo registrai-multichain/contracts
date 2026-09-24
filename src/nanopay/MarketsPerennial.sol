@@ -153,6 +153,7 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     error NoLPShares();
     error BadSplit();
     error ZeroAddress();
+    error ReserveDepleted();
     error BuilderInactive();
     error AgentNotApproved();
     error ResolverNotApproved();
@@ -255,6 +256,7 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
             noBalance[marketId][msg.sender] += sharesOut;
         }
         if (sharesOut == 0) revert AmountTooLow();
+        if (m.yesReserve == 0 || m.noReserve == 0) revert ReserveDepleted();
         if (sharesOut < minSharesOut) revert SlippageExceeded();
         emit Bought(marketId, msg.sender, outcome, collateralIn, sharesOut, fee);
     }
@@ -284,7 +286,10 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         uint256 sumAB = yesPostSell + noPostSell;
         uint256 prodAB = yesPostSell * noPostSell;
         uint256 disc = sumAB * sumAB - 4 * (prodAB - k);
-        uint256 grossOut = (sumAB - Math.sqrt(disc)) / 2;
+        // Round in the protocol's favour: the exact payout is (sumAB - sqrt(disc)) / 2;
+        // ceiling the root and flooring the halving can only pay less, so k never
+        // decreases on a sell (a floored root could pay 1 unit over the curve).
+        uint256 grossOut = (sumAB - Math.sqrt(disc, Math.Rounding.Ceil)) / 2;
 
         uint256 fee = (grossOut * FEE_BPS_TOTAL) / BPS;
         collateralOut = grossOut - fee;
@@ -292,6 +297,7 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
 
         m.yesReserve = yesPostSell - grossOut;
         m.noReserve = noPostSell - grossOut;
+        if (m.yesReserve == 0 || m.noReserve == 0) revert ReserveDepleted();
 
         _payFees(marketId, m, fee);
         if (collateralOut > 0) LEDGER.internalTransfer(msg.sender, collateralOut);
