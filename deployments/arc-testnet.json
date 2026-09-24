@@ -377,8 +377,9 @@
       "status_operator": "0xf26db19bc8DC33c9A72399128CF5cfB5dDC76263",
       "chainLabel": "Arc Testnet",
       "imageBase": "https://registrai.cc/badge/arc-testnet/",
-      "externalBase": "https://registrai.cc/perennial/?builder=",
-      "spec": "docs/superpowers/specs/2026-09-24-verified-builder-badge-design.md"
+      "externalBase": "https://builder.registrai.cc/builders/?builder=",
+      "spec": "docs/superpowers/specs/2026-09-24-verified-builder-badge-design.md",
+      "setBasesTx": "0xbef11d560c185845f250e7bb0c7f184c06852bc3d416a4151a20becc30cfd4e4"
     }
   }
 }

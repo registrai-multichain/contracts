@@ -23,7 +23,7 @@ import {VerifiedBuilderBadge} from "../src/perennial/VerifiedBuilderBadge.sol";
 ///      ADMIN, OPERATOR        always required; distinct; ADMIN a contract on mainnet
 ///      BADGE_CHAIN_LABEL      MAINNET ["Arc Testnet" / "Local"]
 ///      BADGE_IMAGE_BASE       MAINNET ["https://registrai.cc/badge/arc-testnet/"]
-///      BADGE_EXTERNAL_BASE    MAINNET ["https://registrai.cc/builders/?builder="]
+///      BADGE_EXTERNAL_BASE    MAINNET ["https://builder.registrai.cc/builders/?builder="]
 contract DeployBuilders is DeployBase {
     struct Config {
         address deployer;
@@ -53,7 +53,7 @@ contract DeployBuilders is DeployBase {
         c.operator = vm.envAddress("OPERATOR");
         c.chainLabel = _strReq("BADGE_CHAIN_LABEL", block.chainid == ARC_TESTNET ? "Arc Testnet" : "Local");
         c.imageBase = _strReq("BADGE_IMAGE_BASE", "https://registrai.cc/badge/arc-testnet/");
-        c.externalBase = _strReq("BADGE_EXTERNAL_BASE", "https://registrai.cc/builders/?builder=");
+        c.externalBase = _strReq("BADGE_EXTERNAL_BASE", "https://builder.registrai.cc/builders/?builder=");
     }
 
     function deploy(Config memory c)
