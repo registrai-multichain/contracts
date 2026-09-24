@@ -348,6 +348,46 @@ def rehearse(c, A):
     r = keeper_tick()
     check(r["actions"] == [], "keeper: idempotent afterwards", r)
 
+    print("== 5a. reputation: the real indexer, after honest settlements")
+    rep_contracts = {"MarketsPerennial": MP, "MarketsV4": S["MarketsV4"], "Attestation": S["Attestation"], "Dispute": S["Dispute"]}
+
+    def reputation(prior=None):
+        payload = {"rpc": c.rpc, "contracts": rep_contracts, "fromBlock": 0}
+        if prior is not None:
+            payload["prior"] = prior
+        r = run(["npx", "--yes", "tsx", "scripts/reputation.ts", json.dumps(payload)], cwd=FRONTEND, ok=False)
+        line = (r.stdout.strip().splitlines() or ["{}"])[-1]
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            raise SystemExit(f"reputation CLI printed no JSON:\n{r.stdout[-1500:]}\n{r.stderr[-1500:]}")
+
+    def agent_bond(feed_id, who):
+        out = c.call(S["Registry"], "getAgent(bytes32,address)((bytes32,uint256,uint256,uint256,uint256,bool,bool))", feed_id, who)
+        return int(out.strip("()").split(",")[1].split()[0])
+
+    def coverage_matches(label, market_id, record, level_mult_bps):
+        ui_cov = ui("coverage", marketId=market_id, record=record)
+        bond = agent_bond(feed, A["operator"])
+        col = coll(market_id)
+        recommended = 50 * U * level_mult_bps * col // (10_000 * 1_000 * U)
+        check(int(ui_cov["bond"]) == bond and int(ui_cov["openCollateral"]) == col and int(ui_cov["recommended"]) == recommended,
+              f"{label}: UI coverage = independent calc — bond {bond/U:.2f}, at risk {col/U:.2f}, "
+              f"recommended {recommended/U:.4f} ({level_mult_bps/10_000:.2f}x), {ui_cov['coveragePct']}% covered")
+        return ui_cov
+
+    # m5 stays open (30 days) so the operator has live exposure on its feed
+    m5 = ui("create", "alice", builderId=bid, feedId=feed, expiryIn=30 * 86400, liquidity=str(10 * U))
+    M5 = m5["marketId"]
+    check(ui("buy", "bob", marketId=M5, side="Yes", amount=str(8 * U))["quoteMatched"], "bob buys YES 8 on m5 (left open)")
+    rep1 = reputation()
+    op = A["operator"].lower()
+    expected = (20 + 5 + 15 + 6) * U + int(s1["collateralOut"]) + int(s1["fee"])
+    r1 = rep1["reputation"]["agents"].get(op) or {}
+    check(int(r1.get("score", -1)) == expected and r1.get("level") == 1 and r1.get("settledMarkets") == 2 and not r1.get("caught"),
+          f"operator reputation = exactly the trading volume of m1 + m3 ({expected/U:.4f} USDC), level 1, 2 settled; void m2 not counted")
+    coverage_matches("level 1", M5, r1, 10_000)
+
     print("== 5b. m4 (VOID by challenge): our agent answers wrong, a watcher proves it, and is paid")
     c.send("builder2", S["BuilderRegistry"], "registerBuilder(string)", "github.com/example/second")
     bid2 = c.uint(S["BuilderRegistry"], "builderIdOf(address)(uint256)", A["builder2"])
@@ -370,7 +410,8 @@ def rehearse(c, A):
     c.send("watcher", USDC, "approve(address,uint256)", S["Dispute"], stake)
     r = json.loads(c.send("watcher", S["Dispute"], "challenge(bytes32,bytes32)", att, "0x" + "cd" * 32).stdout)
     did = next(l["topics"][1] for l in r["logs"] if l["address"].lower() == S["Dispute"].lower())
-    c.send("resolver", S["Dispute"], "resolve(bytes32,uint8)", did, 2)          # AttestationInvalid
+    ruling = json.loads(c.send("resolver", S["Dispute"], "resolve(bytes32,uint8)", did, 2).stdout)   # AttestationInvalid
+    ruling_block = int(ruling["blockNumber"], 16)
     check(c.call(S["Dispute"], "invalidatedBy(bytes32)(address)", att).lower() == A["watcher"].lower()
           and c.call(S["Registry"], "isActiveAgent(bytes32,address)(bool)", feed2, A["operator"]) == "false",
           "independent resolver rules the answer Invalid: agent slashed and retired on that feed")
@@ -386,6 +427,15 @@ def rehearse(c, A):
         nc = c.uint(MP, "netCost(bytes32,address)(uint256)", M4, A[who])
         check(nc == paid * U - split(paid * U)[0] and c.uint(MP, "redeemable(bytes32,address)(uint256)", M4, A[who]) == nc,
               f"{who}'s refund = net cost after the 1% trading fee: {paid} -> {nc/U:.2f}")
+
+    print("== 5c. reputation after the proven wrong answer")
+    rep2 = reputation(prior=rep1["cursor"])
+    fresh = reputation()
+    check(rep2["reputation"] == fresh["reputation"], "resumed indexer (from the first run's cursor) == a from-scratch run")
+    r2 = rep2["reputation"]["agents"].get(op) or {}
+    check(r2.get("caught") is True and int(r2.get("score", -1)) == 0 and r2.get("level") == 0 and int(r2.get("caughtAt") or -1) == ruling_block,
+          f"operator caught at the ruling's block {ruling_block}: score wiped to 0, level 0 (2x bond)")
+    coverage_matches("level 0 (caught)", M5, r2, 20_000)
 
     print("== 6. everyone collects exactly the UI's preview")
     for m in (M1, M2, M3, M4):
@@ -404,8 +454,8 @@ def rehearse(c, A):
     for m, who in ((M1, "alice"), (M3, "bob"), (M2, "alice"), (M4, "alice")):
         res = ui("claimLP", who, marketId=m)
         check(int(res["payout"]) > 0, f"creator {who} claims LP on {m[:8]}: {int(res['payout'])/U:.4f} USDC")
-    dust = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", S["MarketsPerennial"])
-    check(dust <= 10, f"MarketsPerennial holds only dust after every exit ({dust} units)")
+    dust = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", S["MarketsPerennial"]) - coll(M5) - escrow(M5)
+    check(0 <= dust <= 10, f"MarketsPerennial holds only the open m5 plus dust after every exit ({dust} units)")
 
     print("== 7. the fees reach the builder: arbiter -> epoch -> stream -> withdraw")
     pot_before = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", S["ProgressPool"])
