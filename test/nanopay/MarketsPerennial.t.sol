@@ -28,6 +28,8 @@ contract MarketsPerennialTest is Test {
     bytes32 feedId;
     uint256 constant DW = 1 hours;
 
+    event FeesPaid(bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 agentFee);
+
     function setUp() public {
         usdc = new MockUSDC();
         registry = new Registry(usdc, 10e6);
@@ -113,59 +115,63 @@ contract MarketsPerennialTest is Test {
         markets.resolve(id);
     }
 
-    /// No trading fee: the whole deposit buys; the fee is 1% of C at resolve,
-    /// split creator 30 / agent 20 / commons 50.
-    function test_buy_noTradeFee_resolveFeeSplit_30_20_50() public {
+    /// 1% of every buy: creator 30% and commons 50% paid now, the agent's 20%
+    /// escrowed until the market settles.
+    function test_buy_tradeFeeSplit_30_20_50_agentEscrowed() public {
         bytes32 id = _market();
         uint256 creatorBefore = ledger.balanceOf(creator);
         uint256 oracleBefore = ledger.balanceOf(oracle);
-        uint256 commonsBefore = ledger.balanceOf(commons);
 
+        vm.expectEmit(true, false, false, true, address(markets));
+        emit FeesPaid(id, 3e6, 5e6, 2e6);
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0);
-        assertEq(ledger.balanceOf(creator), creatorBefore, "no creator fee at trade time");
-        assertEq(ledger.balanceOf(commons), commonsBefore, "no commons fee at trade time");
-        assertEq(ledger.balanceOf(oracle), oracleBefore, "no agent fee at trade time");
-        assertEq(ledger.balanceOf(address(markets)), 1_010e6, "the market holds every unit");
-        assertEq(markets.collateralOf(id), 1_010e6);
+        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // fee 10
+
+        assertEq(ledger.balanceOf(creator) - creatorBefore, 3e6, "creator 30% now");
+        assertEq(ledger.balanceOf(commons), 5e6, "commons 50% now");
+        assertEq(ledger.balanceOf(oracle), oracleBefore, "agent not paid at trade time");
+        assertEq(markets.agentEscrow(id), 2e6, "agent 20% escrowed");
+        assertEq(markets.collateralOf(id), 1_000e6, "C = seed + collateralIn - fee");
+        assertEq(markets.netCost(id, taker), 990e6, "net cost is after the fee");
+        assertEq(ledger.balanceOf(address(markets)), 1_002e6, "C + escrow");
         _solvent();
 
         _settleYes(id);
-        // C = 1010: fee 10.1 -> creator 3.03, agent 2.02, commons 5.05
-        assertEq(ledger.balanceOf(creator) - creatorBefore, 303e4, "creator 30%");
-        assertEq(ledger.balanceOf(oracle) - oracleBefore, 202e4, "agent 20%");
-        assertEq(ledger.balanceOf(commons) - commonsBefore, 505e4, "commons 50%");
-        assertEq(markets.settledGross(id), 1_010e6);
-        assertEq(markets.settledNet(id), 9999e5);
+        assertEq(ledger.balanceOf(oracle) - oracleBefore, 2e6, "escrow released on settlement");
+        assertEq(markets.agentEscrow(id), 0);
+        assertEq(ledger.balanceOf(commons), 5e6, "nothing charged at settlement");
         _solvent();
     }
 
     function test_commons_neverFundsTheBuilderItIsAbout() public {
-        // the market is about builderId 1; its fee goes to commons, not to a
+        // the market is about builderId 1; its fees go to commons, not to a
         // per-builder account. The commons address accrues; nothing builder-tagged does.
         bytes32 id = _market();
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.No, 1_990e6, 0); // C = 2000, fee 20, commons 10
-        assertEq(ledger.balanceOf(commons), 0, "nothing before settlement");
-        _settleYes(id);
+        markets.buy(id, MarketsPerennial.Outcome.No, 2_000e6, 0); // fee 20, commons 10
         assertEq(ledger.balanceOf(commons), 10e6);
         assertEq(ledger.balanceOf(builder), 0);
         _solvent();
     }
 
-    function test_sell_paysExactProceeds_noFee() public {
+    function test_sell_paysFeesAndProceeds() public {
         bytes32 id = _market();
         vm.prank(taker);
         uint256 shares = markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0);
+        uint256 commonsBefore = ledger.balanceOf(commons);
         uint256 takerBefore = ledger.balanceOf(taker);
         uint256 cBefore = markets.collateralOf(id);
         vm.prank(taker);
         uint256 out = markets.sell(id, MarketsPerennial.Outcome.Yes, shares, 0);
-        assertGt(out, 0);
-        assertEq(ledger.balanceOf(taker) - takerBefore, out, "seller gets the whole curve amount");
-        assertEq(markets.collateralOf(id), cBefore - out, "C falls by exactly what was paid");
-        assertEq(ledger.balanceOf(commons), 0, "no sell fee");
-        assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id));
+        uint256 gross = cBefore - markets.collateralOf(id);
+        uint256 fee = gross / 100;
+        assertEq(out, gross - fee, "seller receives gross minus 1%");
+        assertEq(ledger.balanceOf(taker) - takerBefore, out);
+        uint256 cFee = (fee * 3000) / 10_000;
+        uint256 aFee = (fee * 2000) / 10_000;
+        assertEq(ledger.balanceOf(commons) - commonsBefore, fee - cFee - aFee, "commons grew from the sell fee");
+        assertEq(markets.agentEscrow(id), 2e6 + aFee);
+        assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id) + markets.agentEscrow(id));
         _solvent();
     }
 
@@ -175,24 +181,24 @@ contract MarketsPerennialTest is Test {
         uint256 shares = markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0);
         _settleYes(id);
         assertTrue(markets.getMarket(id).yesWon);
-        uint256 expected = (shares * markets.settledNet(id)) / markets.settledGross(id);
-        assertEq(markets.redeemable(id, taker), expected);
+        assertEq(markets.redeemable(id, taker), shares);
         uint256 before = ledger.balanceOf(taker);
         vm.prank(taker);
         uint256 payout = markets.redeem(id);
-        assertEq(payout, expected, "winning share redeems at net / gross");
+        assertEq(payout, shares, "winning shares redeem 1:1");
         assertEq(ledger.balanceOf(taker) - before, payout);
         assertEq(markets.redeemable(id, taker), 0);
         uint256 lpView = markets.claimableLP(id, creator);
+        assertEq(lpView, markets.getMarket(id).yesReserve, "LP pot = winning reserve");
         vm.prank(creator);
         assertEq(markets.claimLP(id), lpView);
-        assertLe(ledger.balanceOf(address(markets)), 2, "only rounding dust");
+        assertEq(ledger.balanceOf(address(markets)), 0, "every unit paid out");
         _solvent();
     }
 
     /// "Visible, fixed": the fee is a constant, with no governance knob.
     function test_feeIsFixedInCode() public view {
-        assertEq(markets.RESOLUTION_FEE_BPS(), 100);
+        assertEq(markets.TRADE_FEE_BPS(), 100);
         assertEq(markets.CREATOR_SHARE_BPS(), 3000);
         assertEq(markets.AGENT_SHARE_BPS(), 2000);
         assertEq(markets.COMMONS_SHARE_BPS(), 5000);

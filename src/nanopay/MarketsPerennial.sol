@@ -16,25 +16,29 @@ import {SettlementPolicy} from "./SettlementPolicy.sol";
 ///         NanoLedger), specialized for the Perennial funding model. Each market
 ///         is tagged to a `builderId` it is about.
 ///
-///         Fees: NO per-trade fee. One resolution fee of RESOLUTION_FEE_BPS (1%)
-///         of the market's collateral pot C, charged once at settlement and paid
-///         immediately as ledger internalTransfers:
-///           - 30% to whoever opened the market (CREATOR_SHARE_BPS);
-///           - 20% to the bonded agent that settled it (AGENT_SHARE_BPS);
-///           - 50% to the `commons` (the ProgressPool), never to the builder the
-///             market is about, so attention fills the commons but never
-///             captures it (COMMONS_SHARE_BPS, takes the rounding remainder).
-///         Winners redeem shares * (C - fee) / C; the LP gets its reserve on the
-///         same terms.
+///         Fees: a TRADE_FEE_BPS (1%) trading fee on every buy (of collateralIn)
+///         and every sell (of the gross curve amount; the seller receives the
+///         rest), split per trade:
+///           - 30% to whoever opened the market (CREATOR_SHARE_BPS), paid now;
+///           - 20% to the bonded agent (AGENT_SHARE_BPS), HELD in `agentEscrow`
+///             until the market settles;
+///           - 50% to the `commons` (the ProgressPool), paid now, never to the
+///             builder the market is about, so attention fills the commons but
+///             never captures it (COMMONS_SHARE_BPS, takes the rounding remainder).
+///         Nothing is charged at settlement. resolve releases the escrow to the
+///         agent; winners redeem 1 per winning share; the LP gets the winning
+///         reserve.
 ///
 ///         Void: a market that cannot be settled voids (SettlementPolicy). The
-///         same 1% is charged; its 20% agent leg goes to the challenger who got
-///         the agent's reading ruled Invalid, else to the commons. Every trader
-///         is refunded its net cost minus 1% (pro rata only if earlier sellers
-///         took profits larger than the LP seed); the LP gets the rest.
+///         escrow goes to the challenger who got the agent's reading ruled
+///         Invalid, else to the commons. Every trader is refunded its net cost
+///         (what it put in after fees, minus what it took out; pro rata only if
+///         earlier sellers took profits larger than the LP seed); the LP gets
+///         the rest.
 ///
 ///         Accounting invariant while trading: YES supply == NO supply ==
-///         collateralOf == this market's share of the contract's ledger balance.
+///         collateralOf; the contract's ledger balance for the market is
+///         collateralOf + agentEscrow.
 ///         Real USDC only crosses at NanoLedger.deposit/withdraw.
 contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     enum Outcome {
@@ -76,10 +80,10 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     BuilderRegistry public immutable BUILDERS;
 
     uint256 public constant MIN_LIQUIDITY = 5e6;
-    /// @notice The resolution fee: 1% of the market's collateral pot, once.
-    uint256 public constant RESOLUTION_FEE_BPS = 100;
-    /// @notice Shares of the resolution fee (of BPS). The agent's 20% becomes the
-    /// challenger reward on void; the commons takes the rounding remainder.
+    /// @notice The trading fee: 1% of every buy and every sell.
+    uint256 public constant TRADE_FEE_BPS = 100;
+    /// @notice Shares of each trading fee (of BPS). The agent's 20% is escrowed
+    /// until settlement (the challenger reward on void); the commons takes the rounding remainder.
     uint256 public constant CREATOR_SHARE_BPS = 3000;
     uint256 public constant AGENT_SHARE_BPS = 2000;
     uint256 public constant COMMONS_SHARE_BPS = 5000;
@@ -98,16 +102,16 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
 
     /// @notice C: all collateral backing a market (== YES supply == NO supply).
     mapping(bytes32 => uint256) public collateralOf;
-    /// @notice What a trader has put in and not yet taken out (never below 0;
-    /// the LP seed is not a trader cost).
+    /// @notice What a trader has put in after fees and not yet taken out (never
+    /// below 0; the LP seed is not a trader cost).
     mapping(bytes32 => mapping(address => uint256)) public netCost;
     /// @notice Sum of every trader's netCost.
     mapping(bytes32 => uint256) public totalNetCost;
-    /// @notice At resolve: C, and C minus the resolution fee. Winners redeem
-    /// shares * settledNet / settledGross.
-    mapping(bytes32 => uint256) public settledGross;
-    mapping(bytes32 => uint256) public settledNet;
-    /// @notice At void: what traders share (net cost minus 1%, capped by what the
+    /// @notice The agent's 20% of every trading fee, held until the market
+    /// settles: released to the agent on resolve, to a successful challenger
+    /// (else the commons) on void.
+    mapping(bytes32 => uint256) public agentEscrow;
+    /// @notice At void: what traders share (their net cost, capped by what the
     /// market holds), and the totalNetCost it is shared over.
     mapping(bytes32 => uint256) public voidTraderPool;
     mapping(bytes32 => uint256) public voidNetCostTotal;
@@ -150,6 +154,7 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     event Redeemed(bytes32 indexed marketId, address indexed holder, uint256 payout);
     event LPClaimed(bytes32 indexed marketId, address indexed lp, uint256 payout);
     event MarketVoided(bytes32 indexed marketId);
+    event AgentFeeReleased(bytes32 indexed marketId, address indexed agent, uint256 amount);
     event VoidFeesPaid(
         bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 challengerReward, address challenger
     );
@@ -256,13 +261,16 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         if (collateralIn == 0) revert LiquidityTooLow();
 
         LEDGER.transferFromInternal(msg.sender, address(this), collateralIn);
-        collateralOf[marketId] += collateralIn;
-        netCost[marketId][msg.sender] += collateralIn;
-        totalNetCost[marketId] += collateralIn;
+        uint256 fee = (collateralIn * TRADE_FEE_BPS) / BPS;
+        uint256 effectiveIn = collateralIn - fee;
+        _chargeFee(marketId, m, fee);
+        collateralOf[marketId] += effectiveIn;
+        netCost[marketId][msg.sender] += effectiveIn;
+        totalNetCost[marketId] += effectiveIn;
 
-        // no trading fee: the whole deposit mints a full YES + NO set
-        uint256 yesAfterMint = m.yesReserve + collateralIn;
-        uint256 noAfterMint = m.noReserve + collateralIn;
+        // what is left after the fee mints a full YES + NO set
+        uint256 yesAfterMint = m.yesReserve + effectiveIn;
+        uint256 noAfterMint = m.noReserve + effectiveIn;
         uint256 k = m.yesReserve * m.noReserve;
         if (outcome == Outcome.Yes) {
             sharesOut = yesAfterMint - Math.ceilDiv(k, noAfterMint);
@@ -278,7 +286,7 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         if (sharesOut == 0) revert AmountTooLow();
         if (m.yesReserve == 0 || m.noReserve == 0) revert ReserveDepleted();
         if (sharesOut < minSharesOut) revert SlippageExceeded();
-        emit Bought(marketId, msg.sender, outcome, collateralIn, sharesOut, 0);
+        emit Bought(marketId, msg.sender, outcome, collateralIn, sharesOut, fee);
     }
 
     function sell(bytes32 marketId, Outcome outcome, uint256 sharesIn, uint256 minCollateralOut)
@@ -309,21 +317,25 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         // Round in the protocol's favour: the exact payout is (sumAB - sqrt(disc)) / 2;
         // ceiling the root and flooring the halving can only pay less, so k never
         // decreases on a sell (a floored root could pay 1 unit over the curve).
-        collateralOut = (sumAB - Math.sqrt(disc, Math.Rounding.Ceil)) / 2;
+        uint256 grossOut = (sumAB - Math.sqrt(disc, Math.Rounding.Ceil)) / 2;
+
+        uint256 fee = (grossOut * TRADE_FEE_BPS) / BPS;
+        collateralOut = grossOut - fee;
         if (collateralOut < minCollateralOut) revert SlippageExceeded();
 
-        m.yesReserve = yesPostSell - collateralOut;
-        m.noReserve = noPostSell - collateralOut;
+        m.yesReserve = yesPostSell - grossOut;
+        m.noReserve = noPostSell - grossOut;
         if (m.yesReserve == 0 || m.noReserve == 0) revert ReserveDepleted();
 
-        _recordSell(marketId, collateralOut);
+        _recordSell(marketId, grossOut);
+        _chargeFee(marketId, m, fee);
         if (collateralOut > 0) LEDGER.internalTransfer(msg.sender, collateralOut);
-        emit Sold(marketId, msg.sender, outcome, sharesIn, collateralOut, 0);
+        emit Sold(marketId, msg.sender, outcome, sharesIn, collateralOut, fee);
     }
 
-    /// @dev A sell burns `out` of each side, so C falls by `out`. The seller's net
-    /// cost falls by at most what it still has in: a profit beyond it is not a
-    /// negative cost.
+    /// @dev A sell burns `out` (the gross curve amount) of each side, so C falls by
+    /// `out`. The seller's net cost falls by at most what it still has in: a
+    /// profit beyond it is not a negative cost.
     function _recordSell(bytes32 marketId, uint256 out) internal {
         collateralOf[marketId] -= out;
         uint256 nc = netCost[marketId][msg.sender];
@@ -334,17 +346,17 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         }
     }
 
-    /// @dev The resolution fee on C: 30% creator, 20% agent leg, commons the
-    /// remainder (so rounding never strands a unit).
-    function _feeLegs(uint256 c)
-        internal
-        pure
-        returns (uint256 fee, uint256 creatorFee, uint256 agentFee, uint256 commonsFee)
-    {
-        fee = (c * RESOLUTION_FEE_BPS) / BPS;
-        creatorFee = (fee * CREATOR_SHARE_BPS) / BPS;
-        agentFee = (fee * AGENT_SHARE_BPS) / BPS;
-        commonsFee = fee - creatorFee - agentFee;
+    /// @dev Split one trading fee: creator 30% and commons (the rounding
+    /// remainder, so no unit is stranded) paid now; the agent's 20% escrowed for
+    /// the market until it settles. Emits FeesPaid on every trade.
+    function _chargeFee(bytes32 marketId, Market storage m, uint256 fee) internal {
+        uint256 creatorFee = (fee * CREATOR_SHARE_BPS) / BPS;
+        uint256 agentFee = (fee * AGENT_SHARE_BPS) / BPS;
+        uint256 commonsFee = fee - creatorFee - agentFee;
+        if (agentFee > 0) agentEscrow[marketId] += agentFee; // stays in this contract's ledger balance
+        _pay(m.creator, creatorFee);
+        _pay(commons, commonsFee);
+        emit FeesPaid(marketId, creatorFee, commonsFee, agentFee);
     }
 
     function _pay(address to, uint256 amount) internal {
@@ -366,27 +378,25 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         m.yesWon = yesWon;
         m.phase = Phase.Resolved;
 
-        uint256 c = collateralOf[marketId];
-        (uint256 fee, uint256 creatorFee, uint256 agentFee, uint256 commonsFee) = _feeLegs(c);
-        uint256 net = c - fee;
-        settledGross[marketId] = c;
-        settledNet[marketId] = net;
-        lpPotAtResolution[marketId] = ((yesWon ? m.yesReserve : m.noReserve) * net) / c;
+        lpPotAtResolution[marketId] = yesWon ? m.yesReserve : m.noReserve;
         emit Resolved(marketId, yesWon, value);
 
-        _pay(m.creator, creatorFee);
-        _pay(m.agent, agentFee);
-        _pay(commons, commonsFee);
-        emit FeesPaid(marketId, creatorFee, commonsFee, agentFee);
+        uint256 escrow = agentEscrow[marketId];
+        if (escrow > 0) {
+            agentEscrow[marketId] = 0;
+            LEDGER.internalTransfer(m.agent, escrow);
+        }
+        emit AgentFeeReleased(marketId, m.agent, escrow);
     }
 
     /// @notice Close a market that can no longer be settled. Anyone may call it.
-    /// @dev The 1% fee is still charged: creator 30%, commons 50%, and the agent's
-    /// 20% goes to the challenger that got the agent's reading ruled Invalid in
-    /// the settlement window (else to the commons). Traders then share
-    /// traderPool = min(totalNetCost * 99%, C - fee), each pro rata to its net
-    /// cost; the LP gets what is left. Solvent by construction: the payouts sum
-    /// to at most C - fee, which is what the market holds after the fee.
+    /// @dev Nothing is charged. The agent's escrow goes to the challenger that got
+    /// the agent's reading ruled Invalid in the settlement window (else to the
+    /// commons). Traders share traderPool = min(totalNetCost, C), each pro
+    /// rata to its net cost (so each gets its net cost back unless earlier
+    /// sellers took more profit than the LP seed); the LP gets C - traderPool.
+    /// Solvent by construction: the payouts sum to at most C, which the market
+    /// holds besides the escrow.
     function voidMarket(bytes32 marketId) external nonReentrant {
         Market storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
@@ -396,22 +406,23 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
 
         m.phase = Phase.Voided;
         uint256 c = collateralOf[marketId];
-        (uint256 fee, uint256 creatorFee, uint256 agentFee, uint256 commonsFee) = _feeLegs(c);
-        uint256 avail = c - fee;
         uint256 tnc = totalNetCost[marketId];
-        uint256 traderPool = (tnc * (BPS - RESOLUTION_FEE_BPS)) / BPS;
-        if (traderPool > avail) traderPool = avail;
+        uint256 traderPool = tnc < c ? tnc : c;
         voidTraderPool[marketId] = traderPool;
         voidNetCostTotal[marketId] = tnc;
-        lpPotAtResolution[marketId] = avail - traderPool;
+        lpPotAtResolution[marketId] = c - traderPool;
         emit MarketVoided(marketId);
 
+        uint256 escrow = agentEscrow[marketId];
+        agentEscrow[marketId] = 0;
         address challenger = _challengerOf(ATTESTATION, m.feedId, m.agent, m.expiry);
-        if (challenger == address(0)) commonsFee += agentFee;
-        _pay(m.creator, creatorFee);
-        _pay(commons, commonsFee);
-        if (challenger != address(0)) _pay(challenger, agentFee);
-        emit VoidFeesPaid(marketId, creatorFee, commonsFee, challenger == address(0) ? 0 : agentFee, challenger);
+        if (challenger != address(0)) {
+            _pay(challenger, escrow);
+            emit VoidFeesPaid(marketId, 0, 0, escrow, challenger);
+        } else {
+            _pay(commons, escrow);
+            emit VoidFeesPaid(marketId, 0, escrow, 0, address(0));
+        }
     }
 
     function _evaluate(int256 value, int256 threshold, Comparator c) internal pure returns (bool) {
@@ -446,12 +457,11 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         emit LPClaimed(marketId, msg.sender, payout);
     }
 
-    /// @dev Resolved: winning shares * settledNet / settledGross. Voided: net cost
+    /// @dev Resolved: 1 per winning share. Voided: net cost
     /// * voidTraderPool / voidNetCostTotal. Trading: 0.
     function _redeemable(bytes32 marketId, Market storage m, address who) internal view returns (uint256) {
         if (m.phase == Phase.Resolved) {
-            uint256 shares = m.yesWon ? yesBalance[marketId][who] : noBalance[marketId][who];
-            return (shares * settledNet[marketId]) / settledGross[marketId];
+            return m.yesWon ? yesBalance[marketId][who] : noBalance[marketId][who];
         }
         if (m.phase == Phase.Voided) {
             uint256 total = voidNetCostTotal[marketId];

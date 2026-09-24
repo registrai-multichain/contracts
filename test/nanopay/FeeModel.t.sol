@@ -15,14 +15,15 @@ import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
-/// @notice Fee & settlement model v2 (owner decision 2026-09-24), on both market
+/// @notice Fee & settlement model v3 (owner decision 2026-09-24), on both market
 /// kinds:
-///   - no trading fee; one 1% resolution fee on the collateral pot C, split
-///     creator 30 / agent 20 / commons (Perennial) or treasury (V4) 50;
-///   - winners redeem shares * (C - fee) / C, the LP its reserve on the same terms;
-///   - void: traders get net cost minus 1% (pro rata only when early sellers took
-///     more profit than the LP seed), the agent's 20% goes to a successful
-///     challenger, else to the commons / treasury;
+///   - 1% trading fee on every buy (of collateralIn) and sell (of the gross curve
+///     amount), split creator 30 / commons (Perennial) or treasury (V4) 50 paid
+///     per trade, agent 20 escrowed per market; nothing charged at settlement;
+///   - resolve: escrow to the agent, winners 1 per share, LP the winning reserve;
+///   - void: traders get their net cost (after fees) back (pro rata only when
+///     early sellers took more profit than the LP seed), the escrow goes to a
+///     successful challenger, else to the commons / treasury;
 ///   - V4 agents are permissionless;
 ///   - ProgressPool takes 1% of each builder payout for the protocol treasury.
 contract FeeModelTest is Test {
@@ -76,6 +77,7 @@ contract FeeModelTest is Test {
         bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 challengerReward, address challenger
     );
     event ProtocolFeePaid(uint256 indexed epoch, address indexed builder, uint256 fee);
+    event AgentFeeReleased(bytes32 indexed marketId, address indexed agent, uint256 amount);
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -145,53 +147,64 @@ contract FeeModelTest is Test {
         vm.warp(vm.getBlockTimestamp() + DW);
     }
 
-    // ───────────────────────── no trading fee ─────────────────────────
+    // ───────────────────────── 1% trading fee ─────────────────────────
 
-    function test_perennial_buySell_exact_eventsCarryZeroFee() public {
+    function test_perennial_buySell_exactFeeLegs_perTrade() public {
         bytes32 id = _p(100e6);
         uint256 a0 = ledger.balanceOf(alice);
+        uint256 cr0 = ledger.balanceOf(creator);
+
+        vm.expectEmit(true, false, false, true, address(perennial));
+        emit FeesPaid(id, 15e4, 25e4, 1e5); // fee 0.5: 30 / 50 / 20
         vm.recordLogs();
         vm.prank(alice);
         uint256 shares = perennial.buy(id, MarketsPerennial.Outcome.Yes, 50e6, 0);
-        assertEq(_lastFee(), 0, "Bought.fee == 0");
-        // no fee: all 50 mints a full set (150 / 150); alice gets 150 - ceil(100 * 100 / 150)
-        assertEq(shares, 150e6 - (uint256(100e6) * 100e6 + 150e6 - 1) / 150e6);
+        assertEq(_lastFee(), 5e5, "Bought.fee == 1% of collateralIn");
+        // 49.5 after the fee mints a full set: alice gets 149.5 - ceil(100 * 100 / 149.5)
+        assertEq(shares, 1495e5 - (uint256(100e6) * 100e6 + 1495e5 - 1) / 1495e5);
         assertEq(a0 - ledger.balanceOf(alice), 50e6, "exactly collateralIn debited");
-        assertEq(perennial.collateralOf(id), 150e6);
-        assertEq(perennial.netCost(id, alice), 50e6);
-        assertEq(perennial.totalNetCost(id), 50e6);
+        assertEq(ledger.balanceOf(creator) - cr0, 15e4, "creator 30% now");
+        assertEq(ledger.balanceOf(address(pool)), 25e4, "commons 50% now");
+        assertEq(perennial.agentEscrow(id), 1e5, "agent 20% held");
+        assertEq(perennial.collateralOf(id), 1495e5);
+        assertEq(perennial.netCost(id, alice), 495e5, "net cost is after the fee");
+        assertEq(perennial.totalNetCost(id), 495e5);
 
         vm.recordLogs();
         vm.prank(alice);
         uint256 out = perennial.sell(id, MarketsPerennial.Outcome.Yes, shares, 0);
-        assertEq(_lastFee(), 0, "Sold.fee == 0");
+        uint256 gross = 1495e5 - perennial.collateralOf(id);
+        uint256 fee = gross / 100;
+        assertEq(_lastFee(), fee, "Sold.fee == 1% of the gross curve amount");
+        assertEq(out, gross - fee, "seller receives gross minus the fee");
+        assertApproxEqAbs(gross, 495e5, 2, "the curve gives back what the buy put in");
         assertEq(ledger.balanceOf(alice), a0 - 50e6 + out, "exactly collateralOut credited");
-        // a round trip returns (to rounding) what was paid: no fee was taken
-        assertApproxEqAbs(out, 50e6, 2);
-        assertEq(perennial.collateralOf(id), 150e6 - out);
-        assertEq(perennial.netCost(id, alice), 50e6 - out);
-        assertEq(ledger.balanceOf(address(perennial)), perennial.collateralOf(id));
-        assertEq(ledger.balanceOf(creator), 5_000_000e6 - 100e6, "creator paid nothing while trading");
-        assertEq(ledger.balanceOf(address(pool)), 0);
-        assertEq(ledger.balanceOf(agent), 0);
+        assertEq(perennial.netCost(id, alice), 495e5 - gross);
+        assertEq(perennial.agentEscrow(id), 1e5 + (fee * 2000) / 10_000);
+        assertEq(ledger.balanceOf(address(perennial)), perennial.collateralOf(id) + perennial.agentEscrow(id));
+        assertEq(ledger.balanceOf(agent), 0, "the agent is paid nothing while trading");
     }
 
-    function test_v4_buySell_exact_eventsCarryZeroFee() public {
+    function test_v4_buySell_exactFeeLegs_perTrade() public {
         bytes32 id = _v(100e6);
         uint256 a0 = ledger.balanceOf(alice);
+        vm.expectEmit(true, false, false, true, address(v4));
+        emit FeesPaid(id, 15e4, 25e4, 1e5);
         vm.recordLogs();
         vm.prank(alice);
         uint256 shares = v4.buy(id, MarketsV4.Outcome.No, 50e6, 0);
-        assertEq(_lastFee(), 0, "Bought.fee == 0");
-        assertEq(shares, 150e6 - (uint256(100e6) * 100e6 + 150e6 - 1) / 150e6);
+        assertEq(_lastFee(), 5e5);
+        assertEq(shares, 1495e5 - (uint256(100e6) * 100e6 + 1495e5 - 1) / 1495e5);
+        assertEq(ledger.balanceOf(treasury), 25e4, "treasury 50% now");
+        assertEq(v4.agentEscrow(id), 1e5);
         vm.recordLogs();
         vm.prank(alice);
         uint256 out = v4.sell(id, MarketsV4.Outcome.No, shares, 0);
-        assertEq(_lastFee(), 0, "Sold.fee == 0");
+        uint256 gross = 1495e5 - v4.collateralOf(id);
+        assertEq(_lastFee(), gross / 100);
+        assertEq(out, gross - gross / 100);
         assertEq(ledger.balanceOf(alice), a0 - 50e6 + out);
-        assertApproxEqAbs(out, 50e6, 2);
-        assertEq(ledger.balanceOf(address(v4)), v4.collateralOf(id));
-        assertEq(ledger.balanceOf(treasury), 0);
+        assertEq(ledger.balanceOf(address(v4)), v4.collateralOf(id) + v4.agentEscrow(id));
     }
 
     /// The last Bought/Sold log's `fee` (the last word of its data).
@@ -207,135 +220,140 @@ contract FeeModelTest is Test {
         revert("no trade log");
     }
 
-    // ───────────────────────── resolve: 1% of C, 30/20/50 ─────────────────────────
+    /// The legs of every trade's fee sum to exactly the fee: nothing stranded.
+    function testFuzz_feeLegsSumToFee(uint256 buyIn, uint256 sellFrac) public {
+        buyIn = bound(buyIn, 1, 1_000_000e6);
+        bytes32 id = _p(5e6);
+        uint256 cr0 = ledger.balanceOf(creator);
+        vm.prank(alice);
+        uint256 shares = perennial.buy(id, MarketsPerennial.Outcome.Yes, buyIn, 0);
+        uint256 fee = buyIn / 100;
+        uint256 legs = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(address(pool)) + perennial.agentEscrow(id);
+        assertEq(legs, fee, "buy legs == fee");
+        assertEq(perennial.collateralOf(id), 5e6 + buyIn - fee);
 
-    function test_perennial_resolveFee_exactSplit_winnersPaidNetOverGross_lpPot() public {
+        uint256 sellShares = bound(sellFrac, 1, shares);
+        uint256 c0 = perennial.collateralOf(id);
+        vm.prank(alice);
+        try perennial.sell(id, MarketsPerennial.Outcome.Yes, sellShares, 0) returns (uint256 out) {
+            uint256 gross = c0 - perennial.collateralOf(id);
+            uint256 legs2 = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(address(pool))
+                + perennial.agentEscrow(id);
+            assertEq(legs2 - legs, gross / 100, "sell legs == fee");
+            assertEq(out, gross - gross / 100);
+        } catch {}
+        assertEq(ledger.balanceOf(address(perennial)), perennial.collateralOf(id) + perennial.agentEscrow(id));
+    }
+
+    // ───────────────────────── resolve: nothing charged ─────────────────────────
+
+    function test_perennial_resolve_releasesEscrow_winnersOneToOne_lpGetsReserve() public {
         bytes32 id = _p(100e6);
         vm.prank(alice);
-        uint256 aYes = perennial.buy(id, MarketsPerennial.Outcome.Yes, 600e6, 0);
+        uint256 aYes = perennial.buy(id, MarketsPerennial.Outcome.Yes, 600e6, 0); // fee 6
         vm.prank(bob);
-        uint256 bNo = perennial.buy(id, MarketsPerennial.Outcome.No, 300e6, 0);
-        assertEq(perennial.collateralOf(id), 1_000e6);
+        perennial.buy(id, MarketsPerennial.Outcome.No, 300e6, 0); // fee 3
+        assertEq(perennial.collateralOf(id), 991e6, "100 + 594 + 297");
+        assertEq(perennial.agentEscrow(id), 18e5, "20% of 9");
+        assertEq(ledger.balanceOf(address(pool)), 45e5, "50% of 9, paid per trade");
         MarketsPerennial.Market memory m = perennial.getMarket(id);
 
         uint256 c0 = ledger.balanceOf(creator);
         _attestAndFinalize(m.expiry, 1); // YES
-        vm.expectEmit(true, false, false, true, address(perennial));
-        emit FeesPaid(id, 3e6, 5e6, 2e6);
+        vm.expectEmit(true, true, false, true, address(perennial));
+        emit AgentFeeReleased(id, agent, 18e5);
         perennial.resolve(id);
+        assertEq(ledger.balanceOf(agent), 18e5, "the escrow goes to the agent");
+        assertEq(ledger.balanceOf(creator), c0, "nothing charged at settlement");
+        assertEq(ledger.balanceOf(address(pool)), 45e5, "nothing charged at settlement");
+        assertEq(ledger.balanceOf(address(perennial)), 991e6);
 
-        // C = 1000: fee 10 -> creator 3, agent 2, commons 5
-        assertEq(ledger.balanceOf(creator) - c0, 3e6, "creator 30%");
-        assertEq(ledger.balanceOf(agent), 2e6, "agent 20%");
-        assertEq(ledger.balanceOf(address(pool)), 5e6, "commons 50%");
-        assertEq(perennial.settledGross(id), 1_000e6);
-        assertEq(perennial.settledNet(id), 990e6);
-        assertEq(ledger.balanceOf(address(perennial)), 990e6);
-
-        uint256 aPay = (aYes * 990e6) / 1_000e6;
-        assertEq(perennial.redeemable(id, alice), aPay);
+        assertEq(perennial.redeemable(id, alice), aYes);
         assertEq(perennial.redeemable(id, bob), 0, "loser");
         vm.prank(alice);
-        assertEq(perennial.redeem(id), aPay, "shares * net / gross");
+        assertEq(perennial.redeem(id), aYes, "1 per winning share");
         vm.prank(bob);
         vm.expectRevert(MarketsPerennial.InsufficientShares.selector);
         perennial.redeem(id);
-        assertGt(bNo, 0);
 
-        uint256 lpPot = (m.yesReserve * 990e6) / 1_000e6;
-        assertEq(perennial.lpPotAtResolution(id), lpPot, "LP pot = winning reserve * net / gross");
-        assertEq(perennial.claimableLP(id, creator), lpPot);
+        assertEq(perennial.lpPotAtResolution(id), m.yesReserve, "LP pot = winning reserve");
+        assertEq(perennial.claimableLP(id, creator), m.yesReserve);
         vm.prank(creator);
-        assertEq(perennial.claimLP(id), lpPot);
-        assertEq(perennial.claimableLP(id, creator), 0);
-        assertLe(ledger.balanceOf(address(perennial)), 2, "dust");
+        assertEq(perennial.claimLP(id), m.yesReserve);
+        assertEq(ledger.balanceOf(address(perennial)), 0, "exactly solvent: winning supply == C");
         _solvent();
     }
 
-    function test_v4_resolveFee_exactSplit_toTreasury() public {
+    function test_v4_resolve_releasesEscrow_treasuryPaidPerTrade() public {
         bytes32 id = _v(100e6);
         vm.prank(alice);
-        uint256 aNo = v4.buy(id, MarketsV4.Outcome.No, 900e6, 0);
+        uint256 aNo = v4.buy(id, MarketsV4.Outcome.No, 900e6, 0); // fee 9
+        assertEq(ledger.balanceOf(treasury), 45e5, "the 50% leg is the treasury's, per trade");
         MarketsV4.Market memory m = v4.getMarket(id);
-        uint256 c0 = ledger.balanceOf(creator);
         _attestAndFinalize(m.expiry, 0); // NO wins (0 < 1)
-        vm.expectEmit(true, false, false, true, address(v4));
-        emit FeesPaid(id, 3e6, 5e6, 2e6);
+        vm.expectEmit(true, true, false, true, address(v4));
+        emit AgentFeeReleased(id, agent, 18e5);
         v4.resolve(id);
-        assertEq(ledger.balanceOf(creator) - c0, 3e6);
-        assertEq(ledger.balanceOf(agent), 2e6);
-        assertEq(ledger.balanceOf(treasury), 5e6, "the 50% leg is the treasury's");
+        assertEq(ledger.balanceOf(agent), 18e5);
+        assertEq(ledger.balanceOf(treasury), 45e5);
         vm.prank(alice);
-        assertEq(v4.redeem(id), (aNo * 990e6) / 1_000e6);
+        assertEq(v4.redeem(id), aNo);
         vm.prank(creator);
-        assertEq(v4.claimLP(id), (m.noReserve * 990e6) / 1_000e6);
-        assertLe(ledger.balanceOf(address(v4)), 2);
+        assertEq(v4.claimLP(id), m.noReserve);
+        assertEq(ledger.balanceOf(address(v4)), 0);
         _solvent();
     }
 
-    /// The fee legs never strand a unit: commons takes the remainder.
-    function testFuzz_feeLegsSumToFee(uint256 buyIn) public {
-        buyIn = bound(buyIn, 1, 1_000_000e6);
-        bytes32 id = _p(5e6);
-        vm.prank(alice);
-        try perennial.buy(id, MarketsPerennial.Outcome.Yes, buyIn, 0) {} catch {}
-        uint256 c = perennial.collateralOf(id);
-        uint256 c0 = ledger.balanceOf(creator);
-        _attestAndFinalize(perennial.getMarket(id).expiry, 1);
-        perennial.resolve(id);
-        uint256 fee = (c * 100) / 10_000;
-        uint256 paid = (ledger.balanceOf(creator) - c0) + ledger.balanceOf(agent) + ledger.balanceOf(address(pool));
-        assertEq(paid, fee);
-        assertEq(ledger.balanceOf(address(perennial)), c - fee);
-    }
+    // ───────────────────────── void: net cost back ─────────────────────────
 
-    // ───────────────────────── void: net cost minus 1% ─────────────────────────
-
-    function test_perennial_void_refundsNetCostMinusOnePercent_afterPartialSell() public {
+    function test_perennial_void_refundsNetCost_afterPartialSell() public {
         bytes32 id = _p(100e6);
         vm.prank(alice);
-        uint256 aYes = perennial.buy(id, MarketsPerennial.Outcome.Yes, 400e6, 0);
+        uint256 aYes = perennial.buy(id, MarketsPerennial.Outcome.Yes, 400e6, 0); // net 396
         vm.prank(bob);
-        perennial.buy(id, MarketsPerennial.Outcome.No, 200e6, 0);
+        perennial.buy(id, MarketsPerennial.Outcome.No, 200e6, 0); // net 198
+        uint256 c0 = perennial.collateralOf(id);
         vm.prank(alice);
-        uint256 out = perennial.sell(id, MarketsPerennial.Outcome.Yes, aYes / 4, 0);
-        assertLt(out, 400e6);
-        uint256 aCost = 400e6 - out;
-        assertEq(perennial.netCost(id, alice), aCost);
+        perennial.sell(id, MarketsPerennial.Outcome.Yes, aYes / 4, 0);
+        uint256 gross = c0 - perennial.collateralOf(id);
+        assertLt(gross, 396e6);
+        uint256 aCost = 396e6 - gross;
+        assertEq(perennial.netCost(id, alice), aCost, "net cost falls by the gross amount");
         uint256 c = perennial.collateralOf(id);
-        assertEq(c, 700e6 - out);
+        assertEq(c, 694e6 - gross);
+        uint256 escrow = perennial.agentEscrow(id);
+        uint256 pool0 = ledger.balanceOf(address(pool));
 
         vm.warp(perennial.getMarket(id).expiry + WINDOW + 1);
+        vm.expectEmit(true, false, false, true, address(perennial));
+        emit VoidFeesPaid(id, 0, escrow, 0, address(0));
         perennial.voidMarket(id);
-        uint256 fee = c / 100;
-        uint256 pool_ = ((aCost + 200e6) * 9_900) / 10_000;
-        assertEq(perennial.voidTraderPool(id), pool_);
-        assertEq(perennial.voidNetCostTotal(id), aCost + 200e6);
+        assertEq(ledger.balanceOf(address(pool)) - pool0, escrow, "unclaimed escrow to the commons");
+        assertEq(perennial.voidTraderPool(id), aCost + 198e6, "min(totalNetCost, C)");
+        assertEq(perennial.voidNetCostTotal(id), aCost + 198e6);
 
-        uint256 aPay = (aCost * pool_) / (aCost + 200e6);
-        assertApproxEqAbs(aPay, (aCost * 99) / 100, 1, "alice: net cost minus 1%");
-        assertEq(perennial.redeemable(id, alice), aPay);
+        assertEq(perennial.redeemable(id, alice), aCost);
         vm.prank(alice);
-        assertEq(perennial.redeem(id), aPay);
+        assertEq(perennial.redeem(id), aCost, "alice: her net cost, exactly");
         vm.prank(bob);
-        assertApproxEqAbs(perennial.redeem(id), 198e6, 1, "bob: 200 minus 1%");
+        assertEq(perennial.redeem(id), 198e6, "bob: 200 in, minus the 2 fee");
         vm.prank(creator);
-        assertEq(perennial.claimLP(id), c - fee - pool_, "LP gets the rest");
-        assertLe(ledger.balanceOf(address(perennial)), 2);
+        assertEq(perennial.claimLP(id), 100e6, "LP gets C minus the trader pool: its seed");
+        assertEq(ledger.balanceOf(address(perennial)), 0);
         _solvent();
     }
 
     /// The rare case: an early seller's profit exceeds the LP seed, so the market
-    /// holds less than 99% of the traders' net costs. They share what there is
-    /// pro rata; the LP gets nothing; nobody is paid more than the market holds.
+    /// holds less than the traders' net costs. They share what there is pro rata;
+    /// the LP gets nothing; nobody is paid more than the market holds.
     function test_perennial_void_proRata_whenEarlySellerProfitExceedsLpSeed() public {
         bytes32 id = _p(5e6); // minimum seed
         vm.prank(bob);
-        perennial.buy(id, MarketsPerennial.Outcome.No, 1_000e6, 0); // YES becomes cheap
+        perennial.buy(id, MarketsPerennial.Outcome.No, 1_000e6, 0); // YES becomes cheap; net 990
         vm.prank(alice);
-        uint256 aYes = perennial.buy(id, MarketsPerennial.Outcome.Yes, 10e6, 0);
+        uint256 aYes = perennial.buy(id, MarketsPerennial.Outcome.Yes, 10e6, 0); // net 9.9
         vm.prank(carol);
-        perennial.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // YES becomes dear
+        perennial.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // YES becomes dear; net 1980
         vm.prank(alice);
         uint256 out = perennial.sell(id, MarketsPerennial.Outcome.Yes, aYes, 0);
         assertGt(out - 10e6, 5e6, "alice's profit exceeds the LP seed");
@@ -343,16 +361,15 @@ contract FeeModelTest is Test {
 
         uint256 c = perennial.collateralOf(id);
         uint256 tnc = perennial.totalNetCost(id);
-        assertEq(tnc, 3_000e6);
+        assertEq(tnc, 2_970e6);
         assertGt(tnc, c, "the traders put in more than the market still holds");
 
         vm.warp(perennial.getMarket(id).expiry + WINDOW + 1);
         perennial.voidMarket(id);
-        uint256 avail = c - c / 100;
-        assertEq(perennial.voidTraderPool(id), avail, "capped at what the market holds");
-        uint256 bPay = (1_000e6 * avail) / 3_000e6;
-        uint256 cPay = (2_000e6 * avail) / 3_000e6;
-        assertLt(bPay, 990e6, "less than net cost minus 1%: pro rata");
+        assertEq(perennial.voidTraderPool(id), c, "capped at what the market holds");
+        uint256 bPay = (990e6 * c) / 2_970e6;
+        uint256 cPay = (1_980e6 * c) / 2_970e6;
+        assertLt(bPay, 990e6, "less than net cost: pro rata");
         vm.prank(bob);
         assertEq(perennial.redeem(id), bPay);
         vm.prank(carol);
@@ -368,7 +385,7 @@ contract FeeModelTest is Test {
         _solvent();
     }
 
-    function test_v4_void_refundsNetCostMinusOnePercent() public {
+    function test_v4_void_refundsNetCost() public {
         bytes32 id = _v(100e6);
         vm.prank(alice);
         v4.buy(id, MarketsV4.Outcome.Yes, 500e6, 0);
@@ -381,19 +398,20 @@ contract FeeModelTest is Test {
         vm.prank(bob);
         assertEq(v4.redeem(id), 2475e5);
         vm.prank(creator);
-        assertEq(v4.claimLP(id), 99e6);
+        assertEq(v4.claimLP(id), 100e6);
         assertEq(ledger.balanceOf(address(v4)), 0);
+        assertEq(ledger.balanceOf(treasury), 375e4 + 15e5, "50% per trade + the unclaimed escrow");
     }
 
     // ───────────────────────── void: challenger reward ─────────────────────────
 
     /// Full Dispute flow: the agent attests inside the settlement window, a
     /// challenger disputes, the resolver rules Invalid, the window passes, the
-    /// market voids — and the agent's 20% goes to that challenger.
+    /// market voids — and the agent's escrow goes to that challenger.
     function test_perennial_void_paysTheSuccessfulChallenger() public {
         bytes32 id = _p(100e6);
         vm.prank(alice);
-        perennial.buy(id, MarketsPerennial.Outcome.Yes, 900e6, 0); // C = 1000, fee 10
+        perennial.buy(id, MarketsPerennial.Outcome.Yes, 900e6, 0); // fee 9, escrow 1.8
         uint256 expiry = perennial.getMarket(id).expiry;
 
         vm.warp(expiry + 5 minutes);
@@ -410,14 +428,14 @@ contract FeeModelTest is Test {
         assertEq(uint8(s), uint8(SettlementPolicy.Settlement.Voidable));
         uint256 c0 = ledger.balanceOf(creator);
         vm.expectEmit(true, false, false, true, address(perennial));
-        emit VoidFeesPaid(id, 3e6, 5e6, 2e6, challenger);
+        emit VoidFeesPaid(id, 0, 0, 18e5, challenger);
         perennial.voidMarket(id);
-        assertEq(ledger.balanceOf(challenger), 2e6, "challenger reward = the agent's 20%");
+        assertEq(ledger.balanceOf(challenger), 18e5, "challenger reward = the agent's escrow");
         assertEq(ledger.balanceOf(agent), 0, "the agent earns nothing");
-        assertEq(ledger.balanceOf(address(pool)), 5e6, "commons its 50%");
-        assertEq(ledger.balanceOf(creator) - c0, 3e6);
+        assertEq(ledger.balanceOf(address(pool)), 45e5, "commons keeps only its per-trade 50%");
+        assertEq(ledger.balanceOf(creator), c0, "nothing charged at void");
         vm.prank(alice);
-        assertEq(perennial.redeem(id), 891e6, "900 minus 1%");
+        assertEq(perennial.redeem(id), 891e6, "900 in, minus the 9 fee");
         _solvent();
     }
 
@@ -435,14 +453,14 @@ contract FeeModelTest is Test {
         dispute.resolve(d, Dispute.DisputeOutcome.AttestationInvalid);
         vm.warp(expiry + WINDOW + 1);
         vm.expectEmit(true, false, false, true, address(v4));
-        emit VoidFeesPaid(id, 3e6, 5e6, 2e6, challenger);
+        emit VoidFeesPaid(id, 0, 0, 18e5, challenger);
         v4.voidMarket(id);
-        assertEq(ledger.balanceOf(challenger), 2e6);
-        assertEq(ledger.balanceOf(treasury), 5e6);
+        assertEq(ledger.balanceOf(challenger), 18e5);
+        assertEq(ledger.balanceOf(treasury), 45e5);
     }
 
-    /// No successful challenger: the 20% goes to the commons / treasury.
-    function test_void_noChallenger_agentLegToCommonsAndTreasury() public {
+    /// No successful challenger: the escrow goes to the commons / treasury.
+    function test_void_noChallenger_escrowToCommonsAndTreasury() public {
         bytes32 p = _p(100e6);
         bytes32 q = _v(100e6);
         vm.startPrank(alice);
@@ -451,20 +469,24 @@ contract FeeModelTest is Test {
         vm.stopPrank();
         vm.warp(perennial.getMarket(p).expiry + WINDOW + 1);
         vm.expectEmit(true, false, false, true, address(perennial));
-        emit VoidFeesPaid(p, 3e6, 7e6, 0, address(0));
+        emit VoidFeesPaid(p, 0, 18e5, 0, address(0));
         perennial.voidMarket(p);
         vm.expectEmit(true, false, false, true, address(v4));
-        emit VoidFeesPaid(q, 3e6, 7e6, 0, address(0));
+        emit VoidFeesPaid(q, 0, 18e5, 0, address(0));
         v4.voidMarket(q);
-        assertEq(ledger.balanceOf(address(pool)), 7e6, "commons 50% + 20%");
-        assertEq(ledger.balanceOf(treasury), 7e6, "treasury 50% + 20%");
+        assertEq(ledger.balanceOf(address(pool)), 45e5 + 18e5, "commons: 50% per trade + the escrow");
+        assertEq(ledger.balanceOf(treasury), 45e5 + 18e5, "treasury: 50% per trade + the escrow");
         assertEq(ledger.balanceOf(agent), 0);
+        assertEq(perennial.agentEscrow(p), 0);
+        assertEq(v4.agentEscrow(q), 0);
     }
 
     /// A successful challenge of an attestation OUTSIDE the settlement window earns
-    /// no share of the market's fee: it did not remove the market's reading.
+    /// nothing from the market: it did not remove the market's reading.
     function test_void_outOfWindowChallenge_earnsNothing() public {
         bytes32 id = _p(100e6);
+        vm.prank(alice);
+        perennial.buy(id, MarketsPerennial.Outcome.Yes, 100e6, 0); // escrow 0.2
         uint256 expiry = perennial.getMarket(id).expiry;
         // an Invalid ruling on an attestation BEFORE the window
         vm.warp(expiry - 30 minutes);
@@ -478,7 +500,7 @@ contract FeeModelTest is Test {
         // the agent is now deactivated and cannot attest in the window: void
         vm.warp(expiry + WINDOW + 1);
         vm.expectEmit(true, false, false, true, address(perennial));
-        emit VoidFeesPaid(id, 3e5, 7e5, 0, address(0));
+        emit VoidFeesPaid(id, 0, 2e5, 0, address(0));
         perennial.voidMarket(id);
         assertEq(ledger.balanceOf(challenger), 0);
     }
@@ -532,7 +554,7 @@ contract FeeModelTest is Test {
         attestation.attest(f, 1, keccak256("v"));
         vm.warp(vm.getBlockTimestamp() + DW);
         v4.resolve(id);
-        assertEq(ledger.balanceOf(userAgent), 2e6, "the user's agent earns 20% of the 1% fee");
+        assertEq(ledger.balanceOf(userAgent), 18e5, "the user's agent earns its escrowed 20% of the trading fees");
         // Perennial stays gated on the governor's agent list
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.AgentNotApproved.selector);
@@ -605,11 +627,12 @@ contract FeeModelTest is Test {
     // ───────────────────────── solvency fuzz ─────────────────────────
 
     struct Books {
-        uint256 totalIn; // LP seed + every buy
-        uint256 sold; // every sell's proceeds
-        uint256 fees; // what left at resolve / void
+        uint256 totalIn; // LP seed + every buy's collateralIn
+        uint256 sold; // what sellers received
+        uint256 fees; // every trade's 1% fee (creator + commons/treasury paid, agent escrowed)
         uint256 redeemed;
         uint256 lp;
+        uint256 feeRecipients; // what the fee recipients actually received
     }
 
     function testFuzz_perennial_solvency(uint256 seed, uint8 n, bool settle, uint256 liq) public {
@@ -619,28 +642,36 @@ contract FeeModelTest is Test {
         Books memory b;
         bytes32 id = _p(liq);
         b.totalIn = liq;
+        uint256 cr0 = ledger.balanceOf(creator);
         for (uint256 i; i < n; i++) {
             uint256 r = uint256(keccak256(abi.encode(seed, i)));
             address t = who[r % 4];
             MarketsPerennial.Outcome o = (r >> 8) % 2 == 0 ? MarketsPerennial.Outcome.Yes : MarketsPerennial.Outcome.No;
+            uint256 c0 = perennial.collateralOf(id);
             if ((r >> 16) % 3 == 0) {
                 uint256 bal = o == MarketsPerennial.Outcome.Yes ? perennial.yesBalance(id, t) : perennial.noBalance(id, t);
                 if (bal == 0) continue;
                 vm.prank(t);
                 try perennial.sell(id, o, bound(r >> 32, 1, bal), 0) returns (uint256 out) {
                     b.sold += out;
+                    b.fees += (c0 - perennial.collateralOf(id)) - out;
                 } catch {}
             } else {
                 uint256 amt = bound(r >> 32, 1, 20_000e6);
                 vm.prank(t);
                 try perennial.buy(id, o, amt, 0) {
                     b.totalIn += amt;
+                    b.fees += amt / 100;
                 } catch {}
             }
-            assertEq(ledger.balanceOf(address(perennial)), perennial.collateralOf(id), "balance == C while trading");
+            assertEq(
+                ledger.balanceOf(address(perennial)),
+                perennial.collateralOf(id) + perennial.agentEscrow(id),
+                "balance == C + escrow while trading"
+            );
         }
         uint256 c = perennial.collateralOf(id);
-        assertEq(c, b.totalIn - b.sold);
+        assertEq(c, b.totalIn - b.sold - b.fees);
 
         uint256 expiry = perennial.getMarket(id).expiry;
         if (settle) {
@@ -650,8 +681,9 @@ contract FeeModelTest is Test {
             vm.warp(expiry + WINDOW + 1);
             perennial.voidMarket(id);
         }
-        b.fees = c - ledger.balanceOf(address(perennial));
-        assertEq(b.fees, c / 100, "exactly the 1% fee left the market");
+        assertEq(ledger.balanceOf(address(perennial)), c, "only the escrow left at settlement");
+        b.feeRecipients = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(address(pool)) + ledger.balanceOf(agent);
+        assertEq(b.feeRecipients, b.fees, "every fee reached creator, commons or agent");
 
         for (uint256 i; i < 4; i++) {
             uint256 owed = perennial.redeemable(id, who[i]);
@@ -663,7 +695,8 @@ contract FeeModelTest is Test {
         vm.prank(creator);
         b.lp = perennial.claimLP(id);
         uint256 dust = ledger.balanceOf(address(perennial));
-        assertLe(dust, 6, "only rounding dust left");
+        assertLe(dust, 4, "only rounding dust left");
+        if (settle) assertEq(dust, 0, "resolve pays out exactly");
         assertEq(b.sold + b.redeemed + b.lp + b.fees + dust, b.totalIn, "every unit in is accounted for");
         _solvent();
     }
@@ -675,28 +708,32 @@ contract FeeModelTest is Test {
         Books memory b;
         bytes32 id = _v(liq);
         b.totalIn = liq;
+        uint256 cr0 = ledger.balanceOf(creator);
         for (uint256 i; i < n; i++) {
             uint256 r = uint256(keccak256(abi.encode(seed, i)));
             address t = who[r % 4];
             MarketsV4.Outcome o = (r >> 8) % 2 == 0 ? MarketsV4.Outcome.Yes : MarketsV4.Outcome.No;
+            uint256 c0 = v4.collateralOf(id);
             if ((r >> 16) % 3 == 0) {
                 uint256 bal = o == MarketsV4.Outcome.Yes ? v4.yesBalance(id, t) : v4.noBalance(id, t);
                 if (bal == 0) continue;
                 vm.prank(t);
                 try v4.sell(id, o, bound(r >> 32, 1, bal), 0) returns (uint256 out) {
                     b.sold += out;
+                    b.fees += (c0 - v4.collateralOf(id)) - out;
                 } catch {}
             } else {
                 uint256 amt = bound(r >> 32, 1, 20_000e6);
                 vm.prank(t);
                 try v4.buy(id, o, amt, 0) {
                     b.totalIn += amt;
+                    b.fees += amt / 100;
                 } catch {}
             }
         }
         uint256 c = v4.collateralOf(id);
-        assertEq(c, b.totalIn - b.sold);
-        assertEq(ledger.balanceOf(address(v4)), c);
+        assertEq(c, b.totalIn - b.sold - b.fees);
+        assertEq(ledger.balanceOf(address(v4)), c + v4.agentEscrow(id));
 
         uint256 expiry = v4.getMarket(id).expiry;
         if (settle) {
@@ -706,8 +743,9 @@ contract FeeModelTest is Test {
             vm.warp(expiry + WINDOW + 1);
             v4.voidMarket(id);
         }
-        b.fees = c - ledger.balanceOf(address(v4));
-        assertEq(b.fees, c / 100);
+        assertEq(ledger.balanceOf(address(v4)), c);
+        b.feeRecipients = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(treasury) + ledger.balanceOf(agent);
+        assertEq(b.feeRecipients, b.fees, "every fee reached creator, treasury or agent");
 
         for (uint256 i; i < 4; i++) {
             uint256 owed = v4.redeemable(id, who[i]);
@@ -719,7 +757,8 @@ contract FeeModelTest is Test {
         vm.prank(creator);
         b.lp = v4.claimLP(id);
         uint256 dust = ledger.balanceOf(address(v4));
-        assertLe(dust, 6, "only rounding dust left");
+        assertLe(dust, 4, "only rounding dust left");
+        if (settle) assertEq(dust, 0, "resolve pays out exactly");
         assertEq(b.sold + b.redeemed + b.lp + b.fees + dust, b.totalIn, "every unit in is accounted for");
         _solvent();
     }

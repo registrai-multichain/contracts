@@ -12,8 +12,8 @@ import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
-/// Full Perennial loop: the resolution fee of a builder market flows to the
-/// commons (ProgressPool), progress is recorded per builder, the epoch closes,
+/// Full Perennial loop: the commons leg of a builder market's trading fees flows
+/// to the commons (ProgressPool), progress is recorded per builder, the epoch closes,
 /// and builders claim a progress-weighted share, minus the 1% protocol fee.
 /// Ledger solvency holds throughout.
 contract PerennialTest is Test {
@@ -94,11 +94,11 @@ contract PerennialTest is Test {
         );
     }
 
-    /// A settled market: L 10 + 1990 bought -> C 2000, fee 20, commons 10.
+    /// A settled market: 2000 bought -> trading fee 20, commons 10.
     function _fundCommons() internal returns (bytes32 id) {
         id = _market();
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_990e6, 0);
+        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0);
         vm.warp(markets.getMarket(id).expiry + 1);
         vm.prank(oracle);
         attestation.attest(feedId, int256(123_456), bytes32("ih"));
@@ -135,14 +135,14 @@ contract PerennialTest is Test {
     function test_marketFees_fundTheCommons() public {
         bytes32 id = _market();
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_990e6, 0);
-        assertEq(ledger.balanceOf(address(pool)), 0, "no fee while trading");
+        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // fee 20, commons 10
+        assertEq(ledger.balanceOf(address(pool)), 10e6, "commons funded by the trading fee");
         vm.warp(markets.getMarket(id).expiry + 1);
         vm.prank(oracle);
         attestation.attest(feedId, int256(123_456), bytes32("ih"));
         vm.warp(block.timestamp + DW);
         markets.resolve(id);
-        assertEq(ledger.balanceOf(address(pool)), 10e6, "commons funded by the resolution fee");
+        assertEq(ledger.balanceOf(address(pool)), 10e6, "nothing more charged at settlement");
         assertEq(pool.pendingPot(), 10e6);
         _solvent();
     }

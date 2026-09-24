@@ -11,8 +11,9 @@ import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 import {SettlementPolicy} from "../../src/nanopay/SettlementPolicy.sol";
 
 /// The common markets share the settlement policy (and the fee model) with
-/// MarketsPerennial. The V4-specific part: the 50% leg goes to the Registrai
-/// TREASURY, which also takes the agent's 20% on a void nobody challenged.
+/// MarketsPerennial. The V4-specific part: the 50% leg of every trading fee goes
+/// to the Registrai TREASURY, which also takes the agent's escrowed 20% on a void
+/// nobody successfully challenged.
 contract MarketsV4SettlementTest is Test {
     MockUSDC usdc;
     Registry registry;
@@ -118,19 +119,19 @@ contract MarketsV4SettlementTest is Test {
         markets.resolve(id);
     }
 
-    function test_silentAgent_voids_andRefundsNetCostMinusOnePercent() public {
+    function test_silentAgent_voids_andRefundsNetCost() public {
         bytes32 id = _market();
         _trade(id);
         vm.warp(_expiry(id) + WINDOW + 1);
         markets.voidMarket(id);
         vm.prank(yesTaker);
-        assertEq(markets.redeem(id), 990e6, "1000 in, 990 back");
+        assertEq(markets.redeem(id), 990e6, "1000 in, 10 paid in fees, 990 back");
         vm.prank(noTaker);
-        assertEq(markets.redeem(id), 693e6, "700 in, 693 back");
+        assertEq(markets.redeem(id), 693e6, "700 in, 7 paid in fees, 693 back");
         vm.prank(creator);
-        assertEq(markets.claimLP(id), 990e6, "the LP seed, minus 1%");
+        assertEq(markets.claimLP(id), 1_000e6, "the LP seed, whole");
         _solvent();
-        assertLe(ledger.balanceOf(address(markets)), 2, "only rounding dust remains");
+        assertEq(ledger.balanceOf(address(markets)), 0, "nothing remains");
     }
 
     function test_stuckDispute_voidsOnlyAfterTheHardDeadline() public {
@@ -171,9 +172,9 @@ contract MarketsV4SettlementTest is Test {
         new MarketsV4(ledger, registry, attestation, address(this), address(0), WINDOW, GRACE);
     }
 
-    /// The split is fixed in code (no deploy input): 1% of C, 30 / 20 / 50.
+    /// The split is fixed in code (no deploy input): 1% of each trade, 30 / 20 / 50.
     function test_feeIsFixedInCode() public view {
-        assertEq(markets.RESOLUTION_FEE_BPS(), 100);
+        assertEq(markets.TRADE_FEE_BPS(), 100);
         assertEq(markets.CREATOR_SHARE_BPS(), 3000);
         assertEq(markets.AGENT_SHARE_BPS(), 2000);
         assertEq(markets.TREASURY_SHARE_BPS(), 5000);
@@ -181,25 +182,27 @@ contract MarketsV4SettlementTest is Test {
         assertEq(markets.TREASURY(), treasury);
     }
 
-    // ───────────── the fee, paid at settlement ─────────────
+    // ───────────── the fee: per trade, the agent's share escrowed ─────────────
 
-    /// Nothing is paid while trading; at resolve the agent is paid its 20%
-    /// directly (no escrow, no pool).
+    /// Creator and treasury are paid on each trade; the agent's 20% is held and
+    /// released at resolve (nothing else is charged then).
     function test_agentPaidOnResolve() public {
         bytes32 id = _market();
-        _trade(id); // C = 1000 + 1000 + 700 = 2700, fee 27
+        _trade(id); // fees 10 + 7 = 17
         assertEq(ledger.balanceOf(oracle), 0);
-        assertEq(ledger.balanceOf(treasury), 0);
+        assertEq(ledger.balanceOf(treasury), 85e5, "50% of 17, paid per trade");
+        assertEq(markets.agentEscrow(id), 34e5, "20% of 17, held");
         vm.warp(_expiry(id) + 1);
         _attest(120_000);
         vm.warp(block.timestamp + DW);
         markets.resolve(id);
-        assertEq(ledger.balanceOf(oracle), 54e5, "20% of 27");
-        assertEq(ledger.balanceOf(treasury), 135e5, "50% of 27");
+        assertEq(ledger.balanceOf(oracle), 34e5, "escrow released");
+        assertEq(markets.agentEscrow(id), 0);
+        assertEq(ledger.balanceOf(treasury), 85e5, "nothing charged at settlement");
         _solvent();
     }
 
-    /// Void with no successful challenge: the agent's 20% goes to the treasury.
+    /// Void with no successful challenge: the escrowed 20% goes to the treasury.
     function test_silentAgentVoid_agentLegToTreasury() public {
         bytes32 id = _market();
         _trade(id);
@@ -207,23 +210,24 @@ contract MarketsV4SettlementTest is Test {
         vm.warp(_expiry(id) + WINDOW + 1);
         markets.voidMarket(id);
         assertEq(ledger.balanceOf(oracle), 0, "the agent keeps nothing for a market it failed");
-        assertEq(ledger.balanceOf(treasury), 189e5, "50% + 20% of 27");
-        assertEq(ledger.balanceOf(creator) - c0, 81e5, "creator 30% of 27");
+        assertEq(ledger.balanceOf(treasury), 85e5 + 34e5, "treasury: its 50% plus the escrow");
+        assertEq(ledger.balanceOf(creator), c0, "nothing charged at void");
     }
 
-    /// Creator and agent the same wallet: it collects both legs when it settles.
+    /// Creator and agent the same wallet: it collects both legs once it settles.
     function test_creatorIsAgent_collectsBothLegsWhenSettled() public {
         _fundAs(oracle);
         vm.prank(oracle);
         bytes32 id = markets.createMarket(feedId, oracle, int256(100_000), MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
+        uint256 b0 = ledger.balanceOf(oracle);
         vm.prank(yesTaker);
-        markets.buy(id, MarketsV4.Outcome.Yes, 9_000e6, 0); // C = 10000, fee 100
+        markets.buy(id, MarketsV4.Outcome.Yes, 9_000e6, 0); // fee 90
+        assertEq(ledger.balanceOf(oracle) - b0, 27e6, "creator leg now");
         vm.warp(_expiry(id) + 1);
         _attest(120_000);
         vm.warp(block.timestamp + DW);
-        uint256 b0 = ledger.balanceOf(oracle);
         markets.resolve(id);
-        assertEq(ledger.balanceOf(oracle) - b0, 50e6, "30 + 20 of 100");
+        assertEq(ledger.balanceOf(oracle) - b0, 45e6, "30 + 20 of 90");
     }
 
     function _fundAs(address a) internal {

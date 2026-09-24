@@ -15,8 +15,9 @@ import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
 /// Every market an agent is asked to settle must reach a terminal state, must
 /// never settle on a value that was public while trading was open, and must not
-/// pay the agent for a settlement it did not deliver (on void its 20% leg goes
-/// to a successful challenger, else to the commons).
+/// pay the agent for a settlement it did not deliver (its 20% of the trading
+/// fees is escrowed; on void it goes to a successful challenger, else to the
+/// commons).
 contract SettlementLivenessTest is Test {
     MockUSDC usdc;
     Registry registry;
@@ -236,7 +237,7 @@ contract SettlementLivenessTest is Test {
     /// Now anyone can void once the window has closed empty.
     function test_silentAgent_marketVoids_andEveryoneIsPaid() public {
         bytes32 id = _market();
-        _trade(id); // C = 100 + 300 + 200 = 600, fee 6
+        _trade(id); // 300 and 200 in, 1% trading fee each: net costs 297 and 198
 
         vm.warp(_expiry(id) + WINDOW + 1);
         markets.voidMarket(id);
@@ -244,18 +245,18 @@ contract SettlementLivenessTest is Test {
         uint256 y0 = ledger.balanceOf(yesTaker);
         vm.prank(yesTaker);
         uint256 yPaid = markets.redeem(id);
-        assertEq(yPaid, 297e6, "net cost 300, minus 1%");
+        assertEq(yPaid, 297e6, "net cost: 300 in, minus the 3 fee");
         assertEq(ledger.balanceOf(yesTaker) - y0, yPaid);
 
         vm.prank(noTaker);
         uint256 nPaid = markets.redeem(id);
-        assertEq(nPaid, 198e6, "net cost 200, minus 1%");
+        assertEq(nPaid, 198e6, "net cost: 200 in, minus the 2 fee");
 
         vm.prank(creator);
         uint256 lp = markets.claimLP(id);
-        assertEq(lp, 99e6, "LP seed 100, minus 1%");
+        assertEq(lp, 100e6, "LP seed back whole");
         _solvent();
-        assertLe(ledger.balanceOf(address(markets)), 2, "at most rounding dust left behind");
+        assertEq(ledger.balanceOf(address(markets)), 0, "nothing left behind");
     }
 
     function test_voidRedeemPaysBothSidesAtOnce_andOnlyOnce() public {
@@ -268,7 +269,7 @@ contract SettlementLivenessTest is Test {
         vm.warp(_expiry(id) + WINDOW + 1);
         markets.voidMarket(id);
         vm.prank(yesTaker);
-        assertEq(markets.redeem(id), 198e6, "one refund of the whole net cost (200), minus 1%");
+        assertEq(markets.redeem(id), 198e6, "one refund of the whole net cost (200 in, minus 2 in fees)");
         assertEq(markets.netCost(id, yesTaker), 0);
         vm.prank(yesTaker);
         vm.expectRevert(MarketsPerennial.InsufficientShares.selector);
@@ -344,9 +345,9 @@ contract SettlementLivenessTest is Test {
         uint256 poolBefore = ledger.balanceOf(address(pool));
         vm.warp(_expiry(id) + WINDOW + 1);
         markets.voidMarket(id);
-        // C = 600, fee 6: the agent's 1.2 goes to the challenger, commons keeps its 3
-        assertEq(ledger.balanceOf(challenger) - chBefore, 12e5, "challenger earns the agent's 20%");
-        assertEq(ledger.balanceOf(address(pool)) - poolBefore, 3e6, "commons only its own 50%");
+        // fees 3 + 2: the agent's escrowed 1 goes to the challenger, commons gets nothing more
+        assertEq(ledger.balanceOf(challenger) - chBefore, 1e6, "challenger earns the agent's escrow");
+        assertEq(ledger.balanceOf(address(pool)), poolBefore, "commons already had its 50% per trade");
         _solvent();
     }
 
@@ -373,29 +374,31 @@ contract SettlementLivenessTest is Test {
         bytes32 id = _market();
         _trade(id);
         assertEq(ledger.balanceOf(agent), before, "nothing paid before settling");
-        assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id), "nothing held back either");
+        assertEq(markets.agentEscrow(id), 1e6, "20% of the 5 in fees, held");
+        assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id) + markets.agentEscrow(id));
     }
 
     function test_agentIsPaidOnResolve() public {
         bytes32 id = _market();
-        _trade(id); // C = 600, fee 6
+        _trade(id); // fees 3 + 2
         uint256 before = ledger.balanceOf(agent);
         vm.warp(_expiry(id) + 1);
         _attest(1);
         vm.warp(block.timestamp + DW);
         markets.resolve(id);
-        assertEq(ledger.balanceOf(agent) - before, 12e5, "20% of the 1% fee");
+        assertEq(ledger.balanceOf(agent) - before, 1e6, "the escrow: 20% of the trading fees");
+        assertEq(markets.agentEscrow(id), 0);
     }
 
     function test_agentGetsNothingOnVoid_legGoesToCommons() public {
         bytes32 id = _market();
-        _trade(id); // C = 600, fee 6
+        _trade(id); // fees 3 + 2, escrow 1
         uint256 agentBefore = ledger.balanceOf(agent);
         uint256 poolBefore = ledger.balanceOf(address(pool));
         vm.warp(_expiry(id) + WINDOW + 1);
         markets.voidMarket(id);
         assertEq(ledger.balanceOf(agent), agentBefore, "the agent keeps nothing for a market it failed");
-        assertEq(ledger.balanceOf(address(pool)) - poolBefore, 42e5, "commons: its 50% plus the unclaimed 20%");
+        assertEq(ledger.balanceOf(address(pool)) - poolBefore, 1e6, "commons receives the unclaimed escrow");
     }
 
     function test_forfeitSinkIsGone() public {

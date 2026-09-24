@@ -16,7 +16,7 @@ import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 /// @notice The RESOLVE path under interleaved buys and sells: after a random
 /// trading history the agent attests, the market resolves, every holder
 /// redeems, the LP claims — the market's ledger balance must cover all of it,
-/// leave only rounding dust, and the 1% resolution fee must be paid in full.
+/// leave only rounding dust, and the agent's escrow must be released in full.
 /// (The reviewer's testFuzz_lifecycleSolvent covered the void path.)
 contract ResolveLifecycleTest is Test {
     MockUSDC usdc;
@@ -109,7 +109,8 @@ contract ResolveLifecycleTest is Test {
         }
 
         uint256 c = perennial.collateralOf(id);
-        assertEq(ledger.balanceOf(address(perennial)), c, "no fee skimmed while trading");
+        uint256 escrow = perennial.agentEscrow(id);
+        assertEq(ledger.balanceOf(address(perennial)), c + escrow, "the market holds C plus the agent's escrow");
         vm.warp(t0 + LIFE);
         vm.prank(agent);
         attestation.attest(feedId, value, keccak256("v"));
@@ -119,10 +120,10 @@ contract ResolveLifecycleTest is Test {
         perennial.resolve(id);
         bool yesWon = perennial.getMarket(id).yesWon;
         assertEq(yesWon, value >= 1);
-        uint256 fee = c / 100;
-        assertEq(ledger.balanceOf(agent) - agentBefore, fee * 2000 / 10_000, "agent leg paid");
-        assertEq(ledger.balanceOf(address(pool)) - poolBefore, fee - fee * 3000 / 10_000 - fee * 2000 / 10_000);
-        assertEq(ledger.balanceOf(address(perennial)), c - fee, "exactly the fee left the market");
+        assertEq(perennial.agentEscrow(id), 0, "escrow released");
+        assertEq(ledger.balanceOf(agent) - agentBefore, escrow, "agent paid its escrow");
+        assertEq(ledger.balanceOf(address(pool)), poolBefore, "nothing charged at settlement");
+        assertEq(ledger.balanceOf(address(perennial)), c, "exactly the escrow left the market");
 
         // everything owed to winners and the LP is covered by the market's balance
         uint256 owed = perennial.lpPotAtResolution(id);
@@ -133,11 +134,11 @@ contract ResolveLifecycleTest is Test {
 
         for (uint256 i; i < traders.length; i++) {
             uint256 win = yesWon ? perennial.yesBalance(id, traders[i]) : perennial.noBalance(id, traders[i]);
-            if (win * (c - fee) / c == 0) continue;
+            if (win == 0) continue;
             uint256 before = ledger.balanceOf(traders[i]);
             vm.prank(traders[i]);
-            assertEq(perennial.redeem(id), win * (c - fee) / c);
-            assertEq(ledger.balanceOf(traders[i]) - before, win * (c - fee) / c, "winner paid net / gross per share");
+            assertEq(perennial.redeem(id), win);
+            assertEq(ledger.balanceOf(traders[i]) - before, win, "winner paid 1 per share");
         }
         vm.prank(creator);
         perennial.claimLP(id);
@@ -169,7 +170,8 @@ contract ResolveLifecycleTest is Test {
         }
 
         uint256 c = v4.collateralOf(id);
-        assertEq(ledger.balanceOf(address(v4)), c, "no fee skimmed while trading");
+        uint256 escrow = v4.agentEscrow(id);
+        assertEq(ledger.balanceOf(address(v4)), c + escrow, "the market holds C plus the agent's escrow");
         vm.warp(t0 + LIFE);
         vm.prank(agent);
         attestation.attest(feedId, value, keccak256("v"));
@@ -177,9 +179,9 @@ contract ResolveLifecycleTest is Test {
         uint256 treasuryBefore = ledger.balanceOf(treasury);
         v4.resolve(id);
         bool yesWon = v4.getMarket(id).yesWon;
-        uint256 fee = c / 100;
-        assertEq(ledger.balanceOf(treasury) - treasuryBefore, fee - fee * 3000 / 10_000 - fee * 2000 / 10_000);
-        assertEq(ledger.balanceOf(address(v4)), c - fee, "exactly the fee left the market");
+        assertEq(v4.agentEscrow(id), 0, "escrow released");
+        assertEq(ledger.balanceOf(treasury), treasuryBefore, "nothing charged at settlement");
+        assertEq(ledger.balanceOf(address(v4)), c, "exactly the escrow left the market");
 
         uint256 owed = v4.lpPotAtResolution(id);
         for (uint256 i; i < traders.length; i++) {
@@ -189,9 +191,9 @@ contract ResolveLifecycleTest is Test {
 
         for (uint256 i; i < traders.length; i++) {
             uint256 win = yesWon ? v4.yesBalance(id, traders[i]) : v4.noBalance(id, traders[i]);
-            if (win * (c - fee) / c == 0) continue;
+            if (win == 0) continue;
             vm.prank(traders[i]);
-            assertEq(v4.redeem(id), win * (c - fee) / c);
+            assertEq(v4.redeem(id), win);
         }
         vm.prank(creator);
         v4.claimLP(id);

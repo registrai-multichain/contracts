@@ -13,8 +13,8 @@ import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
 /// Milestone market: "did the builder ship a release?" resolves from a bonded
-/// 1/0 attestation, and the commons leg of the resolution fee funds the
-/// commons (ProgressPool).
+/// 1/0 attestation, and the commons leg of its trading fees funds the commons
+/// (ProgressPool).
 contract MilestoneMarketTest is Test {
     MockUSDC usdc;
     Registry registry;
@@ -81,8 +81,8 @@ contract MilestoneMarketTest is Test {
     function test_shipped_resolvesYes_andFundsCommons() public {
         bytes32 id = _milestoneMarket();
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 990e6, 0); // C = 1000: fee 10, commons leg 5
-        assertEq(ledger.balanceOf(address(pool)), 0, "no fee while trading");
+        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // fee 10: commons 5, agent 2 escrowed
+        assertEq(ledger.balanceOf(address(pool)), 5e6, "commons funded by the milestone market's trading fee");
 
         vm.warp(block.timestamp + 2 hours + 1); // trading closed; now the agent reads
         vm.prank(agent);
@@ -90,8 +90,8 @@ contract MilestoneMarketTest is Test {
         vm.warp(block.timestamp + DW);
         markets.resolve(id);
         assertTrue(markets.getMarket(id).yesWon, "shipped -> YES wins");
-        assertEq(ledger.balanceOf(address(pool)), 5e6, "commons funded by the milestone market's resolution fee");
-        assertEq(ledger.balanceOf(agent), 2e6, "the settling agent earns 20%");
+        assertEq(ledger.balanceOf(address(pool)), 5e6, "nothing more charged at settlement");
+        assertEq(ledger.balanceOf(agent), 2e6, "the settling agent's escrowed 20% is released");
         assertEq(usdc.balanceOf(address(ledger)), ledger.totalOwed(), "solvent");
     }
 

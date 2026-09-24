@@ -10,9 +10,9 @@ import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 
 /// MarketsV4 lifecycle on NanoLedger: create/buy/sell settle as internal
-/// accounting with no trading fee, the 1% resolution fee is paid at settlement
-/// (creator 30 / agent 20 / treasury 50), oracle resolution + redeem + LP claim
-/// pay into ledger balances. Ledger solvency holds throughout.
+/// accounting with a 1% trading fee per trade (creator 30 and treasury 50 paid
+/// now, the agent's 20 escrowed until settlement), oracle resolution + redeem +
+/// LP claim pay into ledger balances. Ledger solvency holds throughout.
 contract MarketsV4Test is Test {
     MockUSDC usdc;
     Registry registry;
@@ -93,9 +93,9 @@ contract MarketsV4Test is Test {
         markets.createMarket(bytes32("nope"), oracle, 0, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 1 hours, 1_000e6);
     }
 
-    // ───────────── buy: no trading fee ─────────────
+    // ───────────── buy: 1% trading fee ─────────────
 
-    function test_buy_settlesOnLedger_noTradeFee() public {
+    function test_buy_settlesOnLedger_chargesTradeFee() public {
         bytes32 id = _market();
         uint256 takerBefore = ledger.balanceOf(taker);
 
@@ -103,11 +103,13 @@ contract MarketsV4Test is Test {
         uint256 shares = markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, 0);
         assertGt(shares, 0);
         assertEq(ledger.balanceOf(taker), takerBefore - 1_000e6, "collateral debited from ledger balance");
-        assertEq(ledger.balanceOf(address(markets)), 2_000e6, "every unit stays in the market");
-        assertEq(markets.collateralOf(id), 2_000e6);
-        assertEq(markets.netCost(id, taker), 1_000e6);
-        assertEq(ledger.balanceOf(treasury), 0, "no fee at trade time");
-        assertEq(ledger.balanceOf(oracle), 0, "no fee at trade time");
+        // fee 10: creator 3 and treasury 5 paid now, the agent's 2 escrowed
+        assertEq(ledger.balanceOf(treasury), 5e6, "treasury 50% now");
+        assertEq(ledger.balanceOf(oracle), 0, "agent not paid at trade time");
+        assertEq(markets.agentEscrow(id), 2e6, "agent 20% escrowed");
+        assertEq(markets.collateralOf(id), 1_990e6);
+        assertEq(markets.netCost(id, taker), 990e6);
+        assertEq(ledger.balanceOf(address(markets)), 1_992e6, "C + escrow");
         _solvent();
     }
 
@@ -118,20 +120,22 @@ contract MarketsV4Test is Test {
         markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, type(uint256).max);
     }
 
-    /// The fee is paid once, at resolve, straight to ledger balances: nothing to claim.
-    function test_resolveFee_paidToLedgerBalances() public {
+    /// Creator and treasury are paid per trade, straight to ledger balances
+    /// (nothing to claim); the agent's escrow is released at resolve.
+    function test_fees_paidPerTrade_agentOnResolve() public {
         bytes32 id = _market();
-        vm.prank(taker);
-        markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, 0); // C = 2000, fee 20
         uint256 creatorBefore = ledger.balanceOf(creator);
+        vm.prank(taker);
+        markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, 0); // fee 10
+        assertEq(ledger.balanceOf(creator) - creatorBefore, 3e6, "creator 30% of 10");
+        assertEq(ledger.balanceOf(treasury), 5e6, "treasury 50% of 10");
         vm.warp(block.timestamp + 2 hours + 1);
         vm.prank(oracle);
         attestation.attest(feedId, int256(123_456), bytes32("ih"));
         vm.warp(block.timestamp + DW);
         markets.resolve(id);
-        assertEq(ledger.balanceOf(creator) - creatorBefore, 6e6, "creator 30% of 20");
-        assertEq(ledger.balanceOf(oracle), 4e6, "agent 20% of 20");
-        assertEq(ledger.balanceOf(treasury), 10e6, "treasury 50% of 20");
+        assertEq(ledger.balanceOf(oracle), 2e6, "agent 20% of 10, released on resolve");
+        assertEq(ledger.balanceOf(treasury), 5e6, "nothing charged at settlement");
         _solvent();
     }
 
@@ -147,8 +151,11 @@ contract MarketsV4Test is Test {
         uint256 out = markets.sell(id, MarketsV4.Outcome.Yes, shares, 0);
         assertGt(out, 0);
         assertEq(ledger.balanceOf(taker), takerBefore + out, "proceeds credited to ledger balance");
-        assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id), "no fee skimmed");
-        assertEq(markets.netCost(id, taker), 1_000e6 - (out < 1_000e6 ? out : 1_000e6));
+        assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id) + markets.agentEscrow(id));
+        uint256 gross = 1_990e6 - markets.collateralOf(id); // the sell burned the gross amount
+        assertApproxEqAbs(gross, 990e6, 2, "round trip at the curve: the buy's net comes back gross");
+        assertEq(out, gross - gross / 100, "seller receives gross minus 1%");
+        assertEq(markets.netCost(id, taker), 990e6 - (gross < 990e6 ? gross : 990e6));
         _solvent();
     }
 
@@ -173,7 +180,7 @@ contract MarketsV4Test is Test {
         uint256 takerBefore = ledger.balanceOf(taker);
         vm.prank(taker);
         uint256 payout = markets.redeem(id);
-        assertEq(payout, (shares * 2_970e6) / 3_000e6, "winning shares redeem at net / gross (C = 3000, fee 30)");
+        assertEq(payout, shares, "winning shares redeem 1:1");
         assertEq(ledger.balanceOf(taker), takerBefore + payout);
 
         // creator claims LP pot
@@ -200,9 +207,10 @@ contract MarketsV4Test is Test {
         markets.buy(id, MarketsV4.Outcome.Yes, 3_000e6, 0);
         vm.prank(creator);
         markets.buy(id, MarketsV4.Outcome.No, 1_500e6, 0);
-        assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id));
-        assertEq(markets.collateralOf(id), 5_500e6);
-        assertEq(markets.totalNetCost(id), 4_500e6);
+        assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id) + markets.agentEscrow(id));
+        assertEq(markets.collateralOf(id), 5_455e6, "1000 + 2970 + 1485");
+        assertEq(markets.totalNetCost(id), 4_455e6);
+        assertEq(markets.agentEscrow(id), 9e6, "20% of 30 + 15");
         _solvent();
     }
 }

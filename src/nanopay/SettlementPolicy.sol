@@ -28,7 +28,7 @@ import {Dispute} from "../Dispute.sol";
 /// The hard deadline exists because Dispute has no timeout: a challenge that its
 /// resolver never settles would otherwise hold a market open forever.
 ///
-/// On void, the agent's share of the resolution fee becomes a challenger reward:
+/// On void, the agent's escrowed share of the trading fees becomes a challenger reward:
 /// it goes to whoever got one of the agent's attestations in the settlement
 /// window ruled Invalid (`_challengerOf`), else to the commons / treasury.
 abstract contract SettlementPolicy {
