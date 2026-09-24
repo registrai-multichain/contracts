@@ -26,6 +26,7 @@ What it proves, on a throwaway anvil chain (31337) with anvil's public dev keys:
 Nothing here touches a real network: every step refuses a chain id other than 31337.
 """
 import json, os, re, shutil, socket, subprocess, sys, time, pathlib
+import tempfile as tempfile_mod
 
 HERE = pathlib.Path(__file__).resolve().parent
 CONTRACTS = HERE.parent
@@ -167,17 +168,36 @@ def rehearse(c, A):
         c.send("deployer", USDC, "mint(address,uint256)", A[who], 1_000 * U)
     check(c.uint(USDC, "balanceOf(address)(uint256)", A["alice"]) == 1_000 * U, "USDC live at 0x3600 on the local chain")
 
-    print("== 1. real deploy scripts, forced mainnet order")
+    print("== 1a. mainnet phase 1: builders before markets (registries + badge only)")
+    log = forge_script(c, "DeployBuilders", {"ADMIN": A["admin"], "OPERATOR": A["operator"], "BADGE_CHAIN_LABEL": "Local",
+                       "BADGE_IMAGE_BASE": "https://registrai.cc/badge/local/"})
+    S = {k: grab(log, k) for k in ("BuilderRegistry", "CaretakerRegistry", "VerifiedBuilderBadge")}
+    code_of = lambda a: run(["cast", "code", a, "--rpc-url", c.rpc]).stdout.strip()
+    check(all(code_of(a) not in ("", "0x") for a in S.values()), "phase 1 deploys exactly the builder side: registries + badge")
+    p1dir = pathlib.Path(tempfile_mod.mkdtemp(prefix="p1-keeper-"))
+    r = run(["python3", "keeper/builders_keeper.py"], cwd=ARC, ok=False,
+            env={"RPC": c.rpc, "PRIVATE_KEY": KEYS["operator"], "BUILDER_REGISTRY": S["BuilderRegistry"],
+                 "CARETAKER_REGISTRY": S["CaretakerRegistry"], "VERIFIED_BADGE": S["VerifiedBuilderBadge"],
+                 "CHAIN_ID": "31337", "BUILDERS_DATA_DIR": str(p1dir)})
+    out = r.stdout + r.stderr
+    check(r.returncode == 0 and "builders: 0 verified" in out and "lacks STATUS_ROLE" not in out,
+          "the phase-1 keeper runs with no market, pool, oracle or feed on chain", out[-800:])
+
+    print("== 1. real deploy scripts, forced mainnet order (phase 2 reuses the phase-1 registries)")
     common = {"USDC": USDC, "SETTLEMENT_WINDOW": str(SETTLEMENT_WINDOW), "RESOLUTION_GRACE": str(RESOLUTION_GRACE),
               "APPROVED_AGENT": A["operator"], "DISPUTE_RESOLVER": A["resolver"]}
     log = forge_script(c, "DeployOracle", {**common, "MIN_BOND": str(10 * U), "POINTS": "0x0000000000000000000000000000000000000000"})
-    S = {"Registry": grab(log, "Registry"), "Attestation": grab(log, "Attestation"), "Dispute": grab(log, "Dispute")}
+    S.update({"Registry": grab(log, "Registry"), "Attestation": grab(log, "Attestation"), "Dispute": grab(log, "Dispute")})
     log = forge_script(c, "DeployNanoLedger", common)
     S["NanoLedger"] = grab(log, "NanoLedger")
     log = forge_script(c, "DeployPerennial", {**common, "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"],
                        "NANO_LEDGER": S["NanoLedger"], "EPOCH_LENGTH": str(EPOCH_LENGTH), "STREAM_WINDOW": str(STREAM_WINDOW),
-                       "PROTOCOL_TREASURY": A["treasury"]})
-    for k in ("BuilderRegistry", "CaretakerRegistry", "ProgressPool", "MarketsPerennial"):
+                       "PROTOCOL_TREASURY": A["treasury"],
+                       "BUILDER_REGISTRY": S["BuilderRegistry"], "CARETAKER_REGISTRY": S["CaretakerRegistry"]})
+    check(grab(log, "BuilderRegistry").lower() == S["BuilderRegistry"].lower()
+          and grab(log, "CaretakerRegistry").lower() == S["CaretakerRegistry"].lower(),
+          "DeployPerennial reuses the phase-1 registries (no second BuilderRegistry)")
+    for k in ("ProgressPool", "MarketsPerennial"):
         S[k] = grab(log, k)
     log = forge_script(c, "DeployArbiter", {**common, "NANO_LEDGER": S["NanoLedger"], "PROGRESS_POOL": S["ProgressPool"],
                        "BUILDER_REGISTRY": S["BuilderRegistry"], "CARETAKER_REGISTRY": S["CaretakerRegistry"],
@@ -572,14 +592,11 @@ def verified_builders_stage(c, A, S, ui, run):
         py3, why3 = kv.validate_proof(fa, "github:acme/tool", A["vbuilderA"], 31337)
         check(py3, "the keeper accepts the proof file the website library produced", why3)
 
-        # the soulbound badge: ADMIN issues, the operator may only flip lapsed, the deployer holds nothing
-        blog = forge_script(c, "DeployBadge", {"BUILDER_REGISTRY": S["BuilderRegistry"], "ADMIN": A["admin"],
-                            "OPERATOR": A["operator"], "BADGE_CHAIN_LABEL": "Local",
-                            "BADGE_IMAGE_BASE": "https://registrai.cc/badge/local/"})
-        BADGE = re.search(r"VerifiedBuilderBadge:\s*(0x[0-9a-fA-F]{40})", blog).group(1)
+        # the soulbound badge from phase 1: ADMIN issues, the operator may only flip lapsed, the deployer holds nothing
+        BADGE = S["VerifiedBuilderBadge"]
         check(c.call(BADGE, "hasRole(bytes32,address)(bool)", "0x" + "00" * 32, A["deployer"]) == "false"
               and c.call(BADGE, "hasRole(bytes32,address)(bool)", run(["cast", "keccak", "STATUS_ROLE"]).stdout.strip(), A["operator"]) == "true",
-              "badge deployed: the deployer holds no role, the operator holds STATUS only")
+              "badge (phase 1): the deployer holds no role, the operator holds STATUS only")
 
         # the real onboarding batch, executed as the multisig would
         out_dir = root / "batch"
@@ -663,6 +680,13 @@ def verified_builders_stage(c, A, S, ui, run):
         (wk / "registrai.json").write_text(json.dumps(fb))          # proof back
         log3 = keeper_tick_full()
         check(c.call(BADGE, "lapsed(uint256)(bool)", sB) == "false", "proof restored: the badge is verified again on the next tick", log3[-1200:])
+        r = run(["python3", "keeper/builders_keeper.py"], cwd=ARC, ok=False,
+                env={"RPC": c.rpc, "PRIVATE_KEY": KEYS["operator"], "BUILDER_REGISTRY": S["BuilderRegistry"],
+                     "CARETAKER_REGISTRY": S["CaretakerRegistry"], "VERIFIED_BADGE": BADGE, "CHAIN_ID": "31337",
+                     "BUILDERS_DATA_DIR": str(data_dir), **proof_env})
+        out = r.stdout + r.stderr
+        check(r.returncode == 0 and "2 verified" in out and "marked" not in out,
+              "the phase-1 keeper agrees with the full keeper: both builders verified, no badge change", out[-800:])
     finally:
         for srv in (gh_srv, dom_srv, api_srv):
             srv.shutdown()
