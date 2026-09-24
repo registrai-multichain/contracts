@@ -204,7 +204,7 @@ def rehearse(c, A):
     check(fp is not None, "caretaker.feed_params accepts an independent resolver", why)
     check(caretaker.feed_params(A["operator"], A["operator"], "10000000")[0] is None, "caretaker refuses to make itself resolver")
     meth = run(["cast", "keccak", "example/shipper-ships-release"]).stdout.strip()
-    c.send("operator", USDC, "approve(address,uint256)", S["Registry"], 2 * fp["bond"])
+    c.send("operator", USDC, "approve(address,uint256)", S["Registry"], fp["bond"])
     r = json.loads(c.send("operator", S["Registry"], "createFeed(string,bytes32,uint256,uint256,address)",
                           "example/shipper-ships-release", meth, fp["bond"], fp["window"], fp["resolver"]).stdout)
     feed = next(l["topics"][1] for l in r["logs"] if l["address"].lower() == S["Registry"].lower())
