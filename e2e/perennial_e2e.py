@@ -286,8 +286,15 @@ def rehearse(c, A):
     print("== 4. m1 (YES): create via the UI path, trade, the builder ships, keeper settles")
     for who in ("alice", "bob"):
         ui("deposit", who, amount=str(300 * U))
+    try:
+        ui("create", "alice", builderId=bid, feedId=feed, expiryIn=7200, liquidity=str(10 * U))
+        check(False, "create form must refuse a feed with no on-chain reading")
+    except SystemExit as refused:
+        check("no on-chain reading" in str(refused), "create form refuses while the builder's count has never been read")
+    # the caretaker publishes the builder's current count (0) as soon as the feed exists
+    c.send("operator", S["Attestation"], "attest(bytes32,int256,bytes32)", feed, 0, "0x" + "00" * 31 + "01")
     m1 = ui("create", "alice", builderId=bid, feedId=feed, expiryIn=7200, liquidity=str(10 * U))
-    check(m1["threshold"] == "1" and m1["latest"] is None, "create form: threshold = latest count (none) + 1 = 1", m1)
+    check(m1["threshold"] == "1" and m1["latest"] == "0", "create form: threshold = latest on-chain reading (0) + 1 = 1", m1)
     M1 = m1["marketId"]
     b1 = ui("buy", "bob", marketId=M1, side="Yes", amount=str(20 * U))
     check(b1["quoteMatched"], f"bob buys YES 20 USDC -> {int(b1['sharesOut'])/U:.4f} shares, exactly the UI quote")
@@ -398,6 +405,7 @@ def rehearse(c, A):
                           "example/second-ships-release", meth2, fp["bond"], fp["window"], fp["resolver"]).stdout)
     feed2 = next(l["topics"][1] for l in r["logs"] if l["address"].lower() == S["Registry"].lower())
     c.send("operator", S["Registry"], "registerAgent(bytes32,bytes32,uint256)", feed2, meth2, fp["bond"])
+    c.send("operator", S["Attestation"], "attest(bytes32,int256,bytes32)", feed2, 0, "0x" + "00" * 31 + "02")   # first reading: 0
     m4 = ui("create", "alice", builderId=bid2, feedId=feed2, expiryIn=7200, liquidity=str(10 * U))
     M4 = m4["marketId"]
     check(ui("buy", "bob", marketId=M4, side="Yes", amount=str(10 * U))["quoteMatched"], "bob buys YES 10 on m4 at the UI quote")
