@@ -118,6 +118,9 @@ contract ProgressPool is AccessControl {
         uint256 w = progressWeight[epoch][builder];
         if (w == 0) revert NoProgress();
         uint256 tw = totalWeight[epoch];
+        // KNOWN (review L2, deliberately not fixed here): flooring each share
+        // leaves up to (builders - 1) units of an epoch's pot reserved in
+        // unclaimedReserved forever. Dust-sized; tracked for a later release.
         amount = (epochPot[epoch] * w) / tw;
         claimed[epoch][builder] = true;
         if (amount > 0) {

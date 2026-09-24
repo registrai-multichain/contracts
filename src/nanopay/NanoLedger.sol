@@ -270,7 +270,11 @@ contract NanoLedger is AccessControl, ReentrancyGuard {
     // ───────────────────────── accrual pools ─────────────────────────
 
     /// @notice Create a distribution pool. Only a registered source (e.g.
-    /// MarketsV4) can create and credit pools. poolId is caller-namespaced.
+    /// MarketsV4) can create and credit pools.
+    /// KNOWN (review L3, deliberately not fixed here): poolId is a single global
+    /// namespace, not per source — first source to create an id owns it, so two
+    /// sources could collide on (or squat) an id. Only sources the governor
+    /// registers can create pools; keep that set to MarketsV4 until fixed.
     function createPool(bytes32 poolId) external {
         if (!isSource[msg.sender]) revert NotSource();
         if (pools[poolId].source != address(0)) revert PoolExists();
