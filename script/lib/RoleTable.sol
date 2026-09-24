@@ -159,6 +159,30 @@ abstract contract RoleTable is DeployBase {
         }
     }
 
+    /// @notice Phase 2 guard for the phase-1 ONBOARDER (a hot wallet with badge
+    /// ISSUER + CaretakerRegistry GOVERNOR): it must hold no other admin-type role
+    /// anywhere in the market stack, and never progress/proposer/resolver. Its
+    /// CaretakerRegistry GOVERNOR is allowed but logged — the owner keeps or
+    /// revokes it deliberately before markets open.
+    function _verifyOnboarder(Stack memory s, address onboarder, bool print) internal view {
+        if (onboarder == address(0)) return;
+        (address[] memory where, bytes32[] memory roles, string[] memory names) = _adminRoles(s);
+        for (uint256 i; i < where.length; i++) {
+            bool h = _has(where[i], roles[i], onboarder);
+            if (where[i] == s.caretakers && roles[i] == GOVERNOR) {
+                if (print) {
+                    console2.log(string.concat("ONBOARDER CaretakerRegistry GOVERNOR (setCaretaker) = ", _b(h), "  <- keep or revoke before markets"));
+                }
+                continue;
+            }
+            require(!h, string.concat("ONBOARDER holds ", names[i]));
+        }
+        require(!_has(s.pool, PROGRESS, onboarder), "ONBOARDER holds ProgressPool PROGRESS");
+        require(!_has(s.arbiter, PROPOSER, onboarder), "ONBOARDER holds ProgressArbiter PROPOSER");
+        require(!_has(s.arbiter, RESOLVER, onboarder), "ONBOARDER holds ProgressArbiter RESOLVER");
+        if (print) console2.log("OK: onboarder holds no market/admin role");
+    }
+
     function _b(bool v) internal pure returns (string memory) {
         return v ? "yes" : "no";
     }

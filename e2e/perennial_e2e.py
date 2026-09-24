@@ -87,7 +87,7 @@ class Chain:
     def __init__(self):
         s = socket.socket(); s.bind(("127.0.0.1", 0)); self.port = s.getsockname()[1]; s.close()
         self.rpc = f"http://127.0.0.1:{self.port}"
-        self.proc = subprocess.Popen(["anvil", "--port", str(self.port), "--silent", "--accounts", "15"])
+        self.proc = subprocess.Popen(["anvil", "--port", str(self.port), "--silent", "--accounts", "16"])
         for _ in range(50):
             if run(["cast", "chain-id", "--rpc-url", self.rpc], ok=False).stdout.strip() == "31337":
                 break
@@ -135,7 +135,7 @@ def main():
     # two more dev accounts from anvil's public test mnemonic: a second builder and an
     # independent watcher who challenges a wrong answer
     mn = "test test test test test test test test test test test junk"
-    for name, idx in (("builder2", 10), ("watcher", 11), ("vbuilderA", 12), ("vbuilderB", 13), ("stranger", 14)):
+    for name, idx in (("builder2", 10), ("watcher", 11), ("vbuilderA", 12), ("vbuilderB", 13), ("stranger", 14), ("onboarder", 15)):
         KEYS[name] = run(["cast", "wallet", "private-key", "--mnemonic", mn, "--mnemonic-index", str(idx)]).stdout.strip()
     A = {k: c.addr(k) for k in KEYS}
     try:
@@ -169,11 +169,18 @@ def rehearse(c, A):
     check(c.uint(USDC, "balanceOf(address)(uint256)", A["alice"]) == 1_000 * U, "USDC live at 0x3600 on the local chain")
 
     print("== 1a. mainnet phase 1: builders before markets (registries + badge only)")
-    log = forge_script(c, "DeployBuilders", {"ADMIN": A["admin"], "OPERATOR": A["operator"], "BADGE_CHAIN_LABEL": "Local",
+    log = forge_script(c, "DeployBuilders", {"ADMIN": A["admin"], "OPERATOR": A["operator"], "ONBOARDER": A["onboarder"], "BADGE_CHAIN_LABEL": "Local",
                        "BADGE_IMAGE_BASE": "https://registrai.cc/badge/local/"})
     S = {k: grab(log, k) for k in ("BuilderRegistry", "CaretakerRegistry", "VerifiedBuilderBadge")}
     code_of = lambda a: run(["cast", "code", a, "--rpc-url", c.rpc]).stdout.strip()
     check(all(code_of(a) not in ("", "0x") for a in S.values()), "phase 1 deploys exactly the builder side: registries + badge")
+    role = lambda name: run(["cast", "keccak", name]).stdout.strip()
+    has = lambda where, r, who: c.call(where, "hasRole(bytes32,address)(bool)", r, who) == "true"
+    check(has(S["VerifiedBuilderBadge"], role("ISSUER_ROLE"), A["onboarder"]) and has(S["CaretakerRegistry"], role("GOVERNOR_ROLE"), A["onboarder"])
+          and not has(S["BuilderRegistry"], role("REGISTRAR_ROLE"), A["onboarder"])
+          and not any(has(S[k], "0x" + "00" * 32, A["onboarder"]) for k in ("BuilderRegistry", "CaretakerRegistry", "VerifiedBuilderBadge"))
+          and not any(has(S[k], "0x" + "00" * 32, A["deployer"]) for k in ("BuilderRegistry", "CaretakerRegistry", "VerifiedBuilderBadge")),
+          "the onboarder hot wallet holds only badge ISSUER + caretaker GOVERNOR; the deployer holds nothing")
     p1dir = pathlib.Path(tempfile_mod.mkdtemp(prefix="p1-keeper-"))
     r = run(["python3", "keeper/builders_keeper.py"], cwd=ARC, ok=False,
             env={"RPC": c.rpc, "PRIVATE_KEY": KEYS["operator"], "BUILDER_REGISTRY": S["BuilderRegistry"],
@@ -212,7 +219,8 @@ def rehearse(c, A):
              "PROGRESS_POOL": S["ProgressPool"], "MARKETS_PERENNIAL": S["MarketsPerennial"],
              "MARKETS_V4": S["MarketsV4"], "PROGRESS_ARBITER": S["ProgressArbiter"]}
     forge_script(c, "Handoff", stack)
-    forge_script(c, "VerifyRoles", {**stack, "DEPLOYER": A["deployer"]})
+    vlog = forge_script(c, "VerifyRoles", {**stack, "DEPLOYER": A["deployer"], "ONBOARDER": A["onboarder"]})
+    check("OK: onboarder holds no market/admin role" in vlog, "phase 2 VerifyRoles: the onboarder holds no market or admin role")
     check(True, "DeployOracle -> NanoLedger -> Perennial -> Arbiter -> NanoStack -> Handoff -> VerifyRoles all succeeded")
 
     gov = c.call(S["ProgressPool"], "GOVERNOR_ROLE()(bytes32)")
@@ -611,8 +619,9 @@ def verified_builders_stage(c, A, S, ui, run):
               f"onboard-batch: setCaretaker + issue for each of the two pending builders ({len(txs)} txs)")
         check(all(txs.index(to_ct[k]) < txs.index(to_badge[k]) for k in range(2)),
               "each builder's badge is issued after its caretaker is set, in the same batch")
+        # the fast path: the onboarder hot wallet sends the batch itself (no Safe session)
         for t in txs:
-            run(["cast", "send", t["to"], t["data"], "--rpc-url", c.rpc, "--private-key", KEYS["admin"]])
+            run(["cast", "send", t["to"], t["data"], "--rpc-url", c.rpc, "--private-key", KEYS["onboarder"]])
         check(all(c.call(S["CaretakerRegistry"], "isCaretaker(uint256,address)(bool)", i, A["operator"]) == "true" for i in (idA, idB)),
               "after the batch our operator is caretaker of both builders")
         sA = c.uint(BADGE, "serialOf(uint256)(uint256)", idA); sB = c.uint(BADGE, "serialOf(uint256)(uint256)", idB)

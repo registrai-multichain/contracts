@@ -29,6 +29,13 @@ import {VerifyRoles} from "../../script/VerifyRoles.s.sol";
 /// Stand-in for a Safe / timelock: all Handoff needs is that ADMIN has code.
 contract SafeStub {}
 
+/// Exposes RoleTable's phase-2 onboarder guard.
+contract OnboarderCheck is RoleTable {
+    function check(Stack memory s, address onboarder) external view {
+        _verifyOnboarder(s, onboarder, false);
+    }
+}
+
 /// Exposes DeployBase's env helpers.
 contract EnvHarness is DeployBase {
     function uintReq(string memory name, uint256 d) external view returns (uint256) {
@@ -210,10 +217,13 @@ contract DeployScriptsTest is Test {
 
     // ───────────── phase 1: builders before markets ─────────────
 
+    address onboarder = makeAddr("onboarder");
+
     function _buildersCfg() internal view returns (DeployBuilders.Config memory c) {
         c.deployer = deployer;
         c.admin = admin;
         c.operator = proposer; // the keeper operator
+        c.onboarder = onboarder;
         c.chainLabel = "Arc Mainnet";
         c.imageBase = "https://registrai.cc/badge/arc/";
         c.externalBase = "https://registrai.cc/builders/?builder=";
@@ -230,11 +240,12 @@ contract DeployScriptsTest is Test {
         assertTrue(builders.hasRole(REGISTRAR, admin) && caretakers.hasRole(GOVERNOR, admin));
         assertTrue(badge.hasRole(badge.STATUS_ROLE(), proposer) && !badge.hasRole(badge.ISSUER_ROLE(), proposer));
 
-        // the gallery's life before any market: claim, onboard, badge
+        // the gallery's life before any market: claim, then the ONBOARDER (hot
+        // wallet) onboards without the Safe
         address alice = makeAddr("alice");
         vm.prank(alice);
         uint256 id = builders.registerBuilder("registrai:github:alice/app");
-        vm.startPrank(admin);
+        vm.startPrank(onboarder);
         caretakers.setCaretaker(id, proposer);
         uint256 serial = badge.issue(id);
         vm.stopPrank();
@@ -258,6 +269,7 @@ contract DeployScriptsTest is Test {
         new Handoff().handoff(_stack(), admin, deployer);
         _assertDeployerHoldsNothing();
         new VerifyRoles().verify(_stack(), admin, deployer);
+        new OnboarderCheck().check(_stack(), onboarder);
 
         // everything done in phase 1 carried over
         assertEq(builders.builderIdOf(alice), id);
@@ -290,6 +302,78 @@ contract DeployScriptsTest is Test {
         c.admin = makeAddr("eoaAdmin");
         vm.expectRevert(bytes("mainnet: ADMIN must be a contract (Safe/timelock), not an EOA"));
         d.deploy(c);
+    }
+
+    /// The onboarder can onboard, issue and revoke — and nothing else; the Safe
+    /// takes its roles back in one call each; the deployer never keeps a role.
+    function test_phase1Onboarder_isLimitedAndRemovable() public {
+        (BuilderRegistry b, CaretakerRegistry ct, VerifiedBuilderBadge badge) = new DeployBuilders().deploy(_buildersCfg());
+        bytes32 issuer = badge.ISSUER_ROLE();
+        bytes32 gov = ct.GOVERNOR_ROLE();
+        assertTrue(badge.hasRole(issuer, onboarder) && ct.hasRole(gov, onboarder));
+        assertFalse(badge.hasRole(DEFAULT_ADMIN, onboarder) || ct.hasRole(DEFAULT_ADMIN, onboarder) || b.hasRole(DEFAULT_ADMIN, onboarder));
+        assertFalse(b.hasRole(REGISTRAR, onboarder) || badge.hasRole(badge.STATUS_ROLE(), onboarder));
+        assertFalse(badge.hasRole(DEFAULT_ADMIN, deployer) || badge.hasRole(issuer, deployer) || ct.hasRole(DEFAULT_ADMIN, deployer) || ct.hasRole(gov, deployer));
+        assertTrue(badge.hasRole(DEFAULT_ADMIN, admin) && badge.hasRole(issuer, admin) && ct.hasRole(DEFAULT_ADMIN, admin) && ct.hasRole(gov, admin));
+
+        address bob = makeAddr("bob");
+        vm.prank(bob);
+        uint256 id = b.registerBuilder("registrai:domain:bob.xyz");
+        vm.startPrank(onboarder);
+        ct.setCaretaker(id, proposer);
+        badge.issue(id);
+        badge.revoke(id);
+        vm.expectRevert();
+        b.setActive(id, false); // REGISTRAR stays with the Safe
+        vm.expectRevert();
+        b.registerFor(makeAddr("squat"), "registrai:github:x/y");
+        vm.expectRevert();
+        badge.grantRole(issuer, makeAddr("friend"));
+        vm.expectRevert();
+        badge.setBases("x", "y");
+        vm.expectRevert();
+        badge.setLapsed(id, true);
+        vm.stopPrank();
+
+        vm.startPrank(admin);
+        badge.revokeRole(issuer, onboarder);
+        ct.revokeRole(gov, onboarder);
+        vm.stopPrank();
+        vm.prank(onboarder);
+        vm.expectRevert();
+        badge.issue(id);
+    }
+
+    function test_phase1_withoutOnboarder_stillAllSafe() public {
+        DeployBuilders.Config memory c = _buildersCfg();
+        c.onboarder = address(0);
+        (BuilderRegistry b, CaretakerRegistry ct, VerifiedBuilderBadge badge) = new DeployBuilders().deploy(c);
+        assertTrue(badge.hasRole(badge.ISSUER_ROLE(), admin) && ct.hasRole(ct.GOVERNOR_ROLE(), admin) && b.hasRole(REGISTRAR, admin));
+        assertFalse(badge.hasRole(DEFAULT_ADMIN, deployer) || ct.hasRole(DEFAULT_ADMIN, deployer));
+    }
+
+    function test_phase1_onboarderMustBeDistinct() public {
+        DeployBuilders d = new DeployBuilders();
+        DeployBuilders.Config memory c = _buildersCfg();
+        c.onboarder = admin;
+        vm.expectRevert(bytes("ONBOARDER must differ from ADMIN, OPERATOR and the deployer"));
+        d.deploy(c);
+        c.onboarder = proposer;
+        vm.expectRevert(bytes("ONBOARDER must differ from ADMIN, OPERATOR and the deployer"));
+        d.deploy(c);
+        c.onboarder = deployer;
+        vm.expectRevert(bytes("ONBOARDER must differ from ADMIN, OPERATOR and the deployer"));
+        d.deploy(c);
+    }
+
+    /// Phase 2 guard: an onboarder holding any market/admin role fails VerifyRoles.
+    function test_phase2_verifyRolesRefusesOnboarderWithMarketRole() public {
+        _phase1ThenMarkets();
+        vm.prank(admin);
+        pool.grantRole(GOVERNOR, onboarder);
+        OnboarderCheck chk = new OnboarderCheck();
+        vm.expectRevert(bytes("ONBOARDER holds ProgressPool GOVERNOR"));
+        chk.check(_stack(), onboarder);
     }
 
     function test_perennial_reuseNeedsBothMatchingRegistries() public {

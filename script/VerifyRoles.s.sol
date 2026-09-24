@@ -10,11 +10,14 @@ import {RoleTable} from "./lib/RoleTable.sol";
 ///
 /// @dev env: ADMIN, DEPLOYER, REGISTRY, ATTESTATION, NANO_LEDGER,
 ///      BUILDER_REGISTRY, CARETAKER_REGISTRY, PROGRESS_POOL, MARKETS_PERENNIAL,
-///      MARKETS_V4, PROGRESS_ARBITER — all required.
+///      MARKETS_V4, PROGRESS_ARBITER — all required. ONBOARDER optional: the
+///      phase-1 hot wallet, asserted to hold no market/admin role.
 contract VerifyRoles is RoleTable {
     function run() external view {
         _guardChain();
-        verify(_loadStack(), vm.envAddress("ADMIN"), vm.envAddress("DEPLOYER"));
+        Stack memory s = _loadStack();
+        verify(s, vm.envAddress("ADMIN"), vm.envAddress("DEPLOYER"));
+        _verifyOnboarder(s, vm.envOr("ONBOARDER", address(0)), true);
     }
 
     function verify(Stack memory s, address admin, address deployer) public view {
