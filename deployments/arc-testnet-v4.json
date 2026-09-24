@@ -1,0 +1,41 @@
+{
+  "network": "arc-testnet",
+  "chainId": 5042002,
+  "stack": "v4: builders with projects + recovery; BuilderFund (progressive tax) + SeasonPool",
+  "deployedAt": "2026-09-24",
+  "phase1": {
+    "deployBlock": 63826822,
+    "script": "DeployBuilders",
+    "contracts": {
+      "BuilderRegistry": "0xB52FC2AB9b2457D8c56d3b4A624543aD61c70D9C",
+      "CaretakerRegistry": "0x7adDA1fe8c6F3A5D405dc1F1aF68B42f2F6CAa78",
+      "VerifiedBuilderBadge": "0xBF7FF680e0Ee7472E244cf2550EE016939cb6335"
+    }
+  },
+  "phase2": {
+    "deployBlock": 63826991,
+    "order": "DeployOracle -> DeployNanoLedger -> DeployPerennial (reuses phase-1 registries) -> DeployNanoStack -> Handoff -> VerifyRoles (OK)",
+    "epochLength": 86400,
+    "settlementWindow": 86400,
+    "resolutionGrace": 604800,
+    "minBond": "10 USDC",
+    "contracts": {
+      "Registry": "0x770d0feedcDa264c9d5C835D56fA7903cbC5719c",
+      "Attestation": "0xeA2804dE57Ac57D17E77fC7ad5F55726636E74B7",
+      "Dispute": "0x9c0C81C11Fe510EB89adE831c13C066Cc5Dad411",
+      "NanoLedger": "0x02D278930B67A290fEfE93Ac049a086A9b5e0FB5",
+      "SeasonPool": "0x56b3Ffc1c5DA4F867C3Fd56Be5dA731d457E32aA",
+      "BuilderFund": "0x7e83096F8Ef50024e7bE106E47F1BD8ce2e882D1",
+      "MarketsPerennial": "0xF12F3427d9b47f4019809E7B753494A32C3e3a3B",
+      "MarketsV4": "0xCcf185a2200B24624c404fF373BbEf1423aE09c6"
+    }
+  },
+  "roles": {
+    "admin_all": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+    "operator_agent_badgeStatus": "0xf26db19bc8DC33c9A72399128CF5cfB5dDC76263",
+    "dispute_resolver": "0x580a7791DBF10578ce1DBF7A7A438B16Ee9CAAfd",
+    "onboarder_issuer_governor": "0x01853CC09BD811904b4EEB199e02E0e13d812cef",
+    "protocol_treasury": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+    "v4_treasury": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF"
+  }
+}

@@ -44,13 +44,6 @@
     "SuffixTreasury_xyz": "0x41fFAf360C0F3120732BF69530a667Eec57FD7E3",
     "SuffixTreasury_fun": "0xcA9D317c846186F0B3f8446D8df94d6Ca826B1EB",
     "CurveMarket": "0xf5d0857df82f7bb26e81f59a5cc10c4ddffe2f2c",
-    "NanoLedger": "0x7c1470Df1759848c15cbd9228504105501101a99",
-    "MarketsV4": "0x6f704Cba9a026143F584B3Fc0805DA45f609138b",
-    "BuilderRegistry": "0x10F8D6D5905E2C4dc565a1894c102B25E9d21DF4",
-    "CaretakerRegistry": "0x02CfdE88a97A56A7dbDC05F6c7BD3Dbc34393876",
-    "ProgressPool": "0xC5039177a5A2B6597Bb1587b08494968bc1eC0C0",
-    "MarketsPerennial": "0x6a25D79D7664c284c0D130B0a385b9cAdf3481c7",
-    "ProgressArbiter": "0x8Cb2FAD547cFc42081CA04f4c3c03588E27E0e98",
     "NanoLedger_retired": "0x71Ea02b2E75e6C65A41DF9E3c78E14F9ae2232D9",
     "MarketsV4_retired": "0x7bCdf186a0C93A32B48ECC0D0d1160e75Bb2Ee03",
     "BuilderRegistry_retired": "0x16E7604882784530e2aAC279afb82198175131FF",
@@ -60,7 +53,25 @@
     "ProgressArbiter_retired": "0x7b588ce1b65a4f46d34Ae92472aF7dFc6356C959",
     "Registry_v3": "0xb4BE6114a5103aBFfaBB053b740AD6Dc2aF27652",
     "Attestation_v3": "0xE75961E281A83EB5368fFF43330f0E815b9b3B41",
-    "Dispute_v3": "0x3eEfdE8ecc78457aB715f1b9A7C82fBCd416c329"
+    "Dispute_v3": "0x3eEfdE8ecc78457aB715f1b9A7C82fBCd416c329",
+    "NanoLedger_v3": "0x7c1470Df1759848c15cbd9228504105501101a99",
+    "MarketsV4_v3": "0x6f704Cba9a026143F584B3Fc0805DA45f609138b",
+    "BuilderRegistry_v3": "0x10F8D6D5905E2C4dc565a1894c102B25E9d21DF4",
+    "CaretakerRegistry_v3": "0x02CfdE88a97A56A7dbDC05F6c7BD3Dbc34393876",
+    "ProgressPool_v3": "0xC5039177a5A2B6597Bb1587b08494968bc1eC0C0",
+    "MarketsPerennial_v3": "0x6a25D79D7664c284c0D130B0a385b9cAdf3481c7",
+    "ProgressArbiter_v3": "0x8Cb2FAD547cFc42081CA04f4c3c03588E27E0e98",
+    "NanoLedger": "0x02D278930B67A290fEfE93Ac049a086A9b5e0FB5",
+    "MarketsV4": "0xCcf185a2200B24624c404fF373BbEf1423aE09c6",
+    "BuilderRegistry": "0xB52FC2AB9b2457D8c56d3b4A624543aD61c70D9C",
+    "CaretakerRegistry": "0x7adDA1fe8c6F3A5D405dc1F1aF68B42f2F6CAa78",
+    "MarketsPerennial": "0xF12F3427d9b47f4019809E7B753494A32C3e3a3B",
+    "BuilderFund": "0x7e83096F8Ef50024e7bE106E47F1BD8ce2e882D1",
+    "SeasonPool": "0x56b3Ffc1c5DA4F867C3Fd56Be5dA731d457E32aA",
+    "VerifiedBuilderBadge": "0xBF7FF680e0Ee7472E244cf2550EE016939cb6335",
+    "Registry_v4": "0x770d0feedcDa264c9d5C835D56fA7903cbC5719c",
+    "Attestation_v4": "0xeA2804dE57Ac57D17E77fC7ad5F55726636E74B7",
+    "Dispute_v4": "0x9c0C81C11Fe510EB89adE831c13C066Cc5Dad411"
   },
   "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
   "feeds": [
@@ -350,7 +361,7 @@
         "The caretaker MUST run as operator_addr \u2014 propose needs PROPOSER_ROLE + registered caretaker. Running as the deployer degrades silently to 'propose FAILED' every tick; the runner now preflights the role and exits 1 rather than half-working."
       ]
     },
-    "deployBlock": 63752157,
+    "deployBlock": 63826822,
     "blockTimeSeconds": 0.555,
     "builders": {
       "note": "Builder #1 (the deployer, registered during testing) was setActive(false) on 2026-09-21 so the atlas starts empty for a real registration. Builder #2 was the junk 0x...c2 the caretaker onboarded from demo builders.json, also inactive. There is no delete in BuilderRegistry, so ids 1 and 2 stay occupied and the next real registration is #3.",
@@ -370,6 +381,16 @@
       "note": "Contract keys above now point at this stack; the previous Perennial stack is kept under *_retired keys."
     },
     "verifiedBuilderBadge": {
+      "address": "0xBF7FF680e0Ee7472E244cf2550EE016939cb6335",
+      "deployBlock": 63826822,
+      "admin_issuer_revoker": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+      "status_operator": "0xf26db19bc8DC33c9A72399128CF5cfB5dDC76263",
+      "onboarder_issuer": "0x01853CC09BD811904b4EEB199e02E0e13d812cef",
+      "imageBase": "https://registrai.cc/badge/arc-testnet/",
+      "externalBase": "https://builder.registrai.cc/builders/?builder="
+    },
+    "deployBlock_v3": 63752157,
+    "verifiedBuilderBadge_v3": {
       "address": "0x05de78E9Ff17ccE47D7F4E9170fdfC130Abe278c",
       "deployBlock": 63788953,
       "deployedAt": "2026-09-24",
@@ -380,6 +401,21 @@
       "externalBase": "https://builder.registrai.cc/builders/?builder=",
       "spec": "docs/superpowers/specs/2026-09-24-verified-builder-badge-design.md",
       "setBasesTx": "0xbef11d560c185845f250e7bb0c7f184c06852bc3d416a4151a20becc30cfd4e4"
+    },
+    "v4": {
+      "record": "deployments/arc-testnet-v4.json",
+      "builderFund": {
+        "address": "0x7e83096F8Ef50024e7bE106E47F1BD8ce2e882D1"
+      },
+      "seasonPool": {
+        "address": "0x56b3Ffc1c5DA4F867C3Fd56Be5dA731d457E32aA"
+      }
+    },
+    "builderFund": {
+      "address": "0x7e83096F8Ef50024e7bE106E47F1BD8ce2e882D1"
+    },
+    "seasonPool": {
+      "address": "0x56b3Ffc1c5DA4F867C3Fd56Be5dA731d457E32aA"
     }
   }
 }
