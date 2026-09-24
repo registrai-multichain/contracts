@@ -54,6 +54,7 @@ contract DeployScriptsTest is Test {
     address proposer = makeAddr("proposer");
     address arbResolver = makeAddr("arbResolver");
     address treasury = makeAddr("treasury");
+    address protocolTreasury = makeAddr("protocolTreasury");
 
     Registry registry;
     Attestation attestation;
@@ -105,6 +106,7 @@ contract DeployScriptsTest is Test {
         c.feeTreasuryBps = 35;
         c.feeAgentBps = 15;
         c.forfeitSink = address(0); // commons
+        c.protocolTreasury = protocolTreasury;
         c.approvedAgent = agent;
         c.disputeResolver = disputeResolver;
     }
@@ -193,6 +195,7 @@ contract DeployScriptsTest is Test {
         assertTrue(pool.hasRole(DEFAULT_ADMIN, deployer));
         assertTrue(ledger.isSource(address(v4)));
         assertEq(perennial.forfeitSink(), address(pool));
+        assertEq(pool.PROTOCOL_TREASURY(), protocolTreasury);
         assertTrue(perennial.isApprovedFeed(bytes32(0), agent) == false);
 
         new Handoff().handoff(_stack(), admin, deployer);
@@ -388,6 +391,23 @@ contract DeployScriptsTest is Test {
         c.epochLength = 0;
         (,, ProgressPool pl,) = p.deploy(c);
         assertEq(pl.epochLength(), 0);
+    }
+
+    function test_perennial_mainnetRefusesDeployerAsProtocolTreasury() public {
+        vm.chainId(5042);
+        vm.etch(0x3600000000000000000000000000000000000000, address(usdc).code);
+        (registry, attestation, dispute) = new DeployOracle().deploy(
+            DeployOracle.Config({deployer: deployer, usdc: _usdcAddr(), minBond: 10e6, points: address(0)})
+        );
+        ledger = new DeployNanoLedger().deploy(DeployNanoLedger.Config({deployer: deployer, usdc: _usdcAddr()}));
+        DeployPerennial p = new DeployPerennial();
+        DeployPerennial.Config memory c = _perennialCfg();
+        c.protocolTreasury = deployer;
+        vm.expectRevert(bytes("mainnet: PROTOCOL_TREASURY must not be the deployer"));
+        p.deploy(c);
+        c.protocolTreasury = address(0);
+        vm.expectRevert(bytes("protocol treasury not set"));
+        p.deploy(c);
     }
 
     function test_nanoStack_mainnetRefusesDeployerTreasuryAndFreshLedger() public {

@@ -152,6 +152,8 @@ abstract contract RoleTable is DeployBase {
             require(!MarketsPerennial(s.perennial).approvedResolver(deployer), "deployer is an approved resolver (perennial)");
             require(!MarketsV4(s.v4).approvedAgent(deployer), "deployer is an approved agent (v4)");
             require(!MarketsV4(s.v4).approvedResolver(deployer), "deployer is an approved resolver (v4)");
+            // The protocol fee recipient is immutable: it must not be the deployer's key.
+            require(ProgressPool(s.pool).PROTOCOL_TREASURY() != deployer, "deployer is the protocol treasury");
         }
     }
 

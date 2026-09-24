@@ -63,7 +63,7 @@ contract CaretakerInvariantTest is Test {
         builders.registerFor(address(0xB1), "b1");
         builders.registerFor(address(0xB2), "b2");
         builders.registerFor(address(0xB3), "b3");
-        pool = new ProgressPool(ledger, builders, caretakers, address(this), 0, 1 hours); // epochLength 0, 1h window
+        pool = new ProgressPool(ledger, builders, caretakers, address(this), 0, 1 hours, address(0x7EA5)); // epochLength 0, 1h window
         handler = new CaretakerHandler(pool, ledger);
 
         // the caretaker (the handler) holds PROGRESS_ROLE — the keeper seam

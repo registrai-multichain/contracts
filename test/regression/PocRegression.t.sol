@@ -56,7 +56,7 @@ contract PocRegressionTest is Test {
         builders = new BuilderRegistry(deployer);
         caretakers = new CaretakerRegistry(builders, deployer);
         builders.registerFor(address(0xB111), "b1");
-        pool = new ProgressPool(ledger, builders, caretakers, deployer, 0, 60);
+        pool = new ProgressPool(ledger, builders, caretakers, deployer, 0, 60, address(0x7EA5));
         markets = new MarketsPerennial(ledger, registry, attestation, builders, deployer, address(pool), WINDOW, GRACE);
         markets.setApprovedAgent(agent, true);
         markets.setApprovedResolver(resolver, true);

@@ -28,6 +28,9 @@ import {CaretakerRegistry} from "../src/perennial/CaretakerRegistry.sol";
 ///                          MAINNET [20/35/15] must sum to 70
 ///      PERENNIAL_FORFEIT_SINK MAINNET ["commons"] "commons" (= the new pool) or
 ///                                         an address; never the deployer on mainnet
+///      PROTOCOL_TREASURY   MAINNET [deployer] receives the pool's 1% fee on
+///                                         every builder payout; immutable; never
+///                                         the deployer on mainnet
 ///      APPROVED_AGENT      MAINNET [deployer] agent allowed to settle markets
 ///      DISPUTE_RESOLVER    MAINNET [deployer] resolver feeds must name
 contract DeployPerennial is DeployBase {
@@ -44,6 +47,7 @@ contract DeployPerennial is DeployBase {
         uint256 feeTreasuryBps;
         uint256 feeAgentBps;
         address forfeitSink; // address(0) = the commons (the pool deployed here)
+        address protocolTreasury;
         address approvedAgent;
         address disputeResolver;
     }
@@ -60,6 +64,7 @@ contract DeployPerennial is DeployBase {
         console2.log("MarketsPerennial: ", address(markets));
         console2.log("  commons -> pool:", markets.commons());
         console2.log("  forfeitSink:", markets.forfeitSink());
+        console2.log("  protocolTreasury:", c.protocolTreasury);
         console2.log("  epochLength:", c.epochLength);
         console2.log("  streamWindow:", c.streamWindow);
         console2.log("  settlementWindow:", c.settlementWindow);
@@ -83,6 +88,7 @@ contract DeployPerennial is DeployBase {
         c.feeAgentBps = _uintReq("PERENNIAL_FEE_AGENT_BPS", 15);
         string memory sink = _strReq("PERENNIAL_FORFEIT_SINK", "commons");
         c.forfeitSink = keccak256(bytes(sink)) == keccak256("commons") ? address(0) : vm.parseAddress(sink);
+        c.protocolTreasury = _addrReq("PROTOCOL_TREASURY", deployer);
         c.approvedAgent = _addrReq("APPROVED_AGENT", deployer);
         c.disputeResolver = _addrReq("DISPUTE_RESOLVER", deployer);
     }
@@ -95,18 +101,22 @@ contract DeployPerennial is DeployBase {
         require(c.deployer != address(0), "deployer not set");
         require(c.registry != address(0) && c.attestation != address(0) && c.ledger != address(0), "stack not set");
         require(c.approvedAgent != address(0) && c.disputeResolver != address(0), "agent/resolver not set");
+        require(c.protocolTreasury != address(0), "protocol treasury not set");
         if (_isMainnet()) {
             require(c.epochLength > 0, "mainnet: EPOCH_LENGTH must be > 0");
             require(c.disputeResolver != c.deployer, "mainnet: DISPUTE_RESOLVER must not be the deployer");
             require(c.approvedAgent != c.deployer, "mainnet: APPROVED_AGENT must not be the deployer");
             require(c.disputeResolver != c.approvedAgent, "mainnet: agent must not resolve its own disputes");
             require(c.forfeitSink != c.deployer, "mainnet: forfeit sink must not be the deployer");
+            require(c.protocolTreasury != c.deployer, "mainnet: PROTOCOL_TREASURY must not be the deployer");
         }
 
         vm.startBroadcast(c.deployer);
         builderReg = new BuilderRegistry(c.deployer);
         caretakers = new CaretakerRegistry(builderReg, c.deployer);
-        pool = new ProgressPool(NanoLedger(c.ledger), builderReg, caretakers, c.deployer, c.epochLength, c.streamWindow);
+        pool = new ProgressPool(
+            NanoLedger(c.ledger), builderReg, caretakers, c.deployer, c.epochLength, c.streamWindow, c.protocolTreasury
+        );
         markets = new MarketsPerennial(
             NanoLedger(c.ledger),
             Registry(c.registry),

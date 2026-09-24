@@ -43,7 +43,9 @@ contract RehearseSettlement is Script {
         BuilderRegistry builders = new BuilderRegistry(deployer);
         CaretakerRegistry caretakers = new CaretakerRegistry(builders, deployer);
         builders.registerFor(address(0xB111), "github.com/example/builder");
-        ProgressPool pool = new ProgressPool(ledger, builders, caretakers, deployer, 1 days, 1 hours);
+        // protocol treasury: a fixed address no rehearsal key controls
+        ProgressPool pool =
+            new ProgressPool(ledger, builders, caretakers, deployer, 1 days, 1 hours, address(0x7EA5));
         MarketsPerennial markets =
             new MarketsPerennial(ledger, registry, attestation, builders, deployer, address(pool), 1 hours, 1 days);
         // oracle allowlist: our agent, the foreign agent (so its market exists to
@@ -86,6 +88,7 @@ contract RehearseSettlement is Script {
         console2.log("REHEARSAL attestation", address(attestation));
         console2.log("REHEARSAL ledger", address(ledger));
         console2.log("REHEARSAL pool", address(pool));
+        console2.log("REHEARSAL protocol_treasury", pool.PROTOCOL_TREASURY());
         console2.log("REHEARSAL agent", agent);
         console2.log("REHEARSAL served_feed", vm.toString(served));
         console2.log("REHEARSAL m_served", vm.toString(mServed));

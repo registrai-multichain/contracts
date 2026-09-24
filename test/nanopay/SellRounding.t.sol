@@ -41,7 +41,7 @@ contract SellRoundingTest is Test {
         BuilderRegistry builders = new BuilderRegistry(address(this));
         CaretakerRegistry caretakers = new CaretakerRegistry(builders, address(this));
         builders.registerFor(address(0xB111), "b1");
-        ProgressPool pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours);
+        ProgressPool pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours, address(0x7EA5));
         perennial =
             new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), 1 hours, 1 days);
         v4 = new MarketsV4(ledger, registry, attestation, address(this), address(0x7EA), address(pool), 1 hours, 1 days, 40, 20, 10);

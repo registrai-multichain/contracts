@@ -32,6 +32,7 @@ contract PerennialTest is Test {
     address taker = address(0x7A4E);
     address builderA = address(0xB111);
     address builderB = address(0xB222);
+    address protocolTreasury = address(0x7EA5);
     bytes32 feedId;
     uint256 constant DW = 1 hours;
     uint256 constant EPOCH = 1 days;
@@ -49,7 +50,7 @@ contract PerennialTest is Test {
         caretakers = new CaretakerRegistry(builderReg, address(this));
         builderReg.registerFor(builderA, "ipfs://a");
         builderReg.registerFor(builderB, "ipfs://b");
-        pool = new ProgressPool(ledger, builderReg, caretakers, address(this), EPOCH, WINDOW);
+        pool = new ProgressPool(ledger, builderReg, caretakers, address(this), EPOCH, WINDOW, protocolTreasury);
         pool.grantRole(pool.PROGRESS_ROLE(), address(this)); // direct unit-test writer
         markets = new MarketsPerennial(ledger, registry, attestation, builderReg, address(this), address(pool), 1 hours, 1 days);
         markets.setApprovedAgent(oracle, true);
@@ -143,10 +144,12 @@ contract PerennialTest is Test {
         pool.closeEpoch();
         assertEq(pool.epochPot(0), 7e6, "pot snapshotted");
 
+        assertEq(pool.claimable(0, builderA), 5_197_500, "claimable is net of the 1% protocol fee");
         uint256 a = pool.claimFor(0, builderA);
         uint256 b = pool.claimFor(0, builderB);
-        assertEq(a, 525e4, "A share 3/4 of 7 USDC");
-        assertEq(b, 175e4, "B share 1/4 of 7 USDC");
+        assertEq(a, 5_197_500, "A share 3/4 of 7 USDC, minus 1%");
+        assertEq(b, 1_732_500, "B share 1/4 of 7 USDC, minus 1%");
+        assertEq(ledger.balanceOf(protocolTreasury), 70_000, "1% of 7 USDC to the protocol treasury");
         // funds stream, not lump: nothing withdrawable yet
         assertEq(ledger.balanceOf(builderA), 0, "no instant credit");
 
@@ -155,8 +158,8 @@ contract PerennialTest is Test {
         vm.warp(pool.epochStart() + 2 * WINDOW);
         ledger.settleStream(idA);
         ledger.settleStream(idB);
-        assertEq(ledger.balanceOf(builderA), 525e4, "A fully streamed");
-        assertEq(ledger.balanceOf(builderB), 175e4, "B fully streamed");
+        assertEq(ledger.balanceOf(builderA), 5_197_500, "A fully streamed");
+        assertEq(ledger.balanceOf(builderB), 1_732_500, "B fully streamed");
         _solvent();
 
         vm.expectRevert(ProgressPool.AlreadyClaimed.selector);
@@ -178,15 +181,15 @@ contract PerennialTest is Test {
         address caretaker = address(0xCA4E);
         vm.prank(caretaker);
         uint256 a = pool.claimFor(0, builderA);
-        assertEq(a, 525e4, "A share");
+        assertEq(a, 5_197_500, "A share, net");
         uint256 streamId = pool.streamIdOf(0, builderA);
         (, address to,, uint256 cap,,,) = ledger.streams(streamId);
         assertEq(to, builderA, "stream pays the builder");
-        assertEq(cap, 525e4, "stream cap = share");
+        assertEq(cap, 5_197_500, "stream cap = share minus the protocol fee");
         assertEq(ledger.balanceOf(caretaker), 0, "caretaker got nothing");
         vm.warp(pool.epochStart() + 2 * WINDOW);
         ledger.settleStream(streamId);
-        assertEq(ledger.balanceOf(builderA), 525e4, "builder credited after settle");
+        assertEq(ledger.balanceOf(builderA), 5_197_500, "builder credited after settle");
         _solvent();
     }
 
@@ -247,12 +250,12 @@ contract PerennialTest is Test {
         vm.warp(block.timestamp + EPOCH + 1);
         pool.closeEpoch();
 
-        pool.claimFor(0, builderA); // share = 7e6
+        pool.claimFor(0, builderA); // share 7e6, streams 6.93e6
         uint256 streamId = pool.streamIdOf(0, builderA);
         vm.warp(pool.epochStart() + WINDOW / 2);
         ledger.settleStream(streamId);
         uint256 half = ledger.balanceOf(builderA);
-        assertApproxEqAbs(half, 35e5, 1e5, "about half streamed at half window");
+        assertApproxEqAbs(half, 3_465e3, 1e5, "about half streamed at half window");
         _solvent();
     }
 
@@ -265,7 +268,7 @@ contract PerennialTest is Test {
         pool.closeEpoch();
         uint256 before = pool.pendingPot();
         pool.claimFor(0, builderA);
-        assertEq(pool.pendingPot(), before, "opening a stream does not change pendingPot");
+        assertEq(pool.pendingPot(), before, "opening a stream (and paying the fee) does not change pendingPot");
     }
 
     function test_setStreamWindow_governed() public {

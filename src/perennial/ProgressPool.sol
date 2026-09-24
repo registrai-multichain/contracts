@@ -7,7 +7,7 @@ import {BuilderRegistry} from "./BuilderRegistry.sol";
 import {CaretakerRegistry} from "./CaretakerRegistry.sol";
 
 /// @title ProgressPool. The Perennial funding commons.
-/// @notice Receives the treasury (commons) leg of every Perennial market's fee
+/// @notice Receives the commons leg of every Perennial market's resolution fee
 /// as a NanoLedger balance (MarketsPerennial internalTransfers it here), and
 /// distributes it to builders by VERIFIED PROGRESS, never by who attracted the
 /// betting. Attention fills the pool; progress draws it.
@@ -17,6 +17,11 @@ import {CaretakerRegistry} from "./CaretakerRegistry.sol";
 /// `closeEpoch` snapshots the unallocated pool balance as that epoch's pot;
 /// builders then `claim` a weight-proportional (linear) share. Linear keeps it
 /// sybil-neutral until a unique-builder gate enables quadratic.
+///
+/// Protocol fee: Registrai takes PROTOCOL_FEE_BPS (1%) of every builder payout,
+/// paid to the immutable PROTOCOL_TREASURY when the claim is made; it pays for
+/// the caretaker that monitors builders' milestones. The builder's stream carries
+/// the other 99%, and `claimable` reports that net amount.
 ///
 /// Solvency: ProgressPool only pays out of its own ledger balance via
 /// internalTransfer; `unclaimedReserved` tracks pot already earmarked to closed
@@ -29,6 +34,12 @@ contract ProgressPool is AccessControl {
     NanoLedger public immutable LEDGER;
     BuilderRegistry public immutable BUILDERS;
     CaretakerRegistry public immutable CARETAKERS;
+    /// @notice Receives the protocol fee on every builder payout. Immutable.
+    address public immutable PROTOCOL_TREASURY;
+
+    /// @notice 1% of each builder payout, fixed in code.
+    uint256 public constant PROTOCOL_FEE_BPS = 100;
+    uint256 public constant BPS = 10_000;
 
     uint256 public epochLength;
     uint256 public currentEpoch;
@@ -50,6 +61,7 @@ contract ProgressPool is AccessControl {
     event ClaimStreamed(
         uint256 indexed epoch, address indexed builder, uint256 streamId, uint256 amount, uint256 ratePerSec
     );
+    event ProtocolFeePaid(uint256 indexed epoch, address indexed builder, uint256 fee);
 
     error EpochNotOver();
     error EpochNotClosed();
@@ -65,16 +77,18 @@ contract ProgressPool is AccessControl {
         CaretakerRegistry caretakers_,
         address admin,
         uint256 epochLength_,
-        uint256 streamWindow_
+        uint256 streamWindow_,
+        address protocolTreasury_
     ) {
         if (
             address(ledger_) == address(0) || address(builders_) == address(0) || address(caretakers_) == address(0)
-                || admin == address(0)
+                || admin == address(0) || protocolTreasury_ == address(0)
         ) revert ZeroAddress();
         if (streamWindow_ == 0) revert ZeroWindow();
         LEDGER = ledger_;
         BUILDERS = builders_;
         CARETAKERS = caretakers_;
+        PROTOCOL_TREASURY = protocolTreasury_;
         epochLength = epochLength_;
         streamWindow = streamWindow_;
         epochStart = block.timestamp;
@@ -112,6 +126,8 @@ contract ProgressPool is AccessControl {
     /// @notice Permissionless: crank a builder's claim. Credits the BUILDER, not
     /// the caller. The amount is deterministic, so anyone (including the builder's
     /// caretaker) may call it; funds can only land on the named builder.
+    /// @return amount What the builder receives: its share of the pot minus the
+    /// PROTOCOL_FEE_BPS protocol fee (which goes to PROTOCOL_TREASURY).
     function claimFor(uint256 epoch, address builder) public returns (uint256 amount) {
         if (epoch >= currentEpoch) revert EpochNotClosed();
         if (claimed[epoch][builder]) revert AlreadyClaimed();
@@ -121,10 +137,19 @@ contract ProgressPool is AccessControl {
         // KNOWN (review L2, deliberately not fixed here): flooring each share
         // leaves up to (builders - 1) units of an epoch's pot reserved in
         // unclaimedReserved forever. Dust-sized; tracked for a later release.
-        amount = (epochPot[epoch] * w) / tw;
+        uint256 share = (epochPot[epoch] * w) / tw;
         claimed[epoch][builder] = true;
-        if (amount > 0) {
-            unclaimedReserved -= amount;
+        if (share > 0) {
+            unclaimedReserved -= share;
+            uint256 builderId = BUILDERS.builderIdOf(builder);
+            address payout = CARETAKERS.payoutOf(builderId);
+            if (payout == address(0)) revert BuilderInactive();
+            uint256 fee = (share * PROTOCOL_FEE_BPS) / BPS;
+            amount = share - fee; // >= 1 whenever share >= 1
+            if (fee > 0) {
+                LEDGER.internalTransfer(PROTOCOL_TREASURY, fee);
+                emit ProtocolFeePaid(epoch, builder, fee);
+            }
             // Integer rate: `cap` (== amount) always bounds the total, so no fund
             // loss and the pool can't be drained. Two rounding edges by design:
             // a share not divisible by the window vests slightly AFTER window end
@@ -133,9 +158,6 @@ contract ProgressPool is AccessControl {
             // seconds (near-instant) since a sub-unit/sec rate isn't expressible.
             uint256 rate = amount / streamWindow;
             if (rate == 0) rate = 1;
-            uint256 builderId = BUILDERS.builderIdOf(builder);
-            address payout = CARETAKERS.payoutOf(builderId);
-            if (payout == address(0)) revert BuilderInactive();
             uint256 id = LEDGER.openStream(payout, rate, amount);
             streamIdOf[epoch][builder] = id;
             emit ClaimStreamed(epoch, builder, id, amount, rate);
@@ -158,7 +180,8 @@ contract ProgressPool is AccessControl {
         if (epoch >= currentEpoch || claimed[epoch][builder]) return 0;
         uint256 tw = totalWeight[epoch];
         if (tw == 0) return 0;
-        return (epochPot[epoch] * progressWeight[epoch][builder]) / tw;
+        uint256 share = (epochPot[epoch] * progressWeight[epoch][builder]) / tw;
+        return share - (share * PROTOCOL_FEE_BPS) / BPS;
     }
 
     // ── governor ──

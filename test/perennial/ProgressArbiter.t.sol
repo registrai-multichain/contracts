@@ -33,7 +33,7 @@ contract ProgressArbiterTest is Test {
         caretakers = new CaretakerRegistry(builders, address(this));
         uint256 builderId = builders.registerFor(builder, "github.com/example/builder");
         caretakers.setCaretaker(builderId, caretaker);
-        pool = new ProgressPool(ledger, builders, caretakers, address(this), 0, 1 hours);
+        pool = new ProgressPool(ledger, builders, caretakers, address(this), 0, 1 hours, address(0x7EA5));
         arb = new ProgressArbiter(ledger, pool, builders, caretakers, address(this), WINDOW, STAKE, MAX_WEIGHT, TIMEOUT);
         pool.grantRole(pool.PROGRESS_ROLE(), address(arb));
         arb.grantRole(arb.PROPOSER_ROLE(), caretaker);

@@ -51,7 +51,7 @@ contract OracleAllowlistTest is Test {
         builders = new BuilderRegistry(address(this));
         CaretakerRegistry caretakers = new CaretakerRegistry(builders, address(this));
         builders.registerFor(address(0xB111), "b1");
-        pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours);
+        pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours, address(0x7EA5));
         perennial =
             new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), WINDOW, GRACE);
         v4 = new MarketsV4(ledger, registry, attestation, address(this), address(0x7EA), address(pool), WINDOW, GRACE, 40, 20, 10);
