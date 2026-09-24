@@ -1,0 +1,26 @@
+{
+  "network": "arc-testnet",
+  "chainId": 5042002,
+  "feeModel": "v3: 1% per trade, 30/20/50",
+  "roles": {
+    "operator_agent_proposer": "0xf26db19bc8DC33c9A72399128CF5cfB5dDC76263",
+    "admin": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+    "dispute_and_arbiter_resolver": "0x580a7791DBF10578ce1DBF7A7A438B16Ee9CAAfd",
+    "treasury": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF"
+  },
+  "stage": "verified",
+  "contracts": {
+    "deployBlock": 63752157,
+    "Registry": "0xb4BE6114a5103aBFfaBB053b740AD6Dc2aF27652",
+    "Attestation": "0xE75961E281A83EB5368fFF43330f0E815b9b3B41",
+    "Dispute": "0x3eEfdE8ecc78457aB715f1b9A7C82fBCd416c329",
+    "NanoLedger": "0x7c1470Df1759848c15cbd9228504105501101a99",
+    "BuilderRegistry": "0x10F8D6D5905E2C4dc565a1894c102B25E9d21DF4",
+    "CaretakerRegistry": "0x02CfdE88a97A56A7dbDC05F6c7BD3Dbc34393876",
+    "ProgressPool": "0xC5039177a5A2B6597Bb1587b08494968bc1eC0C0",
+    "MarketsPerennial": "0x6a25D79D7664c284c0D130B0a385b9cAdf3481c7",
+    "ProgressArbiter": "0x8Cb2FAD547cFc42081CA04f4c3c03588E27E0e98",
+    "MarketsV4": "0x6f704Cba9a026143F584B3Fc0805DA45f609138b",
+    "handedOff": true
+  }
+}
