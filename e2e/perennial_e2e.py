@@ -5,28 +5,46 @@ LOCAL END-TO-END REHEARSAL of Perennial — contracts, keeper, and UI together.
     python3 contracts/e2e/perennial_e2e.py          (needs anvil, forge, cast, node)
 
 What it proves, on a throwaway anvil chain (31337) with anvil's public dev keys:
-  1. The REAL deploy scripts run in the forced mainnet order — DeployOracle ->
-     DeployNanoLedger -> DeployPerennial -> DeployArbiter -> DeployNanoStack ->
-     Handoff -> VerifyRoles — and afterwards the deployer holds no power at all.
+  1. The REAL deploy scripts run in the forced mainnet order. Phase 1: DeployBuilders
+     (registries + badge, with an ONBOARDER hot wallet) and the phase-1 keeper runs with
+     no market on chain. Phase 2: DeployOracle -> DeployNanoLedger -> DeployPerennial
+     (reusing the phase-1 registries: SeasonPool + BuilderFund + MarketsPerennial) ->
+     DeployNanoStack -> Handoff -> VerifyRoles (with the ONBOARDER) — and afterwards the
+     deployer holds no power at all.
   2. The oracle allowlist refuses a self-made oracle at createMarket.
-  3. Three markets on one builder's milestone feed, driven through the UI's own
-     code path (frontend/scripts/e2e-perennial.ts) and settled by the keeper's own
-     code (keeper/settle.py):
+  3. Markets on one builder's milestone feed, driven through the UI's own code path
+     (frontend/scripts/e2e-perennial.ts) and settled by the keeper's own code:
         m1  YES   the builder ships; keeper attests in the window; keeper resolves
         m3  NO    opened after, threshold = count + 1; the count does not move
-        m2  VOID  keeper offline for its whole window; a trader voids it
-     Every buy/sell must fill exactly at the UI's quote, every redeem must pay
-     exactly the UI's preview.
-  4. The fees flow to the builder: arbiter proposal -> finalize -> closeEpoch ->
-     claim -> stream -> the builder withdraws USDC.
-  5. Accounting closes: markets drain to dust, every trade's 1% splits 30/20/50 to the
-     unit, nothing is charged at settlement, a void refunds net cost (after fees) and pays
-     a successful challenger the agent's held 20%.
+        m2  VOID  keeper offline for its whole window; a trader voids it -> the
+                  agent's held 20% goes to the SeasonPool
+        m4  VOID  our agent answers wrong, a watcher proves it and is paid the 20%
+     Every buy/sell fills exactly at the UI's quote, every redeem pays exactly the UI's
+     preview, every trade's 1% splits 30/20/50 and the 50% is credited as income of the
+     builder the market is about.
+  4. Builder income: after the epoch ends the keeper's income crank (keeper/income.py
+     inside caretaker.py) pays gross - progressive tax - 1% fee to payoutOf, the tax to
+     the SeasonPool (a high-volume builder crosses the first bracket), and a deactivated
+     builder's income is frozen until the Safe sweeps it to the SeasonPool.
+  5. Verified builders: one builder with two projects (github + domain), each with its
+     own signed proof; the onboarding batch (per builder) sent by the onboarder; the
+     badge; per-project milestone feeds and counts; one proof removed (project lapsed,
+     builder verified), all removed (badge lapsed), restored.
+  6. Owner transfer (proposeOwner/acceptOwnership) and a recovery (startRecovery ->
+     7 days -> finishRecovery): proofs re-signed, the badge follows the owner (same
+     serial), payouts follow the owner, income earned before the recovery is paid to
+     the recovered owner.
+  7. A season: the SeasonPool funded by real taxes + a void escrow + a frozen sweep;
+     season-rewards.ts over the window; the Safe file published as ADMIN; the builder
+     claims with its proof (20% cap enforced, one claim only).
+  8. Accounting closes: USDC conserved to the unit, ledger solvent, the fund's
+     outstanding == unclaimed income, the pool covers unallocated + reserved.
 
 Nothing here touches a real network: every step refuses a chain id other than 31337.
 """
-import json, os, re, shutil, socket, subprocess, sys, time, pathlib
+import json, os, re, shutil, socket, subprocess, sys, time, pathlib, base64
 import tempfile as tempfile_mod
+import threading, http.server, functools, datetime
 
 HERE = pathlib.Path(__file__).resolve().parent
 CONTRACTS = HERE.parent
@@ -48,15 +66,21 @@ KEYS = {  # anvil's well-known dev keys — worthless anywhere but a local anvil
     "arbres":   "0xdbda1821b80551c9d65939329250298aa3472ba22feea921c0cf5d620ea67b97",
     "treasury": "0x2a871d0798f97d79848a013d4936a73bf4cc922c825d33c1cf7073dff6d409c6",
 }
+# more dev accounts from anvil's public test mnemonic
+EXTRA = (("builder2", 10), ("watcher", 11), ("vbuilder", 12), ("vdeployer", 13), ("stranger", 14), ("onboarder", 15),
+         ("whale", 16), ("vpayout", 17), ("vowner2", 18), ("vrecovered", 19))
 FEED_WINDOW = 3600          # the caretaker's default feed challenge window
 SETTLEMENT_WINDOW = 3600
 RESOLUTION_GRACE = 86400
-ARB_CHALLENGE = 600
-EPOCH_LENGTH = 7200
-STREAM_WINDOW = 3600
+EPOCH_LENGTH = 86400        # BuilderFund epoch (mainnet: 30 days)
+RECOVERY_DELAY = 7 * 86400
 U = 10**6
-MINTED = ("operator", "resolver", "builder", "alice", "bob", "attacker", "watcher")
+MINTED = {"operator": 1_000, "resolver": 1_000, "builder": 1_000, "alice": 1_000, "bob": 1_000,
+          "attacker": 1_000, "watcher": 1_000, "whale": 60_000}
 FEE_BPS, CREATOR, AGENT = 100, 3000, 2000        # the landing page: 1% of every trade, 30 / 20 / 50
+# lib/LaunchSchedule.sol: 0% to $1,000; 10% to $10,000; 20% to $50,000; 30% above (per builder per epoch)
+LAUNCH_SCHEDULE = ((1_000 * U, 0), (10_000 * U, 1000), (50_000 * U, 2000), (2**128 - 1, 3000))
+ZERO32 = "0x" + "00" * 32
 
 
 def split(c):
@@ -66,12 +90,32 @@ def split(c):
     agent = fee * AGENT // 10_000
     return fee, creator, agent, fee - creator - agent
 
+
+def progressive_tax(gross, brackets=LAUNCH_SCHEDULE):
+    """BuilderFund.progressiveTax: marginal, floored per slice."""
+    tax, lower = 0, 0
+    for i, (up, rate) in enumerate(brackets):
+        if gross <= lower:
+            break
+        upper = 2**256 if i == len(brackets) - 1 else up
+        tax += (min(gross, upper) - lower) * rate // 10_000
+        lower = upper
+    return tax
+
+
+def income_split(gross):
+    """(tax, fee, net) of claimFor on `gross` under the launch schedule."""
+    tax = progressive_tax(gross)
+    fee = (gross - tax) * 100 // 10_000
+    return tax, fee, gross - tax - fee
+
+
 PASS, FAIL = [], []
 
 
 def check(cond, what, detail=""):
     (PASS if cond else FAIL).append(what)
-    print(("  ok   " if cond else "  FAIL ") + what + ("" if cond or not detail else f"  <- {detail}"))
+    print(("  ok   " if cond else "  FAIL ") + what + ("" if cond or not detail else f"  <- {detail}"), flush=True)
     if not cond:
         raise SystemExit(f"\nFAILED: {what}\n{detail}")
 
@@ -87,7 +131,7 @@ class Chain:
     def __init__(self):
         s = socket.socket(); s.bind(("127.0.0.1", 0)); self.port = s.getsockname()[1]; s.close()
         self.rpc = f"http://127.0.0.1:{self.port}"
-        self.proc = subprocess.Popen(["anvil", "--port", str(self.port), "--silent", "--accounts", "16"])
+        self.proc = subprocess.Popen(["anvil", "--port", str(self.port), "--silent", "--accounts", "24"])
         for _ in range(50):
             if run(["cast", "chain-id", "--rpc-url", self.rpc], ok=False).stdout.strip() == "31337":
                 break
@@ -119,12 +163,28 @@ class Chain:
     def now(self):
         return int(run(["cast", "block", "latest", "--field", "timestamp", "--rpc-url", self.rpc]).stdout.strip())
 
+    def block(self):
+        return int(run(["cast", "block-number", "--rpc-url", self.rpc]).stdout.strip())
+
     def warp_to(self, ts):
         run(["cast", "rpc", "evm_setNextBlockTimestamp", str(ts), "--rpc-url", self.rpc])
         run(["cast", "rpc", "evm_mine", "--rpc-url", self.rpc])
 
+    def increase_time(self, secs):
+        run(["cast", "rpc", "evm_increaseTime", str(secs), "--rpc-url", self.rpc])
+        run(["cast", "rpc", "evm_mine", "--rpc-url", self.rpc])
+
     def close(self):
         self.proc.terminate(); self.proc.wait()
+
+
+def selector(err_sig):
+    return run(["cast", "sig", err_sig]).stdout.strip()
+
+
+def reverted_with(text, name):
+    """A revert text names custom error `name` (decoded or as its 4-byte selector)."""
+    return bool(text) and (name in text or selector(f"{name}()")[2:] in text.lower())
 
 
 def main():
@@ -132,10 +192,8 @@ def main():
         if not shutil.which(tool):
             raise SystemExit(f"missing tool: {tool}")
     c = Chain()
-    # two more dev accounts from anvil's public test mnemonic: a second builder and an
-    # independent watcher who challenges a wrong answer
     mn = "test test test test test test test test test test test junk"
-    for name, idx in (("builder2", 10), ("watcher", 11), ("vbuilderA", 12), ("vbuilderB", 13), ("stranger", 14), ("onboarder", 15)):
+    for name, idx in EXTRA:
         KEYS[name] = run(["cast", "wallet", "private-key", "--mnemonic", mn, "--mnemonic-index", str(idx)]).stdout.strip()
     A = {k: c.addr(k) for k in KEYS}
     try:
@@ -158,14 +216,28 @@ def grab(log, label):
     return m.group(1)
 
 
+def serve(d):
+    """A throwaway static HTTP server over directory d (proof files, GitHub stand-ins)."""
+    d.mkdir(parents=True, exist_ok=True)
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a, **k):
+            pass
+    h = functools.partial(Quiet, directory=str(d))
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), h)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
 def rehearse(c, A):
     print("== 0. local chain + USDC at Arc's canonical address")
     run(["forge", "build"], cwd=CONTRACTS)
-    art = CONTRACTS / "out" / "test" / "MockUSDC.sol" / "MockUSDC.json"   # several tests define a MockUSDC; take test/MockUSDC.sol
+    # several tests define a MockUSDC; take test/MockUSDC.sol (forge nests the path only on a name clash)
+    art = next(p for p in (CONTRACTS / "out" / "test" / "MockUSDC.sol" / "MockUSDC.json", CONTRACTS / "out" / "MockUSDC.sol" / "MockUSDC.json")
+               if p.exists() and "test/MockUSDC.sol" in json.loads(p.read_text())["metadata"]["settings"]["compilationTarget"])
     code = json.loads(art.read_text())["deployedBytecode"]["object"]
     run(["cast", "rpc", "anvil_setCode", USDC, code, "--rpc-url", c.rpc])
-    for who in MINTED:
-        c.send("deployer", USDC, "mint(address,uint256)", A[who], 1_000 * U)
+    for who, amt in MINTED.items():
+        c.send("deployer", USDC, "mint(address,uint256)", A[who], amt * U)
     check(c.uint(USDC, "balanceOf(address)(uint256)", A["alice"]) == 1_000 * U, "USDC live at 0x3600 on the local chain")
 
     print("== 1a. mainnet phase 1: builders before markets (registries + badge only)")
@@ -178,9 +250,10 @@ def rehearse(c, A):
     has = lambda where, r, who: c.call(where, "hasRole(bytes32,address)(bool)", r, who) == "true"
     check(has(S["VerifiedBuilderBadge"], role("ISSUER_ROLE"), A["onboarder"]) and has(S["CaretakerRegistry"], role("GOVERNOR_ROLE"), A["onboarder"])
           and not has(S["BuilderRegistry"], role("REGISTRAR_ROLE"), A["onboarder"])
-          and not any(has(S[k], "0x" + "00" * 32, A["onboarder"]) for k in ("BuilderRegistry", "CaretakerRegistry", "VerifiedBuilderBadge"))
-          and not any(has(S[k], "0x" + "00" * 32, A["deployer"]) for k in ("BuilderRegistry", "CaretakerRegistry", "VerifiedBuilderBadge")),
-          "the onboarder hot wallet holds only badge ISSUER + caretaker GOVERNOR; the deployer holds nothing")
+          and not has(S["VerifiedBuilderBadge"], role("REVOKER_ROLE"), A["onboarder"])
+          and not any(has(S[k], ZERO32, A["onboarder"]) for k in ("BuilderRegistry", "CaretakerRegistry", "VerifiedBuilderBadge"))
+          and not any(has(S[k], ZERO32, A["deployer"]) for k in ("BuilderRegistry", "CaretakerRegistry", "VerifiedBuilderBadge")),
+          "the onboarder hot wallet holds only badge ISSUER + caretaker GOVERNOR (no REVOKER, no REGISTRAR); the deployer holds nothing")
     p1dir = pathlib.Path(tempfile_mod.mkdtemp(prefix="p1-keeper-"))
     r = run(["python3", "keeper/builders_keeper.py"], cwd=ARC, ok=False,
             env={"RPC": c.rpc, "PRIVATE_KEY": KEYS["operator"], "BUILDER_REGISTRY": S["BuilderRegistry"],
@@ -188,7 +261,7 @@ def rehearse(c, A):
                  "CHAIN_ID": "31337", "BUILDERS_DATA_DIR": str(p1dir)})
     out = r.stdout + r.stderr
     check(r.returncode == 0 and "builders: 0 verified" in out and "lacks STATUS_ROLE" not in out,
-          "the phase-1 keeper runs with no market, pool, oracle or feed on chain", out[-800:])
+          "the phase-1 keeper runs with no market, fund, pool, oracle or feed on chain", out[-800:])
 
     print("== 1. real deploy scripts, forced mainnet order (phase 2 reuses the phase-1 registries)")
     common = {"USDC": USDC, "SETTLEMENT_WINDOW": str(SETTLEMENT_WINDOW), "RESOLUTION_GRACE": str(RESOLUTION_GRACE),
@@ -198,42 +271,46 @@ def rehearse(c, A):
     log = forge_script(c, "DeployNanoLedger", common)
     S["NanoLedger"] = grab(log, "NanoLedger")
     log = forge_script(c, "DeployPerennial", {**common, "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"],
-                       "NANO_LEDGER": S["NanoLedger"], "EPOCH_LENGTH": str(EPOCH_LENGTH), "STREAM_WINDOW": str(STREAM_WINDOW),
+                       "NANO_LEDGER": S["NanoLedger"], "EPOCH_LENGTH": str(EPOCH_LENGTH),
                        "PROTOCOL_TREASURY": A["treasury"],
                        "BUILDER_REGISTRY": S["BuilderRegistry"], "CARETAKER_REGISTRY": S["CaretakerRegistry"]})
     check(grab(log, "BuilderRegistry").lower() == S["BuilderRegistry"].lower()
           and grab(log, "CaretakerRegistry").lower() == S["CaretakerRegistry"].lower(),
           "DeployPerennial reuses the phase-1 registries (no second BuilderRegistry)")
-    for k in ("ProgressPool", "MarketsPerennial"):
+    for k in ("SeasonPool", "BuilderFund", "MarketsPerennial"):
         S[k] = grab(log, k)
-    log = forge_script(c, "DeployArbiter", {**common, "NANO_LEDGER": S["NanoLedger"], "PROGRESS_POOL": S["ProgressPool"],
-                       "BUILDER_REGISTRY": S["BuilderRegistry"], "CARETAKER_REGISTRY": S["CaretakerRegistry"],
-                       "PROPOSER": A["operator"], "RESOLVER": A["arbres"], "CHALLENGE_WINDOW": str(ARB_CHALLENGE),
-                       "STAKE_PER_PROPOSAL": str(50 * U), "MAX_WEIGHT_PER_PROPOSAL": "10", "RESOLVE_TIMEOUT": str(RESOLUTION_GRACE)})
-    S["ProgressArbiter"] = grab(log, "ProgressArbiter")
+    FUND, POOL, MP = S["BuilderFund"], S["SeasonPool"], S["MarketsPerennial"]
+    check(c.call(MP, "FUND()(address)").lower() == FUND.lower() and c.call(FUND, "SEASON_POOL()(address)").lower() == POOL.lower()
+          and c.uint(FUND, "EPOCH_LENGTH()(uint256)") == EPOCH_LENGTH
+          and c.call(FUND, "PROTOCOL_TREASURY()(address)").lower() == A["treasury"].lower()
+          and c.call(FUND, "BUILDERS()(address)").lower() == S["BuilderRegistry"].lower(),
+          "MarketsPerennial.FUND() is the fund; the fund pays into the SeasonPool, over the phase-1 registries, epoch 1 day")
     log = forge_script(c, "DeployNanoStack", {**common, "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"],
                        "NANO_LEDGER": S["NanoLedger"], "TREASURY": A["treasury"]})
     S["MarketsV4"] = grab(log, "MarketsV4")
     stack = {"ADMIN": A["admin"], "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"], "NANO_LEDGER": S["NanoLedger"],
              "BUILDER_REGISTRY": S["BuilderRegistry"], "CARETAKER_REGISTRY": S["CaretakerRegistry"],
-             "PROGRESS_POOL": S["ProgressPool"], "MARKETS_PERENNIAL": S["MarketsPerennial"],
-             "MARKETS_V4": S["MarketsV4"], "PROGRESS_ARBITER": S["ProgressArbiter"]}
+             "BUILDER_FUND": FUND, "SEASON_POOL": POOL, "MARKETS_PERENNIAL": MP, "MARKETS_V4": S["MarketsV4"]}
     forge_script(c, "Handoff", stack)
     vlog = forge_script(c, "VerifyRoles", {**stack, "DEPLOYER": A["deployer"], "ONBOARDER": A["onboarder"]})
     check("OK: onboarder holds no market/admin role" in vlog, "phase 2 VerifyRoles: the onboarder holds no market or admin role")
-    check(True, "DeployOracle -> NanoLedger -> Perennial -> Arbiter -> NanoStack -> Handoff -> VerifyRoles all succeeded")
+    check("OK: role table verified" in vlog, "DeployOracle -> NanoLedger -> Perennial -> NanoStack -> Handoff -> VerifyRoles all succeeded")
 
-    gov = c.call(S["ProgressPool"], "GOVERNOR_ROLE()(bytes32)")
-    prog = c.call(S["ProgressPool"], "PROGRESS_ROLE()(bytes32)")
-    admin_role = "0x" + "00" * 32
-    check("AccessControl" in c.fails_with("deployer", S["ProgressPool"], "grantRole(bytes32,address)", prog, A["deployer"])
-          or c.fails_with("deployer", S["ProgressPool"], "grantRole(bytes32,address)", prog, A["deployer"]) != "",
-          "deployer can no longer grant itself PROGRESS_ROLE (B2 closed)")
-    check(c.fails_with("deployer", S["MarketsPerennial"], "setForfeitSink(address)", A["deployer"]) != "",
-          "deployer can no longer redirect fee flows")
-    check(c.call(S["ProgressPool"], "hasRole(bytes32,address)(bool)", admin_role, A["admin"]) == "true"
-          and c.call(S["MarketsPerennial"], "hasRole(bytes32,address)(bool)", gov, A["admin"]) == "true",
-          "ADMIN (multisig stand-in) holds the admin roles")
+    markets_role = c.call(FUND, "MARKETS_ROLE()(bytes32)")
+    funder_role = c.call(POOL, "FUNDER_ROLE()(bytes32)")
+    gov = c.call(MP, "GOVERNOR_ROLE()(bytes32)")
+    check(c.fails_with("deployer", FUND, "grantRole(bytes32,address)", markets_role, A["deployer"]) != "",
+          "deployer can no longer grant itself the fund's MARKETS_ROLE (no fake builder income)")
+    check(c.fails_with("deployer", POOL, "publishSeason(uint256,bytes32,uint256,uint64)", 1, "0x" + "11" * 32, 1, c.now() + 999) != ""
+          and c.fails_with("deployer", MP, "setApprovedAgent(address,bool)", A["deployer"], "true") != "",
+          "deployer can no longer publish a season or approve an agent")
+    check(all(has(FUND, r, A["admin"]) for r in (ZERO32, c.call(FUND, "GOVERNOR_ROLE()(bytes32)")))
+          and all(has(POOL, r, A["admin"]) for r in (ZERO32, c.call(POOL, "GOVERNOR_ROLE()(bytes32)")))
+          and has(MP, gov, A["admin"]) and has(MP, ZERO32, A["admin"]),
+          "ADMIN (multisig stand-in) holds the fund, pool and markets admin roles")
+    check(has(FUND, markets_role, MP) and not has(FUND, markets_role, A["admin"]) and has(POOL, funder_role, FUND)
+          and not has(POOL, funder_role, A["admin"]),
+          "only MarketsPerennial credits builder income and only the fund funds the season pool")
 
     print("== 2. onboarding (post-handoff: every privileged step is ADMIN's)")
     c.send("builder", S["BuilderRegistry"], "registerBuilder(string)", "github.com/example/shipper")
@@ -243,8 +320,8 @@ def rehearse(c, A):
           f"builder #{bid} registered, operator is its caretaker")
 
     # The caretaker's own feed-provisioning parameters (independent resolver, bond from the Registry).
-    os.environ.update({k: "0x0" for k in ("RPC", "PRIVATE_KEY", "PROGRESS_POOL", "MARKETS_PERENNIAL", "NANO_LEDGER",
-                                           "CARETAKER_REGISTRY", "BUILDER_REGISTRY", "PROGRESS_ARBITER", "REGISTRY", "ATTESTATION")})
+    os.environ.update({k: "0x0" for k in ("RPC", "PRIVATE_KEY", "MARKETS_PERENNIAL", "NANO_LEDGER",
+                                           "CARETAKER_REGISTRY", "BUILDER_REGISTRY", "REGISTRY", "ATTESTATION")})
     import caretaker
     fp, why = caretaker.feed_params(A["operator"], A["resolver"], c.call(S["Registry"], "MIN_BOND()(uint256)"), FEED_WINDOW)
     check(fp is not None, "caretaker.feed_params accepts an independent resolver", why)
@@ -255,7 +332,7 @@ def rehearse(c, A):
                           "example/shipper-ships-release", meth, fp["bond"], fp["window"], fp["resolver"]).stdout)
     feed = next(l["topics"][1] for l in r["logs"] if l["address"].lower() == S["Registry"].lower())
     c.send("operator", S["Registry"], "registerAgent(bytes32,bytes32,uint256)", feed, meth, fp["bond"])
-    check(c.call(S["MarketsPerennial"], "isApprovedFeed(bytes32,address)(bool)", feed, A["operator"]) == "true",
+    check(c.call(MP, "isApprovedFeed(bytes32,address)(bool)", feed, A["operator"]) == "true",
           "milestone feed provisioned and passes the oracle allowlist")
 
     print("== 3. B1: a self-made oracle cannot open a market")
@@ -264,13 +341,15 @@ def rehearse(c, A):
                           "rigged", meth, 10 * U, FEED_WINDOW, A["attacker"]).stdout)
     rigged = next(l["topics"][1] for l in r["logs"] if l["address"].lower() == S["Registry"].lower())
     c.send("attacker", S["Registry"], "registerAgent(bytes32,bytes32,uint256)", rigged, meth, 10 * U)
-    err = c.fails_with("attacker", S["MarketsPerennial"], "createMarket(uint256,bytes32,address,int256,uint8,uint256,uint256)",
+    err = c.fails_with("attacker", MP, "createMarket(uint256,bytes32,address,int256,uint8,uint256,uint256)",
                        bid, rigged, A["attacker"], 1, 1, c.now() + 7200, 5 * U)
     check(err != "" and ("AgentNotApproved" in err or "0x" in err), "createMarket on an attacker-resolved feed reverts", err[-200:])
 
     # ── UI driver ──
-    contracts_ui = {k: S[k] for k in ("NanoLedger", "BuilderRegistry", "ProgressPool", "MarketsPerennial", "CaretakerRegistry")}
+    contracts_ui = {k: S[k] for k in ("NanoLedger", "BuilderRegistry", "MarketsPerennial", "CaretakerRegistry", "BuilderFund", "SeasonPool")}
     contracts_ui["USDC"] = USDC
+    builder_of_market = {}              # marketId -> builderId (for the income ledger below)
+    credited = {}                       # builderId -> builder legs credited by the trades we made
 
     def ui(action, who=None, **kw):
         payload = {"rpc": c.rpc, "contracts": contracts_ui, "operator": A["operator"], "action": action, **kw}
@@ -284,9 +363,14 @@ def rehearse(c, A):
             raise SystemExit(f"ui {action} printed no JSON:\n{r.stdout[-1500:]}\n{r.stderr[-1500:]}")
         if not res.get("ok"):
             raise SystemExit(f"ui {action} failed: {res}")
+        if action == "create":
+            builder_of_market[res["marketId"].lower()] = int(kw["builderId"])
+        if action in ("buy", "sell") and res.get("legs"):
+            b = builder_of_market[kw["marketId"].lower()]
+            credited[b] = credited.get(b, 0) + int(res["legs"]["payee"])
         return res
 
-    keeper = CastChain(c.rpc, S["MarketsPerennial"], S["Attestation"], KEYS["operator"])
+    keeper = CastChain(c.rpc, MP, S["Attestation"], KEYS["operator"])
     count = {"v": 0}
     providers = {feed.lower(): lambda now: (count["v"], f"releases:{count['v']}")}
     kstate = {}
@@ -294,24 +378,28 @@ def rehearse(c, A):
     def keeper_tick():
         return tick(keeper, A["operator"], providers, kstate, SETTLEMENT_WINDOW)
 
-    MP = S["MarketsPerennial"]
     led = lambda who: c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", who)
     coll = lambda m: c.uint(MP, "collateralOf(bytes32)(uint256)", m)
-
     escrow = lambda m: c.uint(MP, "agentEscrow(bytes32)(uint256)", m)
+    income_of = lambda e, b: c.uint(FUND, "incomeOf(uint256,uint256)(uint256)", e, b)
+    unallocated = lambda: c.uint(POOL, "unallocated()(uint256)")
+    epoch_now = lambda: c.uint(FUND, "currentEpoch()(uint256)")
+    pool_expected = {"v": 0}            # what the SeasonPool must hold, source by source
 
     def settles_with_split(label, m, creator_addr, action):
         """Run `action` (a resolve): nothing is charged at settlement; only the
         agent's held 20% of the trading fees is released, to the agent."""
         held = escrow(m)
-        before = (led(creator_addr), led(A["operator"]), led(S["ProgressPool"]))
+        before = (led(creator_addr), led(A["operator"]), led(FUND), led(POOL))
         out = action()
-        after = (led(creator_addr), led(A["operator"]), led(S["ProgressPool"]))
-        check(held > 0 and after[1] - before[1] == held and after[0] == before[0] and after[2] == before[2] and escrow(m) == 0,
+        after = (led(creator_addr), led(A["operator"]), led(FUND), led(POOL))
+        check(held > 0 and after[1] - before[1] == held and after[0] == before[0] and after[2:] == before[2:] and escrow(m) == 0,
               f"{label}: nothing charged at settlement; the agent's held 20% ({held/U:.4f}) released to it")
         return out
 
     print("== 4. m1 (YES): create via the UI path, trade, the builder ships, keeper settles")
+    ov = ui("overview")
+    check(ov["fundStatus"] == "live", "UI overview: the BuilderFund is live for these markets (fundStatus)")
     for who in ("alice", "bob"):
         ui("deposit", who, amount=str(300 * U))
     try:
@@ -324,11 +412,14 @@ def rehearse(c, A):
     m1 = ui("create", "alice", builderId=bid, feedId=feed, expiryIn=7200, liquidity=str(10 * U))
     check(m1["threshold"] == "1" and m1["latest"] == "0", "create form: threshold = latest on-chain reading (0) + 1 = 1", m1)
     M1 = m1["marketId"]
+    epoch0 = epoch_now()
+    check(epoch0 == 0, "the fund is in epoch 0 while the first markets trade")
     b1 = ui("buy", "bob", marketId=M1, side="Yes", amount=str(20 * U))
     check(b1["quoteMatched"], f"bob buys YES 20 USDC -> {int(b1['sharesOut'])/U:.4f} shares, exactly the UI quote")
-    fee, cr, ag, cm = split(20 * U)
-    check(b1["fee"] == str(fee) and c.uint(MP, "netCost(bytes32,address)(uint256)", M1, A["bob"]) == 20 * U - fee,
-          f"1% trading fee: {fee/U:.2f} of bob's 20 (creator {cr/U:.2f} / agent held {ag/U:.2f} / commons {cm/U:.2f}); net cost 19.80")
+    fee, cr, ag, bl = split(20 * U)
+    check(b1["fee"] == str(fee) and c.uint(MP, "netCost(bytes32,address)(uint256)", M1, A["bob"]) == 20 * U - fee
+          and int(b1["legs"]["payee"]) == bl and income_of(0, bid) == bl,
+          f"1% trading fee: {fee/U:.2f} of bob's 20 (creator {cr/U:.2f} / agent held {ag/U:.2f} / builder #{bid} income {bl/U:.2f}); net cost 19.80")
     b2 = ui("buy", "alice", marketId=M1, side="No", amount=str(5 * U))
     check(b2["quoteMatched"], "alice buys NO 5 USDC at exactly the UI quote")
     s1 = ui("sell", "bob", marketId=M1, side="Yes", shares=str(int(b1["sharesOut"]) // 4))
@@ -340,7 +431,7 @@ def rehearse(c, A):
     exp1 = int(m1["expiry"])
     c.warp_to(exp1 + 5)
     check(ui("status", marketId=M1)["status"] == "waiting", "after expiry, before any attestation: UI says waiting")
-    err = c.fails_with("bob", S["MarketsPerennial"], "buy(bytes32,uint8,uint256,uint256)", M1, 0, U, 0)
+    err = c.fails_with("bob", MP, "buy(bytes32,uint8,uint256,uint256)", M1, 0, U, 0)
     check(err != "", "no last look: buying after expiry reverts")
     count["v"] = 1                                   # the builder shipped a release
     r = keeper_tick()
@@ -374,12 +465,14 @@ def rehearse(c, A):
     c.warp_to(int(m2["expiry"]) + SETTLEMENT_WINDOW + 60)
     check(ui("status", marketId=M2)["status"] == "voidable", "UI status: voidable when nothing settled in the window")
     held2 = escrow(M2)
-    sink_before, agent_before = led(S["ProgressPool"]), led(A["operator"])
+    pool_before, un_before, fund_before, agent_before = led(POOL), unallocated(), led(FUND), led(A["operator"])
     v = ui("voidMarket", "bob", marketId=M2)
     check(ui("status", marketId=M2)["status"] == "voided", "a trader voids m2 through the UI path")
-    check(int(v["challengerReward"]) == 0 and held2 > 0 and led(S["ProgressPool"]) - sink_before == held2
+    check(int(v["challengerReward"]) == 0 and held2 > 0 and int(v["seasonPoolAmount"]) == held2
+          and led(POOL) - pool_before == held2 and unallocated() - un_before == held2 and led(FUND) == fund_before
           and led(A["operator"]) == agent_before and escrow(M2) == 0,
-          f"silent agent earns nothing: its held 20% ({held2/U:.4f}) goes to the commons")
+          f"silent agent earns nothing: its held 20% ({held2/U:.4f}) goes through the fund to the SeasonPool (unallocated)")
+    pool_expected["v"] += held2
     r = keeper_tick()
     check(r["actions"] == [], "keeper: idempotent afterwards", r)
 
@@ -454,11 +547,12 @@ def rehearse(c, A):
     c.warp_to(int(m4["expiry"]) + SETTLEMENT_WINDOW + 60)
     check(ui("status", marketId=M4)["status"] == "voidable", "no valid answer in the window: m4 is voidable")
     held4 = escrow(M4)
-    w_before = led(A["watcher"])
+    w_before, pool_before = led(A["watcher"]), led(POOL)
     v = ui("voidMarket", "bob", marketId=M4)
     check((v["challenger"] or "").lower() == A["watcher"].lower() and int(v["challengerReward"]) == held4 > 0
-          and led(A["watcher"]) - w_before == held4 and escrow(M4) == 0,
-          f"the watcher who proved the answer wrong receives the agent's held 20% ({held4/U:.4f} USDC)")
+          and led(A["watcher"]) - w_before == held4 and escrow(M4) == 0 and int(v["seasonPoolAmount"]) == 0
+          and led(POOL) == pool_before,
+          f"the watcher who proved the answer wrong receives the agent's held 20% ({held4/U:.4f} USDC); the pool gets nothing")
     for who, paid in (("bob", 10), ("alice", 4)):
         nc = c.uint(MP, "netCost(bytes32,address)(uint256)", M4, A[who])
         check(nc == paid * U - split(paid * U)[0] and c.uint(MP, "redeemable(bytes32,address)(uint256)", M4, A[who]) == nc,
@@ -482,7 +576,7 @@ def rehearse(c, A):
             if preview == 0:
                 # the panel disables the button ("nothing to redeem"); the contract agrees
                 if y or n:
-                    check(c.fails_with(who, S["MarketsPerennial"], "redeem(bytes32)", m) != "",
+                    check(c.fails_with(who, MP, "redeem(bytes32)", m) != "",
                           f"{who} holds only losing shares on {m[:8]}: UI offers nothing, contract refuses")
                 continue
             res = ui("redeem", who, marketId=m)
@@ -490,48 +584,84 @@ def rehearse(c, A):
     for m, who in ((M1, "alice"), (M3, "bob"), (M2, "alice"), (M4, "alice")):
         res = ui("claimLP", who, marketId=m)
         check(int(res["payout"]) > 0, f"creator {who} claims LP on {m[:8]}: {int(res['payout'])/U:.4f} USDC")
-    dust = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", S["MarketsPerennial"]) - coll(M5) - escrow(M5)
+    dust = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", MP) - coll(M5) - escrow(M5)
     check(0 <= dust <= 10, f"MarketsPerennial holds only the open m5 plus dust after every exit ({dust} units)")
 
-    print("== 7. the fees reach the builder: arbiter -> epoch -> stream -> withdraw")
-    pot_before = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", S["ProgressPool"])
-    check(pot_before > 0, f"commons holds {pot_before/U:.4f} USDC: 50% of every trading fee (+ the silent agent's held 20%)")
-    c.send("operator", USDC, "approve(address,uint256)", S["NanoLedger"], 60 * U)
-    c.send("operator", S["NanoLedger"], "deposit(uint256)", 60 * U)
-    c.send("operator", S["NanoLedger"], "approveSpender(address,uint256)", S["ProgressArbiter"], 50 * U)
-    c.send("operator", S["ProgressArbiter"], "depositBond(uint256)", 50 * U)
-    c.send("operator", S["ProgressArbiter"], "propose(address,uint256)", A["builder"], 5)
-    err = c.fails_with("alice", S["ProgressArbiter"], "finalize(uint256)", 0)
-    check(err != "", "a proposal cannot finalize inside its challenge window")
-    c.warp_to(c.now() + ARB_CHALLENGE + 5)
-    c.send("alice", S["ProgressArbiter"], "finalize(uint256)", 0)      # permissionless crank
-    epoch = c.uint(S["ProgressPool"], "currentEpoch()(uint256)")
-    check(c.uint(S["ProgressPool"], "progressWeight(uint256,address)(uint256)", epoch, A["builder"]) == 5,
-          "finalized progress credited to the builder for this epoch")
-    c.warp_to(c.now() + EPOCH_LENGTH + 5)
-    c.send("alice", S["ProgressPool"], "closeEpoch()")
-    claimable = c.uint(S["ProgressPool"], "claimable(uint256,address)(uint256)", epoch, A["builder"])
-    protocol_cut = pot_before * 100 // 10_000
-    check(claimable == pot_before - protocol_cut,
-          f"sole builder's claimable = the whole pot minus Registrai's 1% ({claimable/U:.4f} of {pot_before/U:.4f})")
-    treasury_before = led(A["treasury"])
-    r = json.loads(c.send("builder", S["ProgressPool"], "claim(uint256)", epoch).stdout)
-    check(led(A["treasury"]) - treasury_before == protocol_cut,
-          f"Registrai's 1% monitoring fee ({protocol_cut/U:.6f} USDC) reached the protocol treasury")
-    sid = c.uint(S["ProgressPool"], "streamIdOf(uint256,address)(uint256)", epoch, A["builder"])
-    c.warp_to(c.now() + STREAM_WINDOW + 120)
-    c.send("alice", S["NanoLedger"], "settleStream(uint256)", sid)
-    got = c.uint(S["NanoLedger"], "balanceOf(address)(uint256)", A["builder"])
-    check(abs(got - claimable) <= STREAM_WINDOW, f"stream vested to the builder: {got/U:.4f} of {claimable/U:.4f} USDC")
-    usdc_before = c.uint(USDC, "balanceOf(address)(uint256)", A["builder"])
-    c.send("builder", S["NanoLedger"], "withdraw(uint256)", got)
-    check(c.uint(USDC, "balanceOf(address)(uint256)", A["builder"]) - usdc_before == got, "builder withdrew real USDC")
+    print("== 7. builder income: epoch 0 ends, the keeper's income crank pays it (and freezes a deactivated builder's)")
+    check(epoch_now() == 0 and income_of(0, bid) == credited[bid] and income_of(0, bid2) == credited[bid2]
+          and c.uint(FUND, "outstanding()(uint256)") == credited[bid] + credited[bid2] == led(FUND),
+          f"every trade credited its market's builder: #{bid} {credited[bid]/U:.4f}, #{bid2} {credited[bid2]/U:.4f} USDC "
+          f"(the 50% legs, exactly); the fund holds exactly the outstanding income")
+    econ = ui("economy")
+    check(econ["fundStatus"] == "live" and int(econ["epoch"]) == 0 and int(econ["epochLength"]) == EPOCH_LENGTH
+          and int(econ["outstanding"]) == credited[bid] + credited[bid2] and int(econ["unallocated"]) == unallocated()
+          and len(econ["schedule"]) == 4,
+          "UI economy strip: epoch 0 of 1 day, outstanding income, season pool balance and the 4-bracket launch schedule")
+    # The Safe freezes builder #2 (e.g. a fraud report) before its income is paid.
+    check(c.fails_with("onboarder", S["BuilderRegistry"], "setActive(uint256,bool)", bid2, "false") != "",
+          "the onboarder cannot deactivate a builder (REGISTRAR is the Safe's)")
+    c.send("admin", S["BuilderRegistry"], "setActive(uint256,bool)", bid2, "false")
+    err = c.fails_with("alice", FUND, "claimFor(uint256,uint256)", 0, bid)
+    check(reverted_with(err, "EpochNotEnded"), "nobody can claim epoch 0 before it ends", err[-200:])
+    c.warp_to(c.uint(FUND, "epochEnd(uint256)(uint256)", 0) + 1)
+    check(epoch_now() == 1, "warped past epochEnd(0): epoch 1")
 
-    verified_builders_stage(c, A, S, ui, run)
+    # the full keeper (caretaker.py), isolated from the live state files, used from here on
+    data_dir = pathlib.Path(tempfile_mod.mkdtemp(prefix="caretaker-e2e-"))
+    kenv = {"RPC": c.rpc, "PRIVATE_KEY": KEYS["operator"], "MARKETS_PERENNIAL": MP,
+            "NANO_LEDGER": S["NanoLedger"], "CARETAKER_REGISTRY": S["CaretakerRegistry"], "BUILDER_REGISTRY": S["BuilderRegistry"],
+            "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"], "SEASON_POOL": POOL,
+            "FEED_RESOLVER": A["resolver"], "FEED_CHALLENGE_WINDOW": str(FEED_WINDOW), "CHAIN_ID": "31337", "AUTO_OPEN_MARKETS": "false",
+            "CARETAKER_DATA_DIR": str(data_dir), "VERIFIED_BADGE": S["VerifiedBuilderBadge"], "BADGE_LAPSE_TICKS": "1"}
 
-    print("== 8. accounting")
+    def keeper_tick_full():
+        r = run(["python3", "keeper/caretaker.py"], env=kenv, cwd=ARC, ok=False)
+        out = r.stdout + r.stderr
+        if r.returncode != 0 or "tick done" not in out:
+            raise SystemExit(f"caretaker tick failed:\n{out[-3000:]}")
+        return out
+
+    g1 = income_of(0, bid)
+    t1, f1, n1 = income_split(g1)
+    before = (led(A["builder"]), led(A["treasury"]), led(POOL), unallocated(), led(A["builder2"]))
+    log0 = keeper_tick_full()
+    after = (led(A["builder"]), led(A["treasury"]), led(POOL), unallocated(), led(A["builder2"]))
+    want = f"income: claimed epoch 0 for builder #{bid}: gross {g1} tax {t1} fee {f1} net {n1} -> {A['builder'].lower()}"
+    check(want in log0, f"keeper: '{want}'", log0[-2500:])
+    check(t1 == 0 and after[0] - before[0] == n1 and after[1] - before[1] == f1 and after[2] == before[2] and after[3] == before[3],
+          f"builder #{bid} paid exactly: net {n1/U:.6f} to its payout (the owner), 1% of gross-tax ({f1/U:.6f}) to the "
+          f"treasury, tax 0 to the pool (below the $1,000 bracket)")
+    check(f"ALERT caretaker: builder {bid2} income for epoch 0 is frozen (inactive) — the Safe may sweepFrozen" in log0
+          and after[4] == before[4] and c.call(FUND, "claimed(uint256,uint256)(bool)", 0, bid2) == "false",
+          f"deactivated builder #{bid2}: the keeper ALERTs the frozen income and pays nothing", log0[-2500:])
+    err = c.fails_with("alice", FUND, "claimFor(uint256,uint256)", 0, bid2)
+    check(reverted_with(err, "BuilderInactive"), f"claimFor(0, #{bid2}) reverts BuilderInactive for anyone", err[-200:])
+    check(c.fails_with("operator", FUND, "sweepFrozen(uint256,uint256)", 0, bid2) != "", "only the Safe can sweep frozen income")
+    g2 = income_of(0, bid2)
+    pool_before, un_before = led(POOL), unallocated()
+    c.send("admin", FUND, "sweepFrozen(uint256,uint256)", 0, bid2)
+    check(led(POOL) - pool_before == g2 and unallocated() - un_before == g2 and led(A["builder2"]) == before[4]
+          and c.call(FUND, "claimed(uint256,uint256)(bool)", 0, bid2) == "true" and c.uint(FUND, "outstanding()(uint256)") == 0,
+          f"Safe sweepFrozen: builder #{bid2}'s whole income ({g2/U:.6f}, untaxed) goes to the SeasonPool; nothing outstanding")
+    pool_expected["v"] += g2
+    rows2 = ui("income", builderId=bid2)["rows"]
+    check(any(int(r["epoch"]) == 0 and r["state"] == "swept" for r in rows2), "UI income card shows builder #2's epoch 0 as swept", rows2)
+    log1 = keeper_tick_full()
+    check(f"epoch 0 builder #{bid2} already claimed or swept" in log1 and "is frozen" not in log1,
+          "next keeper tick: the swept pair is dropped, no repeated ALERT", log1[-1500:])
+
+    V = verified_builders_stage(c, A, S, ui, keeper_tick_full, data_dir, led, income_of, unallocated, epoch_now, pool_expected, credited)
+    season_stage(c, A, S, V, led, unallocated, pool_expected, reverted_with)
+    for srv in V["servers"]:
+        srv.shutdown()
+
+    print("== 13. accounting")
+    # one more trade in the current epoch: income that stays outstanding (not claimable yet)
+    ep = epoch_now()
+    b = ui("buy", "bob", marketId=V["M10"], side="Yes", amount=str(10 * U))
+    check(b["quoteMatched"], f"bob buys YES 10 on the open domain market in epoch {ep} (income not yet claimable)")
     # every USDC unit minted is somewhere accountable: wallets + ledger (which backs all internal balances)
-    minted = len(MINTED) * 1_000 * U
+    minted = sum(MINTED.values()) * U
     wallets = sum(c.uint(USDC, "balanceOf(address)(uint256)", A[w]) for w in KEYS)
     ledger_held = c.uint(USDC, "balanceOf(address)(uint256)", S["NanoLedger"])
     registry_held = c.uint(USDC, "balanceOf(address)(uint256)", S["Registry"])
@@ -541,166 +671,358 @@ def rehearse(c, A):
           f"USDC conserved: wallets {wallets/U:.2f} + ledger {ledger_held/U:.2f} + bonds {registry_held/U:.2f} = {minted/U:.0f}")
     total_owed = c.uint(S["NanoLedger"], "totalOwed()(uint256)")
     check(ledger_held >= total_owed, f"ledger solvent: holds {ledger_held} >= owes {total_owed}")
+    # the fund: outstanding == every (epoch, builder) with income not yet claimed or swept, from the logs
+    logs = json.loads(run(["cast", "logs", "--from-block", "0", "--address", FUND, "IncomeCredited(uint256,uint256,uint256)",
+                           "--rpc-url", c.rpc, "--json"]).stdout or "[]")
+    pairs = {(int(l["topics"][1], 16), int(l["topics"][2], 16)) for l in logs}
+    unclaimed = sum(income_of(e, bb) for e, bb in pairs if c.call(FUND, "claimed(uint256,uint256)(bool)", e, bb) == "false")
+    outstanding = c.uint(FUND, "outstanding()(uint256)")
+    check(outstanding == unclaimed == led(FUND) == int(b["legs"]["payee"]) > 0,
+          f"fund outstanding {outstanding/U:.6f} == unclaimed income over {len(pairs)} (epoch, builder) pairs == its ledger balance")
+    reserved = c.uint(POOL, "reserved()(uint256)")
+    check(led(POOL) >= unallocated() + reserved and led(POOL) == pool_expected["v"],
+          f"SeasonPool holds {led(POOL)/U:.6f} >= unallocated {unallocated()/U:.6f} + reserved {reserved/U:.6f}; "
+          f"== void escrow + frozen sweep + taxes - season claims")
 
 
-
-def verified_builders_stage(c, A, S, ui, run):
-    """Registrai Verified Builders: /verify's own claim code -> proof served -> self-register ->
-    the real onboard-batch script (executed as the multisig) -> real keeper ticks."""
-    import tempfile, threading, http.server, functools, datetime
-    print("== 9. verified builders: claim -> batch -> keeper (website lib and keeper must agree)")
-    root = pathlib.Path(tempfile.mkdtemp(prefix="vb-e2e-"))
-    def serve(d):
-        d.mkdir(parents=True, exist_ok=True)
-        h = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(d))
-        h.log_message = lambda *a, **k: None
-        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), h)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        return srv, srv.server_address[1]
+def verified_builders_stage(c, A, S, ui, keeper_tick_full, data_dir, led, income_of, unallocated, epoch_now, pool_expected, credited):
+    """Registrai Verified Builders, builder-projects model: one builder, two projects,
+    each with its own proof (/verify's own claim code) -> self-register -> the real
+    onboard-batch (per builder) sent by the onboarder -> badge -> real keeper ticks;
+    then income with tax, an owner transfer and a recovery."""
+    print("== 9. verified builders: one builder, two projects (github + domain) -> batch -> badge -> keeper")
+    MP, FUND, POOL, BR, CR, BADGE = (S["MarketsPerennial"], S["BuilderFund"], S["SeasonPool"], S["BuilderRegistry"],
+                                     S["CaretakerRegistry"], S["VerifiedBuilderBadge"])
+    root = pathlib.Path(tempfile_mod.mkdtemp(prefix="vb-e2e-"))
     gh_srv, gh_port = serve(root / "raw")        # stand-in for raw.githubusercontent.com
-    dom_srv, dom_port = serve(root / "domain")   # a builder's own site
+    dom_srv, dom_port = serve(root / "domain")   # the builder's own site
     api_srv, api_port = serve(root / "api")      # stand-in for api.github.com
     proof_env = {"PROOF_GITHUB_BASE": f"http://127.0.0.1:{gh_port}", "PROOF_DOMAIN_SCHEME": "http",
                  "PROOF_DOMAIN_PORT": str(dom_port), "GITHUB_API_BASE": f"http://127.0.0.1:{api_port}"}
-    os.environ.update(proof_env)   # the ui() driver and the batch script inherit these
+    os.environ.update(proof_env)   # the ui() driver, the batch script and the keepers inherit these
     today = datetime.date.today().isoformat()
-    try:
-        # open-source builder A: one release + one tag on acme/tool
-        rel = root / "api/repos/acme/tool/releases"; rel.mkdir(parents=True)
-        (rel / "latest").write_text(json.dumps({"tag_name": "v1.0.0"}))
-        (root / "api/repos/acme/tool/tags").write_text(json.dumps([{"name": "v1.0.0"}]))
-        claimA = {"builder": A["vbuilderA"].lower(), "source": "github:acme/tool", "deployers": [], "country": "PL", "chain": 31337, "issued": today}
-        fa = ui("claim", claim=claimA, builderKey=KEYS["vbuilderA"])["file"]
-        d = root / "raw/acme/tool/HEAD"; d.mkdir(parents=True); (d / ".registrai.json").write_text(json.dumps(fa))
-        c.send("vbuilderA", S["BuilderRegistry"], "registerBuilder(string)", "registrai:github:acme/tool")
+    V = {"season_from": c.block(), "servers": (gh_srv, dom_srv, api_srv)}
+    import verified as kv
+    GH, DOM = "github:acme/tool", "domain:127.0.0.1"
+    gh_file = root / "raw/acme/tool/HEAD/.registrai.json"
+    dom_file = root / "domain/.well-known/registrai.json"
+    gh_file.parent.mkdir(parents=True, exist_ok=True); dom_file.parent.mkdir(parents=True, exist_ok=True)
+    latest = lambda f: int(c.call(S["Attestation"], "latestValue(bytes32,address)(int256,uint256,bool)", f, A["operator"]).split()[0])
 
-        # closed-source builder B: two contracts deployed by B itself (nonces 0, 1), then the domain claim
-        init = "0x600a600c600039600a6000f3602a60005260206000f3"   # tiny contract returning 42
-        for _ in range(2):
-            run(["cast", "send", "--rpc-url", c.rpc, "--private-key", KEYS["vbuilderB"], "--create", init])
-        claimB = {"builder": A["vbuilderB"].lower(), "source": "domain:127.0.0.1", "deployers": [A["vbuilderB"].lower()], "country": "DE", "chain": 31337, "issued": today}
-        fb = ui("claim", claim=claimB, builderKey=KEYS["vbuilderB"])["file"]
-        wk = root / "domain/.well-known"; wk.mkdir(parents=True); (wk / "registrai.json").write_text(json.dumps(fb))
-        c.send("vbuilderB", S["BuilderRegistry"], "registerBuilder(string)", "registrai:domain:127.0.0.1")
-        idA = c.uint(S["BuilderRegistry"], "builderIdOf(address)(uint256)", A["vbuilderA"])
-        idB = c.uint(S["BuilderRegistry"], "builderIdOf(address)(uint256)", A["vbuilderB"])
+    def sign_both(owner):
+        """Both projects' proofs, signed by `owner` (the domain one also by its deployer), served."""
+        fa = ui("claim", claim={"builder": A[owner].lower(), "source": GH, "deployers": [], "country": "PL", "chain": 31337, "issued": today},
+                builderKey=KEYS[owner])["file"]
+        fb = ui("claim", claim={"builder": A[owner].lower(), "source": DOM, "deployers": [A["vdeployer"].lower()], "country": "PL",
+                                "chain": 31337, "issued": today}, builderKey=KEYS[owner], deployerKeys=[KEYS["vdeployer"]])["file"]
+        gh_file.write_text(json.dumps(fa)); dom_file.write_text(json.dumps(fb))
+        return fa, fb
 
-        # forgeries: both implementations must refuse
-        import verified as kv
-        forged_dep = {"builder": A["stranger"].lower(), "source": "domain:127.0.0.1", "deployers": [A["vbuilderB"].lower()], "country": "DE", "chain": 31337, "issued": today}
-        ff = ui("claim", claim=forged_dep, builderKey=KEYS["stranger"])["file"]      # B never signed
-        ts = ui("validateProof", file=ff, expectedSource="domain:127.0.0.1", onchainOwner=A["stranger"], chainId=31337)["result"]
-        py_ok, py_why = kv.validate_proof(ff, "domain:127.0.0.1", A["stranger"], 31337)
-        check(not ts["valid"] and ts["rule"] == 5 and not py_ok,
-              f"claiming someone else's deployer is refused by the website (rule {ts['rule']}) and the keeper ({py_why[:40]})")
-        wrong = ui("claim", claim=claimA, builderKey=KEYS["stranger"])["file"]       # signed by the wrong wallet
-        ts2 = ui("validateProof", file=wrong, expectedSource="github:acme/tool", onchainOwner=A["vbuilderA"], chainId=31337)["result"]
-        py2, _ = kv.validate_proof(wrong, "github:acme/tool", A["vbuilderA"], 31337)
-        check(not ts2["valid"] and not py2, "a claim signed by the wrong wallet is refused by both")
-        py3, why3 = kv.validate_proof(fa, "github:acme/tool", A["vbuilderA"], 31337)
-        check(py3, "the keeper accepts the proof file the website library produced", why3)
+    # open source: one release + one tag on acme/tool
+    rel = root / "api/repos/acme/tool/releases"; rel.mkdir(parents=True)
+    (rel / "latest").write_text(json.dumps({"tag_name": "v1.0.0"}))
+    (root / "api/repos/acme/tool/tags").write_text(json.dumps([{"name": "v1.0.0"}]))
+    # closed source: two contracts deployed by the project's deployer wallet (nonces 0, 1)
+    init = "0x600a600c600039600a6000f3602a60005260206000f3"   # tiny contract returning 42
+    for _ in range(2):
+        run(["cast", "send", "--rpc-url", c.rpc, "--private-key", KEYS["vdeployer"], "--create", init])
+    fa, fb = sign_both("vbuilder")
+    c.send("vbuilder", BR, "registerBuilderWithProject(string,string)", "https://acme.dev", GH)
+    vid = c.uint(BR, "builderIdOf(address)(uint256)", A["vbuilder"])
+    c.send("vbuilder", BR, "addProject(string)", DOM)
+    pids = [int(x) for x in re.findall(r"\d+", c.call(BR, "projectsOf(uint256)(uint256[])", vid))]
+    srcs = [c.call(BR, "projects(uint256)(uint256,string,bool,uint64)", p).splitlines()[1].strip().strip('"') for p in pids]
+    check(vid > 0 and len(pids) == 2 and srcs == [GH, DOM] and c.uint(BR, "activeProjectCount(uint256)(uint256)", vid) == 2
+          and c.call(BR, "builders(uint256)(address,string,bytes,uint64,bool)", vid).splitlines()[1].strip('"') == "https://acme.dev",
+          f"builder #{vid} registered with registerBuilderWithProject + addProject: projects #{pids[0]} {GH}, #{pids[1]} {DOM}; "
+          f"the profile is free-form (no claim in it)")
+    V["vid"], V["pids"] = vid, pids
+    # the old owner routes its payouts to a separate wallet
+    c.send("vbuilder", CR, "setPayout(uint256,address)", vid, A["vpayout"])
+    check(c.call(CR, "payoutOf(uint256)(address)", vid).lower() == A["vpayout"].lower(), "the builder owner sets its payout wallet")
 
-        # the soulbound badge from phase 1: ADMIN issues, the operator may only flip lapsed, the deployer holds nothing
-        BADGE = S["VerifiedBuilderBadge"]
-        check(c.call(BADGE, "hasRole(bytes32,address)(bool)", "0x" + "00" * 32, A["deployer"]) == "false"
-              and c.call(BADGE, "hasRole(bytes32,address)(bool)", run(["cast", "keccak", "STATUS_ROLE"]).stdout.strip(), A["operator"]) == "true",
-              "badge (phase 1): the deployer holds no role, the operator holds STATUS only")
+    # forgeries: both implementations must refuse
+    forged_dep = {"builder": A["stranger"].lower(), "source": DOM, "deployers": [A["vdeployer"].lower()], "country": "DE", "chain": 31337, "issued": today}
+    ff = ui("claim", claim=forged_dep, builderKey=KEYS["stranger"])["file"]      # the deployer never signed
+    ts = ui("validateProof", file=ff, expectedSource=DOM, onchainOwner=A["stranger"], chainId=31337)["result"]
+    py_ok, py_why = kv.validate_proof(ff, DOM, A["stranger"], 31337)
+    check(not ts["valid"] and ts["rule"] == 5 and not py_ok,
+          f"claiming someone else's deployer is refused by the website (rule {ts['rule']}) and the keeper ({py_why[:40]})")
+    wrong = ui("claim", claim=fa["claim"], builderKey=KEYS["stranger"])["file"]       # signed by the wrong wallet
+    ts2 = ui("validateProof", file=wrong, expectedSource=GH, onchainOwner=A["vbuilder"], chainId=31337)["result"]
+    py2, _ = kv.validate_proof(wrong, GH, A["vbuilder"], 31337)
+    check(not ts2["valid"] and not py2, "a claim signed by the wrong wallet is refused by both")
+    ts3 = ui("validateProof", file=fa, expectedSource=DOM, onchainOwner=A["vbuilder"], chainId=31337)["result"]
+    py3x, _ = kv.validate_proof(fa, DOM, A["vbuilder"], 31337)
+    check(not ts3["valid"] and ts3["rule"] == 2 and not py3x, "one project's proof does not vouch for another project (rule 2, both)")
+    py3, why3 = kv.validate_proof(fa, GH, A["vbuilder"], 31337)
+    py4, why4 = kv.validate_proof(fb, DOM, A["vbuilder"], 31337)
+    check(py3 and py4, "the keeper accepts both proof files the website library produced (the domain one co-signed by its deployer)", f"{why3} {why4}")
 
-        # the real onboarding batch, executed as the multisig would
-        out_dir = root / "batch"
-        r = run(["npx", "--yes", "tsx", "scripts/onboard-batch.ts", "--network", "local", "--rpc", c.rpc,
-                 "--builder-registry", S["BuilderRegistry"], "--caretaker-registry", S["CaretakerRegistry"],
-                 "--operator", A["operator"], "--chain-id", "31337", "--badge", BADGE, "--out", str(out_dir)], cwd=FRONTEND)
-        batch = json.loads((out_dir / "onboard-batch.safe.json").read_text())
-        txs = batch["transactions"]
-        to_ct = [t for t in txs if t["to"].lower() == S["CaretakerRegistry"].lower()]
-        to_badge = [t for t in txs if t["to"].lower() == BADGE.lower()]
-        check(len(txs) == 4 and len(to_ct) == 2 and len(to_badge) == 2,
-              f"onboard-batch: setCaretaker + issue for each of the two pending builders ({len(txs)} txs)")
-        check(all(txs.index(to_ct[k]) < txs.index(to_badge[k]) for k in range(2)),
-              "each builder's badge is issued after its caretaker is set, in the same batch")
-        # the fast path: the onboarder hot wallet sends the batch itself (no Safe session)
-        for t in txs:
-            run(["cast", "send", t["to"], t["data"], "--rpc-url", c.rpc, "--private-key", KEYS["onboarder"]])
-        check(all(c.call(S["CaretakerRegistry"], "isCaretaker(uint256,address)(bool)", i, A["operator"]) == "true" for i in (idA, idB)),
-              "after the batch our operator is caretaker of both builders")
-        sA = c.uint(BADGE, "serialOf(uint256)(uint256)", idA); sB = c.uint(BADGE, "serialOf(uint256)(uint256)", idB)
-        check(sorted([sA, sB]) == [1, 2]
-              and c.call(BADGE, "ownerOf(uint256)(address)", sA).lower() == A["vbuilderA"].lower()
-              and c.call(BADGE, "ownerOf(uint256)(address)", sB).lower() == A["vbuilderB"].lower(),
-              f"badges No. {sA:03d} and No. {sB:03d} are held by the builders themselves")
-        err = c.fails_with("vbuilderA", BADGE, "transferFrom(address,address,uint256)", A["vbuilderA"], A["stranger"], sA)
-        check(err != "", "the badge is soulbound: its holder cannot transfer it")
-        err = c.fails_with("operator", BADGE, "issue(uint256)", idA)
-        check(err != "", "the keeper's operator key cannot issue a badge")
-        def badge_json(serial):
-            uri = c.call(BADGE, "tokenURI(uint256)(string)", serial).strip().strip('"')
-            import base64
-            return json.loads(base64.b64decode(uri.split(",", 1)[1]))
-        jA = badge_json(sA)
-        attrs = {a["trait_type"]: a["value"] for a in jA["attributes"]}
-        check(jA["name"] == f"Registrai Verified Builder No. {sA:03d}" and attrs["Status"] == "Verified"
-              and attrs["Source"] == "github:acme/tool" and jA["image"] == f"https://registrai.cc/badge/local/{sA}.jpg"
-              and jA["external_url"].endswith(f"?builder={idA}"),
-              "tokenURI: on-chain JSON names the serial, source, status and image")
-        # the badge art for this serial renders (the image the metadata points at)
-        art = root / "badge-art"
-        run(["python3", "scripts/render-badges.py", "--network", "local", "--upto", "2", "--out", str(art)], cwd=FRONTEND)
-        check(all((art / "local" / f).stat().st_size > 20_000 for f in ("1.jpg", "2.jpg", "2-lapsed.jpg", "card.jpg")),
-              "render-badges produces the badge, lapsed and share-card images")
+    # the soulbound badge from phase 1
+    check(c.call(BADGE, "hasRole(bytes32,address)(bool)", ZERO32, A["deployer"]) == "false"
+          and c.call(BADGE, "hasRole(bytes32,address)(bool)", run(["cast", "keccak", "STATUS_ROLE"]).stdout.strip(), A["operator"]) == "true",
+          "badge (phase 1): the deployer holds no role, the operator holds STATUS only")
 
-        # keeper ticks, isolated from the live state files
-        data_dir = root / "keeper-data"; data_dir.mkdir()
-        kenv = {"RPC": c.rpc, "PRIVATE_KEY": KEYS["operator"], "PROGRESS_POOL": S["ProgressPool"], "MARKETS_PERENNIAL": S["MarketsPerennial"],
-                "NANO_LEDGER": S["NanoLedger"], "CARETAKER_REGISTRY": S["CaretakerRegistry"], "BUILDER_REGISTRY": S["BuilderRegistry"],
-                "PROGRESS_ARBITER": S["ProgressArbiter"], "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"],
-                "FEED_RESOLVER": A["resolver"], "FEED_CHALLENGE_WINDOW": "3600", "CHAIN_ID": "31337", "AUTO_OPEN_MARKETS": "false",
-                "CARETAKER_DATA_DIR": str(data_dir), "VERIFIED_BADGE": BADGE, "BADGE_LAPSE_TICKS": "1", **proof_env}
-        def keeper_tick_full():
-            r = run(["python3", "keeper/caretaker.py"], env=kenv, cwd=ARC, ok=False)
-            return r.stdout + r.stderr
-        markets_by_op_before = c.uint(S["MarketsPerennial"], "createdBy(address)(uint256)", A["operator"])
-        log1 = keeper_tick_full()
-        check("2 verified" in log1, "keeper sees both builders as verified", log1[-1500:])
-        st = json.loads((data_dir / "caretaker-state.json").read_text())
-        feeds = {k: v.get("milestoneFeedId") for k, v in st.items() if isinstance(v, dict) and v.get("milestoneFeedId")}
-        fA = next(v for k, v in feeds.items() if "acme/tool" in k); fB = next(v for k, v in feeds.items() if "domain:127.0.0.1" in k)
-        latest = lambda f: int(c.call(S["Attestation"], "latestValue(bytes32,address)(int256,uint256,bool)", f, A["operator"]).split()[0])
-        check(latest(fA) == 2, f"open-source milestone published on-chain: release + tag = {latest(fA)}", log1[-3000:])
-        check(latest(fB) == 2, f"closed-source milestone published on-chain: contracts deployed by B = {latest(fB)}", log1[-3000:])
-        check(c.call(S["MarketsPerennial"], "isApprovedFeed(bytes32,address)(bool)", fA, A["operator"]) == "true",
-              "the new milestone feed passes the oracle allowlist (independent resolver)")
-        check(c.uint(S["MarketsPerennial"], "createdBy(address)(uint256)", A["operator"]) == markets_by_op_before,
-              "the keeper opened no market itself (auto_open_markets=false)")
-        m = ui("create", "bob", builderId=idA, feedId=fA, expiryIn=7 * 86400, liquidity=str(5 * U))
-        check(m["threshold"] == "3", "a community member opens a market on the verified builder: >= 2 + 1 = 3")
+    # the real onboarding batch, executed by the onboarder hot wallet (the fast path)
+    out_dir = root / "batch"
+    run(["npx", "--yes", "tsx", "scripts/onboard-batch.ts", "--network", "local", "--rpc", c.rpc,
+         "--builder-registry", BR, "--caretaker-registry", CR,
+         "--operator", A["operator"], "--chain-id", "31337", "--badge", BADGE, "--out", str(out_dir)], cwd=FRONTEND)
+    txs = json.loads((out_dir / "onboard-batch.safe.json").read_text())["transactions"]
+    check(len(txs) == 2 and txs[0]["to"].lower() == CR.lower() and txs[1]["to"].lower() == BADGE.lower(),
+          f"onboard-batch is per builder: setCaretaker then issue for the one pending builder with two projects ({len(txs)} txs)")
+    for t in txs:
+        run(["cast", "send", t["to"], t["data"], "--rpc-url", c.rpc, "--private-key", KEYS["onboarder"]])
+    check(c.call(CR, "isCaretaker(uint256,address)(bool)", vid, A["operator"]) == "true",
+          "after the onboarder sends the batch our operator is the builder's caretaker")
+    serial = c.uint(BADGE, "serialOf(uint256)(uint256)", vid)
+    V["serial"] = serial
+    issued_at = c.uint(BADGE, "issuedAt(uint256)(uint64)", serial)
+    check(serial == 1 and c.call(BADGE, "ownerOf(uint256)(address)", serial).lower() == A["vbuilder"].lower(),
+          f"badge No. {serial:03d} (one per builder, not per project) is held by the builder itself")
+    check(c.fails_with("vbuilder", BADGE, "transferFrom(address,address,uint256)", A["vbuilder"], A["stranger"], serial) != "",
+          "the badge is soulbound: its holder cannot transfer it")
+    check(c.fails_with("operator", BADGE, "issue(uint256)", vid) != "", "the keeper's operator key cannot issue a badge")
+    check(c.fails_with("onboarder", BADGE, "revoke(uint256)", vid) != "", "the onboarder cannot revoke a badge (REVOKER is Safe-only)")
 
-        # proof removed -> lapsed: alert, count frozen, existing market still settleable
-        (wk / "registrai.json").unlink()
-        run(["cast", "send", "--rpc-url", c.rpc, "--private-key", KEYS["vbuilderB"], "--create", init])   # a 3rd deploy
-        log2 = keeper_tick_full()
-        check("lapsed" in log2 and "ALERT" in log2, "removing the proof: the keeper alerts the builder has lapsed", log2[-1200:])
-        check(latest(fB) == 2, "lapsed builder: no heartbeat, the published count stays at 2 despite a 3rd deploy")
-        check(latest(fA) == 2, "the other builder is unaffected")
-        check(c.call(BADGE, "lapsed(uint256)(bool)", sB) == "true" and badge_json(sB)["image"].endswith(f"/{sB}-lapsed.jpg"),
-              "the keeper marks the lapsed builder's badge lapsed on-chain (image switches to the lapsed art)", log2[-1200:])
-        check(c.call(BADGE, "lapsed(uint256)(bool)", sA) == "false" and c.call(BADGE, "ownerOf(uint256)(address)", sB).lower() == A["vbuilderB"].lower(),
-              "the verified builder's badge stays verified; the lapsed badge stays with its builder")
-        (wk / "registrai.json").write_text(json.dumps(fb))          # proof back
-        log3 = keeper_tick_full()
-        check(c.call(BADGE, "lapsed(uint256)(bool)", sB) == "false", "proof restored: the badge is verified again on the next tick", log3[-1200:])
-        r = run(["python3", "keeper/builders_keeper.py"], cwd=ARC, ok=False,
-                env={"RPC": c.rpc, "PRIVATE_KEY": KEYS["operator"], "BUILDER_REGISTRY": S["BuilderRegistry"],
-                     "CARETAKER_REGISTRY": S["CaretakerRegistry"], "VERIFIED_BADGE": BADGE, "CHAIN_ID": "31337",
-                     "BUILDERS_DATA_DIR": str(data_dir), **proof_env})
-        out = r.stdout + r.stderr
-        check(r.returncode == 0 and "2 verified" in out and "marked" not in out,
-              "the phase-1 keeper agrees with the full keeper: both builders verified, no badge change", out[-800:])
-    finally:
-        for srv in (gh_srv, dom_srv, api_srv):
-            srv.shutdown()
-        for k in proof_env:
-            os.environ.pop(k, None)
+    def badge_json(s):
+        uri = c.call(BADGE, "tokenURI(uint256)(string)", s).strip().strip('"')
+        return json.loads(base64.b64decode(uri.split(",", 1)[1]))
+    j = badge_json(serial)
+    attrs = {a["trait_type"]: a["value"] for a in j["attributes"]}
+    check(j["name"] == f"Registrai Verified Builder No. {serial:03d}" and set(attrs) == {"Status", "Serial", "Builder ID", "Chain", "Issued"}
+          and attrs["Status"] == "Verified" and attrs["Builder ID"] == vid and attrs["Chain"] == "Local"
+          and j["image"] == f"https://registrai.cc/badge/local/{serial}.jpg" and j["external_url"].endswith(f"?builder={vid}"),
+          "tokenURI: on-chain JSON names the serial, status, builder id, chain and issue date — no Source attribute")
+    art = root / "badge-art"
+    run(["python3", "scripts/render-badges.py", "--network", "local", "--upto", "1", "--out", str(art)], cwd=FRONTEND)
+    check(all((art / "local" / f).stat().st_size > 20_000 for f in ("1.jpg", "1-lapsed.jpg", "card.jpg")),
+          "render-badges produces the badge, lapsed and share-card images")
+
+    # first keeper tick: one milestone feed per verified project, counts published
+    markets_by_op_before = c.uint(MP, "createdBy(address)(uint256)", A["operator"])
+    log1 = keeper_tick_full()
+    check("builders: 1 verified (2 verified projects)" in log1, "keeper sees one verified builder with two verified projects", log1[-1500:])
+    st = json.loads((data_dir / "caretaker-state.json").read_text())
+    kA, kB = f"#{vid}|{GH}", f"#{vid}|{DOM}"
+    fA, fB = (st.get(kA) or {}).get("milestoneFeedId"), (st.get(kB) or {}).get("milestoneFeedId")
+    check(bool(fA) and bool(fB) and fA != fB, f"state is keyed per project ({kA}, {kB}), one milestone feed each", list(st))
+    V["fA"], V["fB"] = fA, fB
+    check("[tool] recorded release v1.0.0, tag v1.0.0 (count 2)" in log1 and "[tool] published milestone count 2 on-chain" in log1
+          and latest(fA) == 2, f"open-source project milestone recorded and published on-chain: release + tag = {latest(fA)}", log1[-3000:])
+    check("[127.0.0.1] published milestone count 2 on-chain" in log1 and latest(fB) == 2,
+          f"closed-source project milestone published on-chain: contracts deployed by its deployer = {latest(fB)}", log1[-3000:])
+    check(all(c.call(MP, "isApprovedFeed(bytes32,address)(bool)", f, A["operator"]) == "true" for f in (fA, fB)),
+          "both project feeds pass the oracle allowlist (independent resolver)")
+    check(c.uint(MP, "createdBy(address)(uint256)", A["operator"]) == markets_by_op_before,
+          "the keeper opened no market itself (auto_open_markets=false)")
+
+    # the season market: a community member opens it; traders (not the builder, creator or agent) trade it
+    m9 = ui("create", "bob", builderId=vid, feedId=fA, expiryIn=7200, liquidity=str(5 * U))
+    check(m9["threshold"] == "3", "a community member opens a market on the verified builder's github project: >= 2 + 1 = 3")
+    M9 = m9["marketId"]
+    V["M9"] = M9
+    ep1 = epoch_now()
+    V["ep_whale"] = ep1
+    vol = 0
+    ui("deposit", "whale", amount=str(MINTED["whale"] * U))
+    for i in range(3):   # a high-volume trader: round trips, so this builder's epoch income crosses $1,000
+        amt = led(A["whale"])
+        b = ui("buy", "whale", marketId=M9, side="Yes", amount=str(amt))
+        s = ui("sell", "whale", marketId=M9, side="Yes", shares=b["sharesOut"])
+        check(b["quoteMatched"] and s["quoteMatched"],
+              f"whale round trip {i + 1}: buys YES {amt/U:,.2f} and sells it all back, exactly at the UI quotes")
+        vol += amt + int(s["grossOut"])
+    a9 = ui("buy", "alice", marketId=M9, side="Yes", amount=str(20 * U))
+    check(a9["quoteMatched"], "alice buys YES 20 on the season market at the UI quote")
+    vol += 20 * U
+    V["m9_volume"] = vol
+    gross = income_of(ep1, vid)
+    check(gross == credited[vid] and gross > 1_000 * U,
+          f"builder #{vid}'s income in epoch {ep1}: {gross/U:,.6f} USDC (exactly the 50% legs; above the $1,000 tax-free bracket)")
+    rows = ui("income", builderId=vid)["rows"]
+    row = next((r for r in rows if int(r["epoch"]) == ep1), {})
+    tW, fW, nW = income_split(gross)
+    check(int(row.get("gross", -1)) == gross and int(row.get("tax", -1)) == tW > 0 and row.get("state") == "open",
+          f"UI income card: epoch {ep1} open, gross {gross/U:,.2f}, tax {tW/U:.6f} (10% of the slice above $1,000)", row)
+
+    print("== 9a. one proof removed: that project lapses, the builder stays verified")
+    dom_file.unlink()
+    run(["cast", "send", "--rpc-url", c.rpc, "--private-key", KEYS["vdeployer"], "--create", init])   # a 3rd deploy
+    log2 = keeper_tick_full()
+    check(f"ALERT caretaker: [builder #{vid} project #{pids[1]} {DOM}] lapsed" in log2
+          and "builders: 1 verified (1 verified projects)" in log2,
+          "removing the domain proof: that project gets an ALERT, the builder stays verified on its github project", log2[-2000:])
+    check(latest(fB) == 2, "lapsed project: no heartbeat, its published count stays at 2 despite a 3rd deploy")
+    check(latest(fA) == 2 and c.call(BADGE, "lapsed(uint256)(bool)", serial) == "false",
+          "the other project is unaffected and the badge stays verified")
+
+    print("== 9b. all proofs removed: the badge lapses; restored: verified again")
+    gh_file.unlink()
+    log3 = keeper_tick_full()
+    check(f"[builder {vid}] badge No. {serial:03d} marked LAPSED" in log3 and f"ALERT caretaker: [builder #{vid}" in log3
+          and "builders: 0 verified (0 verified projects)" in log3,
+          "no verified project left: the keeper alerts and marks the badge lapsed on-chain", log3[-2000:])
+    check(c.call(BADGE, "isLapsed(uint256)(bool)", serial) == "true" and badge_json(serial)["image"].endswith(f"/{serial}-lapsed.jpg")
+          and c.call(BADGE, "ownerOf(uint256)(address)", serial).lower() == A["vbuilder"].lower(),
+          "the lapsed badge reads Lapsed (lapsed art) and stays with its builder")
+    check(latest(fA) == 2 and latest(fB) == 2, "both counts frozen while lapsed")
+    gh_file.write_text(json.dumps(fa)); dom_file.write_text(json.dumps(fb))      # proofs back
+    (rel / "latest").write_text(json.dumps({"tag_name": "v1.1.0"}))              # and the builder ships a release
+    log4 = keeper_tick_full()
+    check(c.call(BADGE, "lapsed(uint256)(bool)", serial) == "false" and "builders: 1 verified (2 verified projects)" in log4,
+          "proofs restored: the builder and its badge are verified again on the next tick", log4[-2000:])
+    check("[tool] recorded release v1.1.0 (count 3)" in log4 and latest(fA) == 3 and latest(fB) == 3,
+          "counts resume: github 3 (new release), domain 3 (the deploy made while lapsed)", log4[-3000:])
+
+    print("== 9c. the season market settles YES through the keeper")
+    c.warp_to(int(m9["expiry"]) + 5)
+    log5 = keeper_tick_full()
+    check(f"settle: attest {fA.lower()} 3" in log5.lower(), "keeper attests the github project's count (3) in M9's window", log5[-2000:])
+    c.warp_to(c.now() + FEED_WINDOW + 60)
+    log6 = keeper_tick_full()
+    check(f"settle: resolve {M9.lower()}" in log6.lower(), "keeper resolves M9", log6[-2000:])
+    st9 = ui("status", marketId=M9)
+    check(st9["status"] == "resolved-yes" and st9["yesWon"], "M9 resolved YES (count 3 >= 3)")
+    res = ui("redeem", "alice", marketId=M9)
+    check(res["previewMatched"], f"alice redeems M9: {int(res['payout'])/U:.4f} USDC = UI preview")
+    V["season_resolved_block"] = c.block()
+
+    r = run(["python3", "keeper/builders_keeper.py"], cwd=ARC, ok=False,
+            env={"RPC": c.rpc, "PRIVATE_KEY": KEYS["operator"], "BUILDER_REGISTRY": BR,
+                 "CARETAKER_REGISTRY": CR, "VERIFIED_BADGE": BADGE, "CHAIN_ID": "31337",
+                 "BUILDERS_DATA_DIR": str(data_dir)})
+    out = r.stdout + r.stderr
+    check(r.returncode == 0 and "builders: 1 verified," in out and "projects: 2 verified," in out and "marked" not in out,
+          "the phase-1 keeper agrees with the full keeper: 1 verified builder, 2 verified projects, no badge change", out[-800:])
+
+    print("== 10. income with tax: the high-volume epoch ends, the keeper pays it")
+    c.warp_to(c.uint(FUND, "epochEnd(uint256)(uint256)", ep1) + 1)
+    before = (led(A["vpayout"]), led(A["treasury"]), led(POOL), unallocated(), c.uint(FUND, "outstanding()(uint256)"))
+    log7 = keeper_tick_full()
+    after = (led(A["vpayout"]), led(A["treasury"]), led(POOL), unallocated(), c.uint(FUND, "outstanding()(uint256)"))
+    want = f"income: claimed epoch {ep1} for builder #{vid}: gross {gross} tax {tW} fee {fW} net {nW} -> {A['vpayout'].lower()}"
+    check(want in log7, f"keeper: '{want}'", log7[-2500:])
+    check(after[0] - before[0] == nW and after[1] - before[1] == fW and after[2] - before[2] == tW and after[3] - before[3] == tW
+          and before[4] - after[4] == gross,
+          f"exact: net {nW/U:,.6f} to the payout the owner set, fee {fW/U:.6f} (1% of gross-tax) to the treasury, "
+          f"tax {tW/U:.6f} to the SeasonPool (unallocated)")
+    pool_expected["v"] += tW
+
+    print("== 10a. owner transfer: proposeOwner -> acceptOwnership; proofs re-signed; the badge follows")
+    c.send("vbuilder", BR, "proposeOwner(address)", A["vowner2"])
+    check(c.fails_with("stranger", BR, "acceptOwnership(uint256)", vid) != "", "only the proposed wallet can accept")
+    c.send("vowner2", BR, "acceptOwnership(uint256)", vid)
+    check(c.call(BR, "ownerOf(uint256)(address)", vid).lower() == A["vowner2"].lower()
+          and c.uint(BR, "builderIdOf(address)(uint256)", A["vowner2"]) == vid and c.uint(BR, "builderIdOf(address)(uint256)", A["vbuilder"]) == 0,
+          f"builder #{vid} now belongs to the new wallet (same id, same projects)")
+    check(c.call(CR, "payoutOf(uint256)(address)", vid).lower() == A["vowner2"].lower()
+          and A["vpayout"].lower() in c.call(CR, "payoutRecord(uint256)(address,address)", vid).lower(),
+          "the payout the old owner set is ignored: payoutOf == the new owner")
+    for f, src in ((fa, GH), (fb, DOM)):
+        t = ui("validateProof", file=f, expectedSource=src, onchainOwner=A["vowner2"], chainId=31337)["result"]
+        p, _ = kv.validate_proof(f, src, A["vowner2"], 31337)
+        check(not t["valid"] and t["rule"] == 4 and not p, f"the old owner's {src} proof lapses after the transfer (rule 4, both)")
+    fa, fb = sign_both("vowner2")
+    log8 = keeper_tick_full()
+    check(f"badge No. {serial:03d} synced to the new owner" in log8 and "builders: 1 verified (2 verified projects)" in log8,
+          "keeper tick: the badge is synced to the new owner; both re-signed projects verified", log8[-2000:])
+    check(c.call(BADGE, "ownerOf(uint256)(address)", serial).lower() == A["vowner2"].lower() and c.uint(BADGE, "serialOf(uint256)(uint256)", vid) == serial
+          and c.uint(BADGE, "issuedAt(uint256)(uint64)", serial) == issued_at and c.call(BADGE, "lapsed(uint256)(bool)", serial) == "false"
+          and c.uint(BADGE, "balanceOf(address)(uint256)", A["vbuilder"]) == 0,
+          f"badge No. {serial:03d} now held by the new owner: same serial, same issue date, still verified")
+    # a second market on the domain project, left open: its income is earned before the recovery
+    m10 = ui("create", "alice", builderId=vid, feedId=fB, expiryIn=30 * 86400, liquidity=str(5 * U))
+    check(m10["threshold"] == "4", "a market on the domain project's own feed: >= 3 + 1 = 4")
+    V["M10"] = m10["marketId"]
+    ep2 = epoch_now()
+    check(ui("buy", "bob", marketId=V["M10"], side="Yes", amount=str(10 * U))["quoteMatched"],
+          f"bob buys YES 10 on it in epoch {ep2}: income for builder #{vid}")
+    g_rec = income_of(ep2, vid)
+
+    print("== 11. recovery: the Safe moves the builder to a recovered wallet after 7 days")
+    check(c.fails_with("onboarder", BR, "startRecovery(uint256,address)", vid, A["vrecovered"]) != "",
+          "the onboarder cannot start a recovery (REGISTRAR is the Safe's)")
+    c.send("admin", BR, "startRecovery(uint256,address)", vid, A["vrecovered"])
+    check(A["vrecovered"].lower() in c.call(BR, "recoveryOf(uint256)(address,uint64)", vid).lower(), "the Safe starts a recovery")
+    err = c.fails_with("stranger", BR, "finishRecovery(uint256)", vid)
+    check(reverted_with(err, "RecoveryNotReady"), "finishRecovery before 7 days reverts", err[-200:])
+    c.increase_time(RECOVERY_DELAY + 60)
+    c.send("stranger", BR, "finishRecovery(uint256)", vid)
+    check(c.call(BR, "ownerOf(uint256)(address)", vid).lower() == A["vrecovered"].lower()
+          and c.call(CR, "payoutOf(uint256)(address)", vid).lower() == A["vrecovered"].lower(),
+          f"after 7 days anyone finishes it: builder #{vid} is owned (and paid) by the recovered wallet")
+    check(epoch_now() > ep2 and c.call(FUND, "claimed(uint256,uint256)(bool)", ep2, vid) == "false",
+          f"epoch {ep2} (earned before the recovery) ended unclaimed")
+    before_rec = led(A["vrecovered"])
+    ci = ui("claimIncome", "stranger", builderId=vid, epoch=ep2)
+    tR, fR, nR = income_split(g_rec)
+    check(ci["previewMatched"] and int(ci["gross"]) == g_rec and int(ci["net"]) == nR and int(ci["fee"]) == fR
+          and (ci["payout"] or "").lower() == A["vrecovered"].lower() and led(A["vrecovered"]) - before_rec == nR,
+          f"UI claimIncome (anyone): epoch {ep2} income paid exactly as previewed ({nR/U:.6f} net) to the recovered owner")
+    pool_expected["v"] += tR
+    fa, fb = sign_both("vrecovered")
+    log9 = keeper_tick_full()
+    check(f"badge No. {serial:03d} synced to the new owner" in log9 and c.call(BADGE, "ownerOf(uint256)(address)", serial).lower() == A["vrecovered"].lower()
+          and c.uint(BADGE, "serialOf(uint256)(uint256)", vid) == serial and "builders: 1 verified (2 verified projects)" in log9
+          and f"epoch {ep2} builder #{vid} already claimed or swept" in log9,
+          f"keeper tick: badge No. {serial:03d} synced to the recovered owner; re-signed projects verified; the claimed epoch dropped",
+          log9[-2500:])
+    rows = ui("income", builderId=vid)["rows"]
+    paid = {int(r["epoch"]): r for r in rows if r["state"] == "claimed"}
+    check(ep1 in paid and ep2 in paid and (paid[ep2].get("payout") or "").lower() == A["vrecovered"].lower()
+          and (paid[ep1].get("payout") or "").lower() == A["vpayout"].lower(),
+          "UI income card: both epochs claimed, each to the payout of its day (old owner's wallet, then the recovered owner)", rows)
+    V["season_to"] = c.block()
+    return V
+
+
+def season_stage(c, A, S, V, led, unallocated, pool_expected, reverted_with):
+    print("== 12. a season: the pool (taxes + void escrow + frozen sweep) -> season-rewards -> Safe publish -> claim")
+    POOL, vid = S["SeasonPool"], V["vid"]
+    total = unallocated()
+    check(total == pool_expected["v"] == led(POOL) and total > 0,
+          f"the SeasonPool holds {total/U:.6f} USDC, all unallocated: void escrow + frozen income + progressive tax")
+    out_dir = pathlib.Path(tempfile_mod.mkdtemp(prefix="season-"))
+    r = run(["npx", "--yes", "tsx", "scripts/season-rewards.ts", "--network", "local", "--rpc", c.rpc, "--season", "1",
+             "--total", f"{total // U}.{total % U:06d}", "--from-block", str(V["season_from"]), "--to-block", str(V["season_to"]),
+             "--markets", S["MarketsPerennial"], "--builder-registry", S["BuilderRegistry"], "--caretaker-registry", S["CaretakerRegistry"],
+             "--badge", S["VerifiedBuilderBadge"], "--operator", A["operator"], "--from-deploy-block", "0", "--out", str(out_dir)],
+            cwd=FRONTEND, ok=False)
+    if r.returncode != 0:
+        raise SystemExit(f"season-rewards failed:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
+    f = json.loads((out_dir / "season-1.json").read_text())
+    safe = json.loads((out_dir / "season-1.safe.json").read_text())
+    rows = {int(b["builderId"]): b for b in f["builders"]}
+    cap = total * 2000 // 10_000
+    row = rows.get(vid) or {}
+    mk = {m["marketId"].lower(): m for m in row.get("markets", [])}
+    check(list(rows) == [vid] and f["eligible"] == [vid] and int(row["amount"]) == cap and row["capped"]
+          and int(f["total"]) == total,
+          f"season-rewards: only builder #{vid} is eligible (badge verified, ours); its share is capped at 20% ({cap/U:.6f})",
+          json.dumps(f)[:1500])
+    check(V["M9"].lower() in mk and int(mk[V["M9"].lower()]["volume"]) == V["m9_volume"] >= 500 * U,
+          f"its points come from M9 (resolved YES in the window): counted volume {V['m9_volume']/U:,.2f} USDC by non-builder "
+          f"traders (the creator and the agent excluded)")
+    tx = safe["transactions"][0]
+    check(len(safe["transactions"]) == 1 and tx["to"].lower() == POOL.lower(), "the Safe file is one publishSeason call to the SeasonPool")
+    check(c.fails_with("operator", POOL, "publishSeason(uint256,bytes32,uint256,uint64)", 1, f["root"], total, int(f["deadline"])) != "",
+          "only the Safe (GOVERNOR) can publish a season")
+    run(["cast", "send", tx["to"], tx["data"], "--rpc-url", c.rpc, "--private-key", KEYS["admin"]])
+    season = c.call(POOL, "seasons(uint256)(bytes32,uint256,uint256,uint64,bool)", 1).splitlines()
+    check(season[0].strip().lower() == f["root"].lower() and int(season[1].split()[0]) == total and unallocated() == 0
+          and c.uint(POOL, "reserved()(uint256)") == total,
+          "ADMIN sends the Safe file's calldata: season 1 published (root, total reserved, nothing left unallocated)")
+    proof = "[" + ",".join(row["proof"]) + "]"
+    err = c.fails_with("stranger", POOL, "claim(uint256,uint256,uint256,bytes32[])", 1, vid, cap + 1, proof)
+    check(reverted_with(err, "AboveCap"), "claiming more than 20% of the season total reverts (AboveCap)", err[-200:])
+    before = led(A["vrecovered"])
+    c.send("stranger", POOL, "claim(uint256,uint256,uint256,bytes32[])", 1, vid, cap, proof)
+    check(led(A["vrecovered"]) - before == cap, f"anyone claims builder #{vid}'s season reward with its proof: {cap/U:.6f} to its payout")
+    pool_expected["v"] -= cap
+    err = c.fails_with("stranger", POOL, "claim(uint256,uint256,uint256,bytes32[])", 1, vid, cap, proof)
+    check(reverted_with(err, "AlreadyClaimed"), "a second claim reverts (AlreadyClaimed)", err[-200:])
 
 
 if __name__ == "__main__":
