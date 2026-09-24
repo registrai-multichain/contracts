@@ -8,7 +8,9 @@ import {Attestation} from "../src/Attestation.sol";
 import {Dispute} from "../src/Dispute.sol";
 import {NanoLedger} from "../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../src/nanopay/MarketsPerennial.sol";
-import {ProgressPool} from "../src/perennial/ProgressPool.sol";
+import {BuilderFund} from "../src/perennial/BuilderFund.sol";
+import {SeasonPool} from "../src/perennial/SeasonPool.sol";
+import {LaunchSchedule} from "./lib/LaunchSchedule.sol";
 import {BuilderRegistry} from "../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../src/perennial/CaretakerRegistry.sol";
 
@@ -44,10 +46,14 @@ contract RehearseSettlement is Script {
         CaretakerRegistry caretakers = new CaretakerRegistry(builders, deployer);
         builders.registerFor(address(0xB111), "github.com/example/builder");
         // protocol treasury: a fixed address no rehearsal key controls
-        ProgressPool pool =
-            new ProgressPool(ledger, builders, caretakers, deployer, 1 days, 1 hours, address(0x7EA5));
+        SeasonPool pool = new SeasonPool(ledger, builders, caretakers, deployer);
+        BuilderFund fund = new BuilderFund(
+            ledger, builders, caretakers, pool, address(0x7EA5), deployer, 1 days, LaunchSchedule.brackets()
+        );
         MarketsPerennial markets =
-            new MarketsPerennial(ledger, registry, attestation, builders, deployer, address(pool), 1 hours, 1 days);
+            new MarketsPerennial(ledger, registry, attestation, builders, deployer, fund, 1 hours, 1 days);
+        fund.grantRole(fund.MARKETS_ROLE(), address(markets));
+        pool.grantRole(pool.FUNDER_ROLE(), address(fund));
         // oracle allowlist: our agent, the foreign agent (so its market exists to
         // be ignored), and the deployer as every feed's dispute resolver
         markets.setApprovedAgent(agent, true);
@@ -87,8 +93,10 @@ contract RehearseSettlement is Script {
         console2.log("REHEARSAL markets", address(markets));
         console2.log("REHEARSAL attestation", address(attestation));
         console2.log("REHEARSAL ledger", address(ledger));
+        // "pool" = where a void's unclaimed agent escrow ends up (the season pool)
         console2.log("REHEARSAL pool", address(pool));
-        console2.log("REHEARSAL protocol_treasury", pool.PROTOCOL_TREASURY());
+        console2.log("REHEARSAL fund", address(fund));
+        console2.log("REHEARSAL protocol_treasury", fund.PROTOCOL_TREASURY());
         console2.log("REHEARSAL agent", agent);
         console2.log("REHEARSAL served_feed", vm.toString(served));
         console2.log("REHEARSAL m_served", vm.toString(mServed));

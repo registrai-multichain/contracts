@@ -8,7 +8,7 @@ import {Registry} from "../src/Registry.sol";
 import {Attestation} from "../src/Attestation.sol";
 import {Dispute} from "../src/Dispute.sol";
 
-/// @notice Step 1 of the mainnet order. Deploys a fresh oracle stack —
+/// @notice Phase 2, step 1 of the mainnet order. Deploys a fresh oracle stack —
 ///         Registry(usdc, minBond) + Attestation + Dispute — and wires it.
 ///         No legacy Markets and no deployer treasury (unlike Deploy.s.sol).
 ///

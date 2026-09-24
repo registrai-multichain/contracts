@@ -9,14 +9,15 @@ import {Attestation} from "../../src/Attestation.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
-import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
-import {ProgressArbiter} from "../../src/perennial/ProgressArbiter.sol";
+import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
+import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
 /// @notice The role table of a deployed mainnet stack, and the assertions that
 /// define "handed off": ADMIN holds every admin/governor/registrar role, the
-/// deployer holds none, only the arbiter writes progress, and the oracle
-/// stack's one-shot deployer powers (wire, setPoints) are consumed.
+/// deployer holds none, only MarketsPerennial credits builder income (fund
+/// MARKETS_ROLE) and only the fund funds the season pool (FUNDER_ROLE), and
+/// the oracle stack's one-shot deployer powers (wire, setPoints) are consumed.
 abstract contract RoleTable is DeployBase {
     struct Stack {
         address registry;
@@ -24,18 +25,17 @@ abstract contract RoleTable is DeployBase {
         address ledger;
         address builders;
         address caretakers;
-        address pool;
+        address fund;
+        address seasonPool;
         address perennial;
         address v4;
-        address arbiter;
     }
 
     bytes32 internal constant DEFAULT_ADMIN = 0x00;
     bytes32 internal constant GOVERNOR = keccak256("GOVERNOR_ROLE");
     bytes32 internal constant REGISTRAR = keccak256("REGISTRAR_ROLE");
-    bytes32 internal constant PROGRESS = keccak256("PROGRESS_ROLE");
-    bytes32 internal constant PROPOSER = keccak256("PROPOSER_ROLE");
-    bytes32 internal constant RESOLVER = keccak256("RESOLVER_ROLE");
+    bytes32 internal constant MARKETS = keccak256("MARKETS_ROLE");
+    bytes32 internal constant FUNDER = keccak256("FUNDER_ROLE");
 
     function _loadStack() internal view returns (Stack memory s) {
         s.registry = vm.envAddress("REGISTRY");
@@ -43,10 +43,10 @@ abstract contract RoleTable is DeployBase {
         s.ledger = vm.envAddress("NANO_LEDGER");
         s.builders = vm.envAddress("BUILDER_REGISTRY");
         s.caretakers = vm.envAddress("CARETAKER_REGISTRY");
-        s.pool = vm.envAddress("PROGRESS_POOL");
+        s.fund = vm.envAddress("BUILDER_FUND");
+        s.seasonPool = vm.envAddress("SEASON_POOL");
         s.perennial = vm.envAddress("MARKETS_PERENNIAL");
         s.v4 = vm.envAddress("MARKETS_V4");
-        s.arbiter = vm.envAddress("PROGRESS_ARBITER");
     }
 
     /// @dev The admin-type roles of every AccessControl contract in the stack:
@@ -57,9 +57,9 @@ abstract contract RoleTable is DeployBase {
         pure
         returns (address[] memory where, bytes32[] memory roles, string[] memory names)
     {
-        where = new address[](13);
-        roles = new bytes32[](13);
-        names = new string[](13);
+        where = new address[](14);
+        roles = new bytes32[](14);
+        names = new string[](14);
         uint256 i;
         (where[i], roles[i], names[i]) = (s.ledger, GOVERNOR, "NanoLedger GOVERNOR");
         i++;
@@ -73,9 +73,13 @@ abstract contract RoleTable is DeployBase {
         i++;
         (where[i], roles[i], names[i]) = (s.caretakers, DEFAULT_ADMIN, "CaretakerRegistry DEFAULT_ADMIN");
         i++;
-        (where[i], roles[i], names[i]) = (s.pool, GOVERNOR, "ProgressPool GOVERNOR");
+        (where[i], roles[i], names[i]) = (s.fund, GOVERNOR, "BuilderFund GOVERNOR");
         i++;
-        (where[i], roles[i], names[i]) = (s.pool, DEFAULT_ADMIN, "ProgressPool DEFAULT_ADMIN");
+        (where[i], roles[i], names[i]) = (s.fund, DEFAULT_ADMIN, "BuilderFund DEFAULT_ADMIN");
+        i++;
+        (where[i], roles[i], names[i]) = (s.seasonPool, GOVERNOR, "SeasonPool GOVERNOR");
+        i++;
+        (where[i], roles[i], names[i]) = (s.seasonPool, DEFAULT_ADMIN, "SeasonPool DEFAULT_ADMIN");
         i++;
         (where[i], roles[i], names[i]) = (s.perennial, GOVERNOR, "MarketsPerennial GOVERNOR");
         i++;
@@ -84,8 +88,6 @@ abstract contract RoleTable is DeployBase {
         (where[i], roles[i], names[i]) = (s.v4, GOVERNOR, "MarketsV4 GOVERNOR");
         i++;
         (where[i], roles[i], names[i]) = (s.v4, DEFAULT_ADMIN, "MarketsV4 DEFAULT_ADMIN");
-        i++;
-        (where[i], roles[i], names[i]) = (s.arbiter, DEFAULT_ADMIN, "ProgressArbiter DEFAULT_ADMIN");
     }
 
     function _has(address where, bytes32 role, address who) internal view returns (bool) {
@@ -105,21 +107,25 @@ abstract contract RoleTable is DeployBase {
             require(!d, string.concat("deployer still holds ", names[i]));
         }
 
-        // Progress reaches the pool only through the arbiter.
-        bool pArb = _has(s.pool, PROGRESS, s.arbiter);
-        bool pDep = _has(s.pool, PROGRESS, deployer);
-        bool pAdm = _has(s.pool, PROGRESS, admin);
-        bool arbProp = _has(s.arbiter, PROPOSER, deployer);
-        bool arbRes = _has(s.arbiter, RESOLVER, deployer);
+        // Builder income is credited only by the markets, and the season pool is
+        // funded only by the fund (each checks its balance, but a stray holder
+        // could still misattribute what arrives).
+        bool mMkt = _has(s.fund, MARKETS, s.perennial);
+        bool mDep = _has(s.fund, MARKETS, deployer);
+        bool mAdm = _has(s.fund, MARKETS, admin);
+        bool fFund = _has(s.seasonPool, FUNDER, s.fund);
+        bool fDep = _has(s.seasonPool, FUNDER, deployer);
+        bool fAdm = _has(s.seasonPool, FUNDER, admin);
         if (print) {
-            console2.log(string.concat("ProgressPool PROGRESS  arbiter=", _b(pArb), "  admin=", _b(pAdm), "  deployer=", _b(pDep)));
-            console2.log(string.concat("ProgressArbiter PROPOSER deployer=", _b(arbProp), "  RESOLVER deployer=", _b(arbRes)));
+            console2.log(string.concat("BuilderFund MARKETS  markets=", _b(mMkt), "  admin=", _b(mAdm), "  deployer=", _b(mDep)));
+            console2.log(string.concat("SeasonPool FUNDER  fund=", _b(fFund), "  admin=", _b(fAdm), "  deployer=", _b(fDep)));
         }
-        require(pArb, "arbiter lacks ProgressPool PROGRESS");
-        require(!pDep, "deployer holds ProgressPool PROGRESS");
-        require(!pAdm, "ADMIN holds ProgressPool PROGRESS (progress must go through the arbiter)");
-        require(!arbProp, "deployer holds ProgressArbiter PROPOSER");
-        require(!arbRes, "deployer holds ProgressArbiter RESOLVER");
+        require(mMkt, "markets lack BuilderFund MARKETS");
+        require(!mDep, "deployer holds BuilderFund MARKETS");
+        require(!mAdm, "ADMIN holds BuilderFund MARKETS (income is credited by the markets only)");
+        require(fFund, "fund lacks SeasonPool FUNDER");
+        require(!fDep, "deployer holds SeasonPool FUNDER");
+        require(!fAdm, "ADMIN holds SeasonPool FUNDER (the pool is funded by the fund only)");
 
         // Oracle stack: no roles, but Registry/Attestation give their DEPLOYER
         // two one-shot powers. Both must be consumed.
@@ -141,12 +147,16 @@ abstract contract RoleTable is DeployBase {
         require(address(MarketsV4(s.v4).ATTESTATION()) == s.attestation, "v4 attestation");
         // Neither market creates fee pools: no market needs to be a ledger source.
         require(!NanoLedger(s.ledger).isSource(s.v4), "v4 is a ledger source (it needs no ledger role)");
-        require(address(ProgressArbiter(s.arbiter).POOL()) == s.pool, "arbiter pool");
-        require(MarketsPerennial(s.perennial).commons() == s.pool, "perennial commons");
-        require(address(ProgressPool(s.pool).BUILDERS()) == s.builders, "pool builders");
-        require(address(ProgressPool(s.pool).CARETAKERS()) == s.caretakers, "pool caretakers");
-        require(address(ProgressArbiter(s.arbiter).BUILDERS()) == s.builders, "arbiter builders");
-        require(address(ProgressArbiter(s.arbiter).CARETAKERS()) == s.caretakers, "arbiter caretakers");
+        BuilderFund fund = BuilderFund(s.fund);
+        SeasonPool pool = SeasonPool(s.seasonPool);
+        require(address(MarketsPerennial(s.perennial).FUND()) == s.fund, "perennial fund");
+        require(address(fund.SEASON_POOL()) == s.seasonPool, "fund season pool");
+        require(address(fund.LEDGER()) == s.ledger, "fund ledger");
+        require(address(pool.LEDGER()) == s.ledger, "season pool ledger");
+        require(address(fund.BUILDERS()) == s.builders, "fund builders");
+        require(address(fund.CARETAKERS()) == s.caretakers, "fund caretakers");
+        require(address(pool.BUILDERS()) == s.builders, "season pool builders");
+        require(address(pool.CARETAKERS()) == s.caretakers, "season pool caretakers");
         require(address(CaretakerRegistry(s.caretakers).BUILDERS()) == s.builders, "caretakers builders");
         require(address(MarketsPerennial(s.perennial).BUILDERS()) == s.builders, "perennial builders");
 
@@ -158,33 +168,36 @@ abstract contract RoleTable is DeployBase {
             require(!MarketsV4(s.v4).approvedResolver(deployer), "deployer is an approved resolver (v4)");
             // Fee recipients are immutable: they must not be the deployer's key.
             require(MarketsV4(s.v4).TREASURY() != deployer, "deployer is the V4 treasury");
-            require(ProgressPool(s.pool).PROTOCOL_TREASURY() != deployer, "deployer is the protocol treasury");
+            require(fund.PROTOCOL_TREASURY() != deployer, "deployer is the protocol treasury");
         }
     }
 
     /// @notice Phase 2 guard for the phase-1 ONBOARDER (a hot wallet with badge
     /// ISSUER + CaretakerRegistry GOVERNOR): it must hold no other admin-type role
-    /// anywhere in the market stack, and never progress/proposer/resolver. On
-    /// mainnet its CaretakerRegistry GOVERNOR must be revoked too (it decides who
-    /// can draw from the commons once markets exist); elsewhere it is logged.
+    /// anywhere in the market stack (BuilderFund and SeasonPool included), and
+    /// never fund MARKETS or pool FUNDER.
+    ///
+    /// Its CaretakerRegistry GOVERNOR may stay, on mainnet too (audit M-1,
+    /// revisited for the builder-income design): with the ProgressArbiter gone
+    /// no contract reads `caretakerOf` any more. Money follows the market's
+    /// builder id (fund) and the Safe-published season root (pool), and is paid
+    /// to `payoutOf`, which only the builder's owner sets. setCaretaker now only
+    /// feeds the off-chain "verified" status (keeper, gallery, and the season
+    /// eligibility the Safe re-derives before publishing a root), the same kind
+    /// of power the onboarder's badge ISSUER already has. It is logged.
     function _verifyOnboarder(Stack memory s, address onboarder, bool print) internal view {
         if (onboarder == address(0)) return;
         (address[] memory where, bytes32[] memory roles, string[] memory names) = _adminRoles(s);
         for (uint256 i; i < where.length; i++) {
             bool h = _has(where[i], roles[i], onboarder);
             if (where[i] == s.caretakers && roles[i] == GOVERNOR) {
-                // With markets live, setCaretaker decides who the operator may
-                // propose progress for — i.e. who draws from the commons. A hot
-                // wallet must not hold that on mainnet (audit M-1).
-                if (_isMainnet()) require(!h, "mainnet: revoke the ONBOARDER's CaretakerRegistry GOVERNOR before markets");
-                if (print) console2.log(string.concat("ONBOARDER CaretakerRegistry GOVERNOR (setCaretaker) = ", _b(h)));
+                if (print) console2.log(string.concat("ONBOARDER CaretakerRegistry GOVERNOR (setCaretaker, off-chain status only) = ", _b(h)));
                 continue;
             }
             require(!h, string.concat("ONBOARDER holds ", names[i]));
         }
-        require(!_has(s.pool, PROGRESS, onboarder), "ONBOARDER holds ProgressPool PROGRESS");
-        require(!_has(s.arbiter, PROPOSER, onboarder), "ONBOARDER holds ProgressArbiter PROPOSER");
-        require(!_has(s.arbiter, RESOLVER, onboarder), "ONBOARDER holds ProgressArbiter RESOLVER");
+        require(!_has(s.fund, MARKETS, onboarder), "ONBOARDER holds BuilderFund MARKETS");
+        require(!_has(s.seasonPool, FUNDER, onboarder), "ONBOARDER holds SeasonPool FUNDER");
         if (print) console2.log("OK: onboarder holds no market/admin role");
     }
 

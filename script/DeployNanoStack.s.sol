@@ -9,7 +9,7 @@ import {Attestation} from "../src/Attestation.sol";
 import {NanoLedger} from "../src/nanopay/NanoLedger.sol";
 import {MarketsV4} from "../src/nanopay/MarketsV4.sol";
 
-/// @notice Step 5 of the mainnet order. Deploys MarketsV4 (common markets
+/// @notice Phase 2, step 4 of the mainnet order. Deploys MarketsV4 (common markets
 ///         settled on the ledger). Fees are fixed in code (1% of every trade,
 ///         30 creator / 20 agent, escrowed until settlement / 50 TREASURY); agents are permissionless, so
 ///         the only oracle input is the approved dispute resolver. MarketsV4

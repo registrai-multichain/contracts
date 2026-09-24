@@ -2,39 +2,25 @@
 pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
-import {NanoLedger} from "../src/nanopay/NanoLedger.sol";
-import {ProgressPool} from "../src/perennial/ProgressPool.sol";
 import {BuilderRegistry} from "../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../src/perennial/CaretakerRegistry.sol";
 
-/// @notice Deploys the trust spine: CaretakerRegistry + a fresh ProgressPool
-/// (with claimFor). The deployer keeps governor/progress roles (testnet). After
-/// running, hand-wire: a MarketsPerennial whose (immutable) commons is newPool
-/// must be deployed to fund it; grant the caretaker
-/// operator PROGRESS_ROLE on the new pool, registry.setCaretaker(id, op),
-/// (builder owner) registry.setPayout(id, payout).
+/// @notice TESTNET utility. Deploys a CaretakerRegistry over an existing
+/// BuilderRegistry; the deployer keeps GOVERNOR (testnet). Afterwards:
+/// registry.setCaretaker(id, op) and (builder owner) registry.setPayout(id, payout).
+/// The ProgressPool this script used to deploy alongside is retired (builder
+/// income now flows through BuilderFund + SeasonPool, see DeployPerennial.s.sol);
+/// mainnet uses DeployBuilders.s.sol for the whole builder side.
 ///
-/// @dev env: RPC, PRIVATE_KEY, NANO_LEDGER, BUILDER_REGISTRY;
-///      optional EPOCH_LENGTH (default 0 for same-session demo),
-///      PROTOCOL_TREASURY (default: the broadcaster) for the 1% builder-payout fee.
+/// @dev env: RPC, PRIVATE_KEY, BUILDER_REGISTRY.
 contract DeployCaretakerSpine is Script {
-    function run() external returns (CaretakerRegistry care, ProgressPool pool) {
-        address ledger = vm.envAddress("NANO_LEDGER");
+    function run() external returns (CaretakerRegistry care) {
         address builderReg = vm.envAddress("BUILDER_REGISTRY");
-        uint256 epochLength = vm.envOr("EPOCH_LENGTH", uint256(0));
-        uint256 streamWindow = vm.envOr("STREAM_WINDOW", uint256(30 days));
-        address protocolTreasury = vm.envOr("PROTOCOL_TREASURY", msg.sender);
 
         vm.startBroadcast();
         care = new CaretakerRegistry(BuilderRegistry(builderReg), msg.sender);
-        pool = new ProgressPool(
-            NanoLedger(ledger), BuilderRegistry(builderReg), care, msg.sender, epochLength, streamWindow, protocolTreasury
-        );
         vm.stopBroadcast();
 
         console2.log("CaretakerRegistry:", address(care));
-        console2.log("ProgressPool(new):", address(pool));
-        console2.log("epochLength:", epochLength);
-        console2.log("streamWindow:", streamWindow);
     }
 }

@@ -30,7 +30,7 @@ import {Dispute} from "../Dispute.sol";
 ///
 /// On void, the agent's escrowed share of the trading fees becomes a challenger reward:
 /// it goes to whoever got one of the agent's attestations in the settlement
-/// window ruled Invalid (`_challengerOf`), else to the commons / treasury.
+/// window ruled Invalid (`_challengerOf`), else to the season pool / treasury.
 abstract contract SettlementPolicy {
     enum Settlement {
         Open,

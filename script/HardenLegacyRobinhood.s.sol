@@ -2,9 +2,19 @@
 pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
-import {ProgressPool} from "../src/perennial/ProgressPool.sol";
-import {ProgressArbiter} from "../src/perennial/ProgressArbiter.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {CaretakerRegistry} from "../src/perennial/CaretakerRegistry.sol";
+
+/// The legacy (July 14) ProgressPool / ProgressArbiter, by role surface only:
+/// their sources left the repo with the builder-income redesign (git history).
+interface ILegacyProgressPool is IAccessControl {
+    function PROGRESS_ROLE() external view returns (bytes32);
+}
+
+interface ILegacyProgressArbiter is IAccessControl {
+    function PROPOSER_ROLE() external view returns (bytes32);
+    function RESOLVER_ROLE() external view returns (bytes32);
+}
 
 /// @notice Emergency mitigation for the immutable July 14 deployment while a
 /// hardened replacement is prepared. This closes the deployer's direct progress
@@ -12,8 +22,8 @@ import {CaretakerRegistry} from "../src/perennial/CaretakerRegistry.sol";
 /// It cannot add the registry checks compiled into the replacement contracts.
 contract HardenLegacyRobinhood is Script {
     function run() external {
-        ProgressPool pool = ProgressPool(vm.envAddress("PROGRESS_POOL"));
-        ProgressArbiter arbiter = ProgressArbiter(vm.envAddress("PROGRESS_ARBITER"));
+        ILegacyProgressPool pool = ILegacyProgressPool(vm.envAddress("PROGRESS_POOL"));
+        ILegacyProgressArbiter arbiter = ILegacyProgressArbiter(vm.envAddress("PROGRESS_ARBITER"));
         CaretakerRegistry caretakers = CaretakerRegistry(vm.envAddress("CARETAKER_REGISTRY"));
         address operator = vm.envAddress("OPERATOR_ADDRESS");
         address resolver = vm.envAddress("RESOLVER_ADDRESS");

@@ -8,10 +8,11 @@ import {Registry} from "../Registry.sol";
 import {Attestation} from "../Attestation.sol";
 import {NanoLedger} from "./NanoLedger.sol";
 import {BuilderRegistry} from "../perennial/BuilderRegistry.sol";
+import {BuilderFund} from "../perennial/BuilderFund.sol";
 import {SettlementPolicy} from "./SettlementPolicy.sol";
 
-/// @title MarketsPerennial. Builder-milestone prediction markets that fund a
-///        shared commons.
+/// @title MarketsPerennial. Builder-milestone prediction markets whose fees pay
+///        the builder they are about.
 /// @notice Same constant-product binary market as MarketsV4 (settled entirely on
 ///         NanoLedger), specialized for the Perennial funding model. Each market
 ///         is tagged to a `builderId` it is about.
@@ -22,19 +23,21 @@ import {SettlementPolicy} from "./SettlementPolicy.sol";
 ///           - 30% to whoever opened the market (CREATOR_SHARE_BPS), paid now;
 ///           - 20% to the bonded agent (AGENT_SHARE_BPS), HELD in `agentEscrow`
 ///             until the market settles;
-///           - 50% to the `commons` (the ProgressPool), paid now, never to the
-///             builder the market is about, so attention fills the commons but
-///             never captures it (COMMONS_SHARE_BPS, takes the rounding remainder).
+///           - 50% to the builder the market is about (BUILDER_SHARE_BPS, takes
+///             the rounding remainder): paid now into the BuilderFund (`FUND`)
+///             and credited as that builder's income for the current epoch; the
+///             fund taxes it progressively per epoch (the tax feeds the
+///             SeasonPool) when the builder claims.
 ///         Nothing is charged at settlement. resolve releases the escrow to the
 ///         agent; winners redeem 1 per winning share; the LP gets the winning
 ///         reserve.
 ///
 ///         Void: a market that cannot be settled voids (SettlementPolicy). The
 ///         escrow goes to the challenger who got the agent's reading ruled
-///         Invalid, else to the commons. Every trader is refunded its net cost
-///         (what it put in after fees, minus what it took out; pro rata only if
-///         earlier sellers took profits larger than the LP seed); the LP gets
-///         the rest.
+///         Invalid, else to the SeasonPool (through the fund). Every trader is
+///         refunded its net cost (what it put in after fees, minus what it took
+///         out; pro rata only if earlier sellers took profits larger than the LP
+///         seed); the LP gets the rest.
 ///
 ///         Accounting invariant while trading: YES supply == NO supply ==
 ///         collateralOf; the contract's ledger balance for the market is
@@ -83,14 +86,15 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     /// @notice The trading fee: 1% of every buy and every sell.
     uint256 public constant TRADE_FEE_BPS = 100;
     /// @notice Shares of each trading fee (of BPS). The agent's 20% is escrowed
-    /// until settlement (the challenger reward on void); the commons takes the rounding remainder.
+    /// until settlement (the challenger reward on void); the builder takes the rounding remainder.
     uint256 public constant CREATOR_SHARE_BPS = 3000;
     uint256 public constant AGENT_SHARE_BPS = 2000;
-    uint256 public constant COMMONS_SHARE_BPS = 5000;
+    uint256 public constant BUILDER_SHARE_BPS = 5000;
     uint256 public constant BPS = 10_000;
 
-    /// @notice The commons (ProgressPool) ledger account. Immutable.
-    address public immutable commons;
+    /// @notice The BuilderFund: receives the builder leg (credited per builder
+    /// and epoch) and forwards unclaimed void escrows to the SeasonPool. Immutable.
+    BuilderFund public immutable FUND;
 
     mapping(bytes32 => Market) internal _markets;
     mapping(bytes32 => mapping(address => uint256)) public yesBalance;
@@ -109,7 +113,7 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     mapping(bytes32 => uint256) public totalNetCost;
     /// @notice The agent's 20% of every trading fee, held until the market
     /// settles: released to the agent on resolve, to a successful challenger
-    /// (else the commons) on void.
+    /// (else the SeasonPool) on void.
     mapping(bytes32 => uint256) public agentEscrow;
     /// @notice At void: what traders share (their net cost, capped by what the
     /// market holds), and the totalNetCost it is shared over.
@@ -149,14 +153,22 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         uint256 collateralOut,
         uint256 fee
     );
-    event FeesPaid(bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 agentFee);
+    /// @notice Every trade: creator paid, builder credited, agent escrowed.
+    event FeesPaid(bytes32 indexed marketId, uint256 creatorFee, uint256 builderFee, uint256 agentFee);
     event Resolved(bytes32 indexed marketId, bool yesWon, int256 value);
     event Redeemed(bytes32 indexed marketId, address indexed holder, uint256 payout);
     event LPClaimed(bytes32 indexed marketId, address indexed lp, uint256 payout);
     event MarketVoided(bytes32 indexed marketId);
     event AgentFeeReleased(bytes32 indexed marketId, address indexed agent, uint256 amount);
+    /// @notice At void: the agent escrow went to the challenger, else to the
+    /// SeasonPool (`seasonPoolAmount`). `creatorFee` is always 0 (kept for the
+    /// event's ABI shape).
     event VoidFeesPaid(
-        bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 challengerReward, address challenger
+        bytes32 indexed marketId,
+        uint256 creatorFee,
+        uint256 seasonPoolAmount,
+        uint256 challengerReward,
+        address challenger
     );
     event AgentApprovalSet(address indexed agent, bool approved);
     event ResolverApprovalSet(address indexed resolver, bool approved);
@@ -181,6 +193,7 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     error AgentNotApproved();
     error ResolverNotApproved();
     error SelfResolvedFeed();
+    error FundMismatch();
 
     constructor(
         NanoLedger ledger_,
@@ -188,16 +201,22 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         Attestation attestation_,
         BuilderRegistry builders_,
         address admin,
-        address commons_,
+        BuilderFund fund_,
         uint256 settlementWindow_,
         uint256 resolutionGrace_
     ) SettlementPolicy(settlementWindow_, resolutionGrace_) {
-        if (address(builders_) == address(0) || admin == address(0) || commons_ == address(0)) revert ZeroAddress();
+        if (address(builders_) == address(0) || admin == address(0) || address(fund_) == address(0)) {
+            revert ZeroAddress();
+        }
+        // The fund must pay on the same ledger and the same builder ids.
+        if (address(fund_.LEDGER()) != address(ledger_) || address(fund_.BUILDERS()) != address(builders_)) {
+            revert FundMismatch();
+        }
         LEDGER = ledger_;
         REGISTRY = registry_;
         ATTESTATION = attestation_;
         BUILDERS = builders_;
-        commons = commons_;
+        FUND = fund_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(GOVERNOR_ROLE, admin);
     }
@@ -346,17 +365,21 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         }
     }
 
-    /// @dev Split one trading fee: creator 30% and commons (the rounding
-    /// remainder, so no unit is stranded) paid now; the agent's 20% escrowed for
-    /// the market until it settles. Emits FeesPaid on every trade.
+    /// @dev Split one trading fee: creator 30% paid now; the builder's 50% (the
+    /// rounding remainder, so no unit is stranded) paid now into the fund and
+    /// credited to the market's builder for the current epoch; the agent's 20%
+    /// escrowed for the market until it settles. Emits FeesPaid on every trade.
     function _chargeFee(bytes32 marketId, Market storage m, uint256 fee) internal {
         uint256 creatorFee = (fee * CREATOR_SHARE_BPS) / BPS;
         uint256 agentFee = (fee * AGENT_SHARE_BPS) / BPS;
-        uint256 commonsFee = fee - creatorFee - agentFee;
+        uint256 builderFee = fee - creatorFee - agentFee;
         if (agentFee > 0) agentEscrow[marketId] += agentFee; // stays in this contract's ledger balance
         _pay(m.creator, creatorFee);
-        _pay(commons, commonsFee);
-        emit FeesPaid(marketId, creatorFee, commonsFee, agentFee);
+        if (builderFee > 0) {
+            _pay(address(FUND), builderFee);
+            FUND.credit(m.builderId, builderFee);
+        }
+        emit FeesPaid(marketId, creatorFee, builderFee, agentFee);
     }
 
     function _pay(address to, uint256 amount) internal {
@@ -392,7 +415,7 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     /// @notice Close a market that can no longer be settled. Anyone may call it.
     /// @dev Nothing is charged. The agent's escrow goes to the challenger that got
     /// the agent's reading ruled Invalid in the settlement window (else to the
-    /// commons). Traders share traderPool = min(totalNetCost, C), each pro
+    /// SeasonPool, through the fund). Traders share traderPool = min(totalNetCost, C), each pro
     /// rata to its net cost (so each gets its net cost back unless earlier
     /// sellers took more profit than the LP seed); the LP gets C - traderPool.
     /// Solvent by construction: the payouts sum to at most C, which the market
@@ -420,7 +443,10 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
             _pay(challenger, escrow);
             emit VoidFeesPaid(marketId, 0, 0, escrow, challenger);
         } else {
-            _pay(commons, escrow);
+            if (escrow > 0) {
+                _pay(address(FUND), escrow);
+                FUND.creditSeason(escrow);
+            }
             emit VoidFeesPaid(marketId, 0, escrow, 0, address(0));
         }
     }

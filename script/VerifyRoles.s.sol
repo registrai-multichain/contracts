@@ -9,8 +9,8 @@ import {RoleTable} from "./lib/RoleTable.sol";
 ///         and whenever roles may have changed. Sends no transaction.
 ///
 /// @dev env: ADMIN, DEPLOYER, REGISTRY, ATTESTATION, NANO_LEDGER,
-///      BUILDER_REGISTRY, CARETAKER_REGISTRY, PROGRESS_POOL, MARKETS_PERENNIAL,
-///      MARKETS_V4, PROGRESS_ARBITER — all required. ONBOARDER optional: the
+///      BUILDER_REGISTRY, CARETAKER_REGISTRY, BUILDER_FUND, SEASON_POOL,
+///      MARKETS_PERENNIAL, MARKETS_V4 — all required. ONBOARDER optional: the
 ///      phase-1 hot wallet, asserted to hold no market/admin role.
 contract VerifyRoles is RoleTable {
     function run() external view {

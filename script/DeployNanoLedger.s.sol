@@ -6,7 +6,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {DeployBase} from "./lib/DeployBase.sol";
 import {NanoLedger} from "../src/nanopay/NanoLedger.sol";
 
-/// @notice Step 2 of the mainnet order. Deploys NanoLedger, the on-chain
+/// @notice Phase 2, step 2 of the mainnet order. Deploys NanoLedger, the on-chain
 ///         nanopayment settlement layer, with the deployer as admin/governor
 ///         until Handoff. (No market needs a ledger role: neither market kind
 ///         creates fee pools, so MarketsV4 is no longer a ledger source.)
