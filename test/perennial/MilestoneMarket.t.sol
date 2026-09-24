@@ -8,13 +8,15 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
-import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
+import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
+import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
+import {FundKit} from "./FundKit.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
 /// Milestone market: "did the builder ship a release?" resolves from a bonded
-/// 1/0 attestation, and the commons leg of its trading fees funds the commons
-/// (ProgressPool).
+/// 1/0 attestation, and the builder leg of its trading fees is credited to the
+/// builder it is about (BuilderFund income).
 contract MilestoneMarketTest is Test {
     MockUSDC usdc;
     Registry registry;
@@ -22,7 +24,8 @@ contract MilestoneMarketTest is Test {
     Dispute dispute;
     NanoLedger ledger;
     MarketsPerennial markets;
-    ProgressPool pool;
+    BuilderFund fund;
+    SeasonPool pool;
     BuilderRegistry builders;
     CaretakerRegistry caretakers;
     address builder = address(0xB111);
@@ -45,8 +48,9 @@ contract MilestoneMarketTest is Test {
         builders = new BuilderRegistry(address(this));
         caretakers = new CaretakerRegistry(builders, address(this));
         builders.registerFor(builder, "github.com/example/builder");
-        pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours, address(0x7EA5));
-        markets = new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), 1 hours, 1 days);
+        (pool, fund) = FundKit.deploy(ledger, builders, caretakers, address(0x7EA5), 1 days);
+        markets = new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, 1 hours, 1 days);
+        FundKit.wire(fund, address(markets));
         markets.setApprovedAgent(agent, true);
         markets.setApprovedResolver(resolver, true);
 
@@ -81,8 +85,9 @@ contract MilestoneMarketTest is Test {
     function test_shipped_resolvesYes_andFundsCommons() public {
         bytes32 id = _milestoneMarket();
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // fee 10: commons 5, agent 2 escrowed
-        assertEq(ledger.balanceOf(address(pool)), 5e6, "commons funded by the milestone market's trading fee");
+        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // fee 10: builder 5, agent 2 escrowed
+        assertEq(ledger.balanceOf(address(fund)), 5e6, "builder leg of the milestone market's trading fee");
+        assertEq(fund.incomeOf(0, 1), 5e6, "income of the builder the market is about");
 
         vm.warp(block.timestamp + 2 hours + 1); // trading closed; now the agent reads
         vm.prank(agent);
@@ -90,7 +95,7 @@ contract MilestoneMarketTest is Test {
         vm.warp(block.timestamp + DW);
         markets.resolve(id);
         assertTrue(markets.getMarket(id).yesWon, "shipped -> YES wins");
-        assertEq(ledger.balanceOf(address(pool)), 5e6, "nothing more charged at settlement");
+        assertEq(ledger.balanceOf(address(fund)), 5e6, "nothing more charged at settlement");
         assertEq(ledger.balanceOf(agent), 2e6, "the settling agent's escrowed 20% is released");
         assertEq(usdc.balanceOf(address(ledger)), ledger.totalOwed(), "solvent");
     }

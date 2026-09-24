@@ -4,56 +4,67 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {MockUSDC} from "../MockUSDC.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
-import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
+import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
+import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
+import {FundKit} from "./FundKit.sol";
 
-/// Handler that drives ONLY the caretaker-key-callable surface of ProgressPool,
-/// assigning weight to a fixed builder set that EXCLUDES the caretaker (the
-/// "honest weights" precondition). The caretaker actor is address(this).
-contract CaretakerHandler is Test {
-    ProgressPool public pool;
+/// Handler over the BuilderFund: it plays the markets (credits income it paid
+/// in), the Safe (deactivates / reactivates builders, sweeps frozen income) and
+/// a claim cranker (the caretaker / keeper key: anyone may crank claimFor).
+contract IncomeHandler is Test {
     NanoLedger public ledger;
+    BuilderFund public fund;
+    BuilderRegistry public builders;
+    address public cranker = address(0xCA4E);
     uint256[3] public builderIds = [uint256(1), 2, 3]; // 0xB1, 0xB2, 0xB3
+    uint256 public credited; // ghost: every unit credited as income
 
-    constructor(ProgressPool pool_, NanoLedger ledger_) {
-        pool = pool_;
+    constructor(NanoLedger ledger_, BuilderFund fund_, BuilderRegistry builders_) {
         ledger = ledger_;
+        fund = fund_;
+        builders = builders_;
     }
 
-    function addProgress(uint256 bIdx, uint256 w) external {
-        uint256 b = builderIds[bIdx % 3];
-        pool.addProgress(b, bound(w, 0, 1_000));
+    function earn(uint256 bIdx, uint256 amount) external {
+        amount = bound(amount, 1, 200_000e6);
+        if (ledger.balanceOf(address(this)) < amount) return;
+        ledger.internalTransfer(address(fund), amount);
+        fund.credit(builderIds[bIdx % 3], amount);
+        credited += amount;
     }
 
-    function closeEpoch() external {
-        // epochLength is 0 in this harness, so this always advances.
-        pool.closeEpoch();
+    function warp(uint256 dt) external {
+        vm.warp(block.timestamp + bound(dt, 1, 20 days));
     }
 
-    function claimFor(uint256 epoch, uint256 bIdx) external {
-        uint256 b = builderIds[bIdx % 3];
-        uint256 e = pool.currentEpoch();
-        if (e == 0) return;
-        try pool.claimFor(epoch % e, b) {} catch {}
+    function claim(uint256 epoch, uint256 bIdx) external {
+        uint256 cur = fund.currentEpoch();
+        vm.prank(cranker);
+        try fund.claimFor(epoch % (cur + 1), builderIds[bIdx % 3]) {} catch {}
     }
 
-    function settle(uint256 epoch, uint256 bIdx) external {
-        uint256 b = builderIds[bIdx % 3];
-        uint256 e = pool.currentEpoch();
-        if (e == 0) return;
-        uint256 id = pool.streamIdOf(epoch % e, b);
-        try ledger.settleStream(id) {} catch {}
+    function toggle(uint256 bIdx) external {
+        uint256 id = builders.builderIdOf(address(uint160(0xB1 + bIdx % 3)));
+        builders.setActive(id, !builders.isActiveBuilderId(id));
+    }
+
+    function sweep(uint256 epoch, uint256 bIdx) external {
+        uint256 cur = fund.currentEpoch();
+        try fund.sweepFrozen(epoch % (cur + 1), builderIds[bIdx % 3]) {} catch {}
     }
 }
 
 contract CaretakerInvariantTest is Test {
     MockUSDC usdc;
     NanoLedger ledger;
-    ProgressPool pool;
     BuilderRegistry builders;
     CaretakerRegistry caretakers;
-    CaretakerHandler handler;
+    BuilderFund fund;
+    SeasonPool pool;
+    IncomeHandler handler;
+    address treasury = address(0x7EA5);
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -63,43 +74,59 @@ contract CaretakerInvariantTest is Test {
         builders.registerFor(address(0xB1), "b1");
         builders.registerFor(address(0xB2), "b2");
         builders.registerFor(address(0xB3), "b3");
-        pool = new ProgressPool(ledger, builders, caretakers, address(this), 0, 1 hours, address(0x7EA5)); // epochLength 0, 1h window
-        handler = new CaretakerHandler(pool, ledger);
+        (pool, fund) = FundKit.deploy(ledger, builders, caretakers, treasury, 7 days);
+        handler = new IncomeHandler(ledger, fund, builders);
+        FundKit.wire(fund, address(handler));
+        fund.grantRole(fund.GOVERNOR_ROLE(), address(handler));
+        builders.grantRole(builders.REGISTRAR_ROLE(), address(handler));
 
-        // the caretaker (the handler) holds PROGRESS_ROLE — the keeper seam
-        pool.grantRole(pool.PROGRESS_ROLE(), address(handler));
-
-        // give the pool a real commons balance to distribute
-        usdc.mint(address(this), 1_000_000e6);
+        usdc.mint(address(this), 100_000_000e6);
         usdc.approve(address(ledger), type(uint256).max);
-        ledger.deposit(1_000_000e6);
-        ledger.internalTransfer(address(pool), 1_000_000e6);
+        ledger.deposit(100_000_000e6);
+        ledger.internalTransfer(address(handler), 100_000_000e6);
 
+        bytes4[] memory sel = new bytes4[](5);
+        sel[0] = IncomeHandler.earn.selector;
+        sel[1] = IncomeHandler.warp.selector;
+        sel[2] = IncomeHandler.claim.selector;
+        sel[3] = IncomeHandler.toggle.selector;
+        sel[4] = IncomeHandler.sweep.selector;
+        targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
 
-    /// The caretaker, acting as operator over legitimate builders, can never
-    /// increase its own ledger balance. ("Can't rug.")
-    function invariant_caretakerCannotSkim() public view {
-        assertEq(ledger.balanceOf(address(handler)), 0, "caretaker skimmed funds");
+    /// Whoever cranks claims never gains a unit. ("Can't rug.")
+    function invariant_crankerCannotSkim() public view {
+        assertEq(ledger.balanceOf(handler.cranker()), 0, "cranker skimmed funds");
     }
 
-    /// Ledger stays solvent throughout.
     function invariant_solvent() public view {
         assertEq(usdc.balanceOf(address(ledger)), ledger.totalOwed(), "insolvent");
+        assertGe(ledger.balanceOf(address(fund)), fund.outstanding(), "fund below outstanding income");
+        assertEq(ledger.balanceOf(address(pool)), pool.unallocated() + pool.reserved(), "pool books");
     }
 
-    /// Even if a progress writer is compromised, an unregistered sock puppet
-    /// cannot receive progress or drain a claim.
-    function test_unregisteredSelfWeightIsRejected() public {
-        address puppet = address(0xDEAD);
-        uint256 puppetId = builders.builderIdOf(puppet); // 0: unregistered
-        vm.prank(address(handler));
-        vm.expectRevert(ProgressPool.BuilderInactive.selector);
-        pool.addProgress(puppetId, 100);
-        vm.prank(address(handler));
-        vm.expectRevert(ProgressPool.BuilderInactive.selector);
-        pool.addProgress(99, 100); // an id never registered
-        assertEq(ledger.balanceOf(puppet), 0);
+    /// Every credited unit is in the fund, with a builder, the treasury or the pool.
+    function invariant_conservation() public view {
+        uint256 out = ledger.balanceOf(address(0xB1)) + ledger.balanceOf(address(0xB2))
+            + ledger.balanceOf(address(0xB3)) + ledger.balanceOf(treasury) + ledger.balanceOf(address(pool));
+        assertEq(ledger.balanceOf(address(fund)) + out, handler.credited(), "income leaked");
+        assertEq(ledger.balanceOf(address(fund)), fund.outstanding(), "fund holds exactly the unclaimed income");
+    }
+
+    /// Income credited to an id that is not an active builder (a compromised
+    /// markets role, or a builder deactivated mid-epoch) can never be claimed
+    /// to anyone; only the Safe can sweep it to the season pool.
+    function test_unregisteredIdIncomeIsNeverClaimable() public {
+        vm.startPrank(address(handler));
+        ledger.internalTransfer(address(fund), 100e6);
+        fund.credit(99, 100e6); // an id never registered
+        vm.stopPrank();
+        vm.warp(fund.epochEnd(0));
+        vm.expectRevert(BuilderFund.BuilderInactive.selector);
+        fund.claimFor(0, 99);
+        fund.sweepFrozen(0, 99);
+        assertEq(pool.unallocated(), 100e6);
+        assertEq(ledger.balanceOf(address(0xDEAD)), 0);
     }
 }

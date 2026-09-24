@@ -8,13 +8,17 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
-import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
+import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
+import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
+import {FundKit} from "./FundKit.sol";
+import {MerkleKit} from "./MerkleKit.sol";
 
-/// Full Perennial loop: the commons leg of a builder market's trading fees flows
-/// to the commons (ProgressPool), progress is recorded per builder, the epoch closes,
-/// and builders claim a progress-weighted share, minus the 1% protocol fee.
+/// Full Perennial loop: the builder leg of a market's trading fees is credited
+/// to the builder the market is about; after the epoch the builder's income is
+/// claimed (progressive tax to the SeasonPool, 1% protocol fee, net to the
+/// payout); the Safe publishes a season from the pool and builders claim it.
 /// Ledger solvency holds throughout.
 contract PerennialTest is Test {
     MockUSDC usdc;
@@ -23,7 +27,8 @@ contract PerennialTest is Test {
     Dispute dispute;
     NanoLedger ledger;
     MarketsPerennial markets;
-    ProgressPool pool;
+    BuilderFund fund;
+    SeasonPool pool;
     BuilderRegistry builderReg;
     CaretakerRegistry caretakers;
 
@@ -38,8 +43,7 @@ contract PerennialTest is Test {
     address protocolTreasury = address(0x7EA5);
     bytes32 feedId;
     uint256 constant DW = 1 hours;
-    uint256 constant EPOCH = 1 days;
-    uint256 constant WINDOW = 1 days;
+    uint256 constant EPOCH = 7 days;
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -53,9 +57,9 @@ contract PerennialTest is Test {
         caretakers = new CaretakerRegistry(builderReg, address(this));
         builderReg.registerFor(builderA, "ipfs://a");
         builderReg.registerFor(builderB, "ipfs://b");
-        pool = new ProgressPool(ledger, builderReg, caretakers, address(this), EPOCH, WINDOW, protocolTreasury);
-        pool.grantRole(pool.PROGRESS_ROLE(), address(this)); // direct unit-test writer
-        markets = new MarketsPerennial(ledger, registry, attestation, builderReg, address(this), address(pool), 1 hours, 1 days);
+        (pool, fund) = FundKit.deploy(ledger, builderReg, caretakers, protocolTreasury, EPOCH);
+        markets = new MarketsPerennial(ledger, registry, attestation, builderReg, address(this), fund, 1 hours, 1 days);
+        FundKit.wire(fund, address(markets));
         markets.setApprovedAgent(oracle, true);
         markets.setApprovedResolver(resolver, true);
 
@@ -71,22 +75,24 @@ contract PerennialTest is Test {
     }
 
     function _fund(address a) internal {
-        usdc.mint(a, 1_000_000e6);
+        usdc.mint(a, 100_000_000e6);
         vm.startPrank(a);
         usdc.approve(address(ledger), type(uint256).max);
-        ledger.deposit(100_000e6);
+        ledger.deposit(20_000_000e6);
         ledger.approveSpender(address(markets), type(uint256).max);
         vm.stopPrank();
     }
 
     function _solvent() internal view {
         assertEq(usdc.balanceOf(address(ledger)), ledger.totalOwed(), "insolvent");
+        assertGe(ledger.balanceOf(address(fund)), fund.outstanding(), "fund below income");
+        assertGe(ledger.balanceOf(address(pool)), pool.unallocated() + pool.reserved(), "pool below accounted");
     }
 
-    function _market() internal returns (bytes32 id) {
+    function _market(uint256 builderId) internal returns (bytes32 id) {
         vm.prank(creator);
         id = markets.createMarket(
-            1,
+            builderId,
             feedId,
             oracle,
             int256(100_000),
@@ -94,18 +100,6 @@ contract PerennialTest is Test {
             block.timestamp + 2 hours,
             10e6
         );
-    }
-
-    /// A settled market: 2000 bought -> trading fee 20, commons 10.
-    function _fundCommons() internal returns (bytes32 id) {
-        id = _market();
-        vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0);
-        vm.warp(markets.getMarket(id).expiry + 1);
-        vm.prank(oracle);
-        attestation.attest(feedId, int256(123_456), bytes32("ih"));
-        vm.warp(block.timestamp + DW);
-        markets.resolve(id);
     }
 
     // ── BuilderRegistry ──
@@ -121,170 +115,96 @@ contract PerennialTest is Test {
         builderReg.registerBuilder("ipfs://dup");
     }
 
-    function test_inactiveBuilderCannotReceiveProgressOrMarkets() public {
-        builderReg.setActive(1, false);
-        vm.expectRevert(ProgressPool.BuilderInactive.selector);
-        pool.addProgress(A_ID, 1);
+    function test_inactiveBuilder_noNewMarkets_openMarketsKeepTrading_incomeFrozen() public {
+        bytes32 id = _market(A_ID);
+        builderReg.setActive(A_ID, false);
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.BuilderInactive.selector);
         markets.createMarket(
-            1, feedId, oracle, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 1 days, 10e6
+            A_ID, feedId, oracle, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 1 days, 10e6
         );
-    }
-
-    // ── fees flow to the commons, not to the builder the market is about ──
-
-    function test_marketFees_fundTheCommons() public {
-        bytes32 id = _market();
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // fee 20, commons 10
-        assertEq(ledger.balanceOf(address(pool)), 10e6, "commons funded by the trading fee");
-        vm.warp(markets.getMarket(id).expiry + 1);
-        vm.prank(oracle);
-        attestation.attest(feedId, int256(123_456), bytes32("ih"));
-        vm.warp(block.timestamp + DW);
-        markets.resolve(id);
-        assertEq(ledger.balanceOf(address(pool)), 10e6, "nothing more charged at settlement");
-        assertEq(pool.pendingPot(), 10e6);
+        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // still trades
+        assertEq(fund.incomeOf(0, A_ID), 5e6, "income accrues, frozen");
+        vm.warp(fund.epochEnd(0));
+        vm.expectRevert(BuilderFund.BuilderInactive.selector);
+        fund.claimFor(0, A_ID);
+        fund.sweepFrozen(0, A_ID); // the Safe's lever
+        assertEq(pool.unallocated(), 5e6);
         _solvent();
     }
 
-    // ── full distribution loop ──
+    // ── the loop ──
 
-    function test_progress_distribution() public {
-        _fundCommons(); // commons gets 10 USDC
+    /// A builder whose markets attract $12M of volume in an epoch earns $60,000
+    /// (50% of the 1% fee): taxed $11,900, fee $481, net $47,619. Another earns
+    /// $800 untaxed. The tax funds a season both then claim from.
+    function test_fullLoop_income_tax_season() public {
+        bytes32 mA = _market(A_ID);
+        bytes32 mB = _market(B_ID);
+        for (uint256 i; i < 6; i++) {
+            vm.prank(taker);
+            markets.buy(mA, MarketsPerennial.Outcome.Yes, 1_000_000e6, 0); // fee 10,000: builder 5,000
+            vm.prank(taker);
+            markets.buy(mA, MarketsPerennial.Outcome.No, 1_000_000e6, 0);
+        }
+        vm.prank(taker);
+        markets.buy(mB, MarketsPerennial.Outcome.Yes, 160_000e6, 0); // fee 1,600: builder 800
+        assertEq(fund.incomeOf(0, A_ID), 60_000e6);
+        assertEq(fund.incomeOf(0, B_ID), 800e6);
+        assertEq(ledger.balanceOf(address(fund)), 60_800e6);
 
-        // keeper records verified progress: builderA weight 3, builderB weight 1
-        pool.addProgress(A_ID, 3);
-        pool.addProgress(B_ID, 1);
-        assertEq(pool.totalWeight(0), 4);
-
-        vm.warp(block.timestamp + EPOCH + 1);
-        pool.closeEpoch();
-        assertEq(pool.epochPot(0), 10e6, "pot snapshotted");
-        assertEq(pool.claimable(0, A_ID), 7_425e3, "claimable is net of the 1% protocol fee");
-
-        uint256 a = pool.claimFor(0, A_ID);
-        uint256 b = pool.claimFor(0, B_ID);
-        assertEq(a, 7_425e3, "A share 3/4 of 10 USDC, minus 1%");
-        assertEq(b, 2_475e3, "B share 1/4 of 10 USDC, minus 1%");
-        assertEq(ledger.balanceOf(protocolTreasury), 100e3, "1% of 10 USDC to the protocol treasury");
-        // funds stream, not lump: nothing withdrawable yet
-        assertEq(ledger.balanceOf(builderA), 0, "no instant credit");
-
-        uint256 idA = pool.streamIdOf(0, A_ID);
-        uint256 idB = pool.streamIdOf(0, B_ID);
-        vm.warp(pool.epochStart() + 2 * WINDOW);
-        ledger.settleStream(idA);
-        ledger.settleStream(idB);
-        assertEq(ledger.balanceOf(builderA), 7_425e3, "A fully streamed");
-        assertEq(ledger.balanceOf(builderB), 2_475e3, "B fully streamed");
+        vm.warp(fund.epochEnd(0));
+        address cold = makeAddr("aCold");
+        vm.prank(builderA);
+        caretakers.setPayout(A_ID, cold);
+        assertEq(fund.claimFor(0, A_ID), 47_619e6);
+        assertEq(fund.claimFor(0, B_ID), 792e6);
+        assertEq(ledger.balanceOf(cold), 47_619e6);
+        assertEq(ledger.balanceOf(builderB), 792e6);
+        assertEq(ledger.balanceOf(protocolTreasury), 481e6 + 8e6);
+        assertEq(ledger.balanceOf(address(pool)), 11_900e6, "the tax is the season pool");
+        assertEq(pool.unallocated(), 11_900e6);
         _solvent();
 
-        vm.expectRevert(ProgressPool.AlreadyClaimed.selector);
-        pool.claimFor(0, A_ID);
-        vm.expectRevert(ProgressPool.NoProgress.selector);
-        pool.claimFor(0, 99);
+        // the Safe publishes season 1 over 10,000 of it (cap 2,000 per builder)
+        bytes32[] memory leaves = new bytes32[](2);
+        leaves[0] = pool.leafOf(1, A_ID, 2_000e6);
+        leaves[1] = pool.leafOf(1, B_ID, 1_500e6);
+        pool.publishSeason(1, MerkleKit.root(leaves), 10_000e6, uint64(block.timestamp + 30 days));
+        pool.claim(1, A_ID, 2_000e6, MerkleKit.proof(leaves, 0));
+        pool.claim(1, B_ID, 1_500e6, MerkleKit.proof(leaves, 1));
+        assertEq(ledger.balanceOf(cold), 49_619e6, "season reward to the payout too");
+        assertEq(ledger.balanceOf(builderB), 2_292e6);
+        vm.warp(block.timestamp + 30 days + 1);
+        assertEq(pool.reclaim(1), 6_500e6);
+        assertEq(pool.unallocated(), 1_900e6 + 6_500e6);
+        _solvent();
+    }
+
+    /// Void escrows without a challenger join the same pool.
+    function test_voidEscrow_joinsTheSeasonPool() public {
+        bytes32 id = _market(A_ID);
+        vm.prank(taker);
+        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // escrow 4
+        vm.warp(markets.getMarket(id).expiry + 1 hours + 1);
+        markets.voidMarket(id);
+        assertEq(pool.unallocated(), 4e6);
+        assertEq(fund.incomeOf(0, A_ID), 10e6, "the builder keeps its per-trade leg");
+        _solvent();
     }
 
     function test_claimFor_creditsBuilderNotCaller() public {
-        _fundCommons(); // commons 10
-
-        pool.addProgress(A_ID, 3);
-        pool.addProgress(B_ID, 1);
-        vm.warp(block.timestamp + EPOCH + 1);
-        pool.closeEpoch();
-
+        bytes32 id = _market(A_ID);
+        vm.prank(taker);
+        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // builder 10
+        vm.warp(fund.epochEnd(0));
         address caretaker = address(0xCA4E);
         vm.prank(caretaker);
-        uint256 a = pool.claimFor(0, A_ID);
-        assertEq(a, 7_425e3, "A share, net");
-        uint256 streamId = pool.streamIdOf(0, A_ID);
-        (, address to,, uint256 cap,,,) = ledger.streams(streamId);
-        assertEq(to, builderA, "stream pays the builder");
-        assertEq(cap, 7_425e3, "stream cap = share minus the protocol fee");
+        uint256 net = fund.claimFor(0, A_ID);
+        assertEq(net, 99e5);
+        assertEq(ledger.balanceOf(builderA), 99e5, "paid instantly, no stream");
         assertEq(ledger.balanceOf(caretaker), 0, "caretaker got nothing");
-        vm.warp(pool.epochStart() + 2 * WINDOW);
-        ledger.settleStream(streamId);
-        assertEq(ledger.balanceOf(builderA), 7_425e3, "builder credited after settle");
         _solvent();
-    }
-
-    function test_claimFor_doubleClaimReverts() public {
-        _fundCommons();
-        pool.addProgress(A_ID, 1);
-        vm.warp(block.timestamp + EPOCH + 1);
-        pool.closeEpoch();
-
-        pool.claimFor(0, A_ID);
-        vm.expectRevert(ProgressPool.AlreadyClaimed.selector);
-        pool.claimFor(0, A_ID);
-    }
-
-    function test_claimFor_noProgressReverts() public {
-        _fundCommons();
-        pool.addProgress(A_ID, 1);
-        vm.warp(block.timestamp + EPOCH + 1);
-        pool.closeEpoch();
-
-        vm.expectRevert(ProgressPool.NoProgress.selector);
-        pool.claimFor(0, B_ID); // B had no weight
-    }
-
-    function test_claim_beforeCloseReverts() public {
-        pool.addProgress(A_ID, 1);
-        vm.prank(builderA);
-        vm.expectRevert(ProgressPool.EpochNotClosed.selector);
-        pool.claim(0);
-    }
-
-    function test_closeEpoch_noProgressRollsOver() public {
-        _fundCommons(); // commons 10
-        // no progress this epoch
-        vm.warp(block.timestamp + EPOCH + 1);
-        pool.closeEpoch();
-        assertEq(pool.epochPot(0), 0, "nothing allocated");
-        assertEq(pool.pendingPot(), 10e6, "funds roll into next epoch");
-        _solvent();
-    }
-
-    function test_closeEpoch_beforeEnd_reverts() public {
-        vm.expectRevert(ProgressPool.EpochNotOver.selector);
-        pool.closeEpoch();
-    }
-
-    function test_claimFor_partialSettle() public {
-        _fundCommons();
-        pool.addProgress(A_ID, 1);
-        vm.warp(block.timestamp + EPOCH + 1);
-        pool.closeEpoch();
-
-        pool.claimFor(0, A_ID); // share 10e6, streams 9.9e6
-        uint256 streamId = pool.streamIdOf(0, A_ID);
-        vm.warp(pool.epochStart() + WINDOW / 2);
-        ledger.settleStream(streamId);
-        uint256 half = ledger.balanceOf(builderA);
-        assertApproxEqAbs(half, 495e4, 1e5, "about half streamed at half window");
-        _solvent();
-    }
-
-    function test_pendingPot_unchangedByClaim() public {
-        _fundCommons();
-        pool.addProgress(A_ID, 1);
-        vm.warp(block.timestamp + EPOCH + 1);
-        pool.closeEpoch();
-        uint256 before = pool.pendingPot();
-        pool.claimFor(0, A_ID);
-        assertEq(pool.pendingPot(), before, "opening a stream (and paying the fee) does not change pendingPot");
-    }
-
-    function test_setStreamWindow_governed() public {
-        pool.setStreamWindow(2 days);
-        assertEq(pool.streamWindow(), 2 days);
-        vm.prank(address(0xBEEF));
-        vm.expectRevert();
-        pool.setStreamWindow(3 days);
-        vm.expectRevert(ProgressPool.ZeroWindow.selector);
-        pool.setStreamWindow(0);
     }
 }

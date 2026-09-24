@@ -10,7 +10,9 @@ import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
-import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
+import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
+import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
+import {FundKit} from "../perennial/FundKit.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
@@ -26,7 +28,8 @@ contract OracleAllowlistTest is Test {
     NanoLedger ledger;
     MarketsPerennial perennial;
     MarketsV4 v4;
-    ProgressPool pool;
+    BuilderFund fund;
+    SeasonPool pool;
     BuilderRegistry builders;
 
     address agent = address(0x0AC1E);
@@ -53,9 +56,10 @@ contract OracleAllowlistTest is Test {
         builders = new BuilderRegistry(address(this));
         CaretakerRegistry caretakers = new CaretakerRegistry(builders, address(this));
         builders.registerFor(address(0xB111), "b1");
-        pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours, address(0x7EA5));
+        (pool, fund) = FundKit.deploy(ledger, builders, caretakers, address(0x7EA5), 1 days);
         perennial =
-            new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), WINDOW, GRACE);
+            new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, WINDOW, GRACE);
+        FundKit.wire(fund, address(perennial));
         v4 = new MarketsV4(ledger, registry, attestation, address(this), address(0x7EA), WINDOW, GRACE);
 
         usdc.mint(agent, 1_000e6);

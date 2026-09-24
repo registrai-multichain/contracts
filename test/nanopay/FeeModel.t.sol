@@ -11,21 +11,25 @@ import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 import {SettlementPolicy} from "../../src/nanopay/SettlementPolicy.sol";
-import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
+import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
+import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
+import {FundKit} from "../perennial/FundKit.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
 /// @notice Fee & settlement model v3 (owner decision 2026-09-24), on both market
 /// kinds:
 ///   - 1% trading fee on every buy (of collateralIn) and sell (of the gross curve
-///     amount), split creator 30 / commons (Perennial) or treasury (V4) 50 paid
-///     per trade, agent 20 escrowed per market; nothing charged at settlement;
+///     amount), split creator 30 / builder (Perennial: BuilderFund income of the
+///     market's builder) or treasury (V4) 50 paid per trade, agent 20 escrowed
+///     per market; nothing charged at settlement;
 ///   - resolve: escrow to the agent, winners 1 per share, LP the winning reserve;
 ///   - void: traders get their net cost (after fees) back (pro rata only when
 ///     early sellers took more profit than the LP seed), the escrow goes to a
-///     successful challenger, else to the commons / treasury;
+///     successful challenger, else to the season pool / treasury;
 ///   - V4 agents are permissionless;
-///   - ProgressPool takes 1% of each builder payout for the protocol treasury.
+///   - BuilderFund takes 1% of each (after-tax) builder payout for the protocol
+///     treasury.
 contract FeeModelTest is Test {
     MockUSDC usdc;
     Registry registry;
@@ -34,7 +38,8 @@ contract FeeModelTest is Test {
     NanoLedger ledger;
     BuilderRegistry builders;
     CaretakerRegistry caretakers;
-    ProgressPool pool;
+    BuilderFund fund;
+    SeasonPool pool;
     MarketsPerennial perennial;
     MarketsV4 v4;
 
@@ -73,11 +78,19 @@ contract FeeModelTest is Test {
         uint256 collateralOut,
         uint256 fee
     );
-    event FeesPaid(bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 agentFee);
+    event FeesPaid(bytes32 indexed marketId, uint256 creatorFee, uint256 builderFee, uint256 agentFee);
     event VoidFeesPaid(
-        bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 challengerReward, address challenger
+        bytes32 indexed marketId, uint256 creatorFee, uint256 seasonPoolAmount, uint256 challengerReward, address challenger
     );
-    event ProtocolFeePaid(uint256 indexed epoch, uint256 indexed builderId, uint256 fee);
+    event Claimed(
+        uint256 indexed epoch,
+        uint256 indexed builderId,
+        uint256 gross,
+        uint256 tax,
+        uint256 fee,
+        uint256 net,
+        address payout
+    );
     event AgentFeeReleased(bytes32 indexed marketId, address indexed agent, uint256 amount);
 
     function setUp() public {
@@ -91,8 +104,9 @@ contract FeeModelTest is Test {
         builders = new BuilderRegistry(address(this));
         caretakers = new CaretakerRegistry(builders, address(this));
         builders.registerFor(builder, "b1");
-        pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours, protocolTreasury);
-        perennial = new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), WINDOW, GRACE);
+        (pool, fund) = FundKit.deploy(ledger, builders, caretakers, protocolTreasury, 1 days);
+        perennial = new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, WINDOW, GRACE);
+        FundKit.wire(fund, address(perennial));
         v4 = new MarketsV4(ledger, registry, attestation, address(this), treasury, WINDOW, GRACE);
         perennial.setApprovedAgent(agent, true);
         perennial.setApprovedResolver(resolver, true);
@@ -165,7 +179,8 @@ contract FeeModelTest is Test {
         assertEq(shares, 1495e5 - (uint256(100e6) * 100e6 + 1495e5 - 1) / 1495e5);
         assertEq(a0 - ledger.balanceOf(alice), 50e6, "exactly collateralIn debited");
         assertEq(ledger.balanceOf(creator) - cr0, 15e4, "creator 30% now");
-        assertEq(ledger.balanceOf(address(pool)), 25e4, "commons 50% now");
+        assertEq(ledger.balanceOf(address(fund)), 25e4, "builder 50% now (fund)");
+        assertEq(fund.incomeOf(0, BUILDER_ID), 25e4, "credited to the market's builder");
         assertEq(perennial.agentEscrow(id), 1e5, "agent 20% held");
         assertEq(perennial.collateralOf(id), 1495e5);
         assertEq(perennial.netCost(id, alice), 495e5, "net cost is after the fee");
@@ -229,7 +244,7 @@ contract FeeModelTest is Test {
         vm.prank(alice);
         uint256 shares = perennial.buy(id, MarketsPerennial.Outcome.Yes, buyIn, 0);
         uint256 fee = buyIn / 100;
-        uint256 legs = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(address(pool)) + perennial.agentEscrow(id);
+        uint256 legs = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(address(fund)) + perennial.agentEscrow(id);
         assertEq(legs, fee, "buy legs == fee");
         assertEq(perennial.collateralOf(id), 5e6 + buyIn - fee);
 
@@ -238,7 +253,7 @@ contract FeeModelTest is Test {
         vm.prank(alice);
         try perennial.sell(id, MarketsPerennial.Outcome.Yes, sellShares, 0) returns (uint256 out) {
             uint256 gross = c0 - perennial.collateralOf(id);
-            uint256 legs2 = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(address(pool))
+            uint256 legs2 = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(address(fund))
                 + perennial.agentEscrow(id);
             assertEq(legs2 - legs, gross / 100, "sell legs == fee");
             assertEq(out, gross - gross / 100);
@@ -256,7 +271,7 @@ contract FeeModelTest is Test {
         perennial.buy(id, MarketsPerennial.Outcome.No, 300e6, 0); // fee 3
         assertEq(perennial.collateralOf(id), 991e6, "100 + 594 + 297");
         assertEq(perennial.agentEscrow(id), 18e5, "20% of 9");
-        assertEq(ledger.balanceOf(address(pool)), 45e5, "50% of 9, paid per trade");
+        assertEq(ledger.balanceOf(address(fund)), 45e5, "50% of 9, paid per trade");
         MarketsPerennial.Market memory m = perennial.getMarket(id);
 
         uint256 c0 = ledger.balanceOf(creator);
@@ -266,7 +281,8 @@ contract FeeModelTest is Test {
         perennial.resolve(id);
         assertEq(ledger.balanceOf(agent), 18e5, "the escrow goes to the agent");
         assertEq(ledger.balanceOf(creator), c0, "nothing charged at settlement");
-        assertEq(ledger.balanceOf(address(pool)), 45e5, "nothing charged at settlement");
+        assertEq(ledger.balanceOf(address(fund)), 45e5, "nothing charged at settlement");
+        assertEq(ledger.balanceOf(address(pool)), 0, "nothing to the season pool on resolve");
         assertEq(ledger.balanceOf(address(perennial)), 991e6);
 
         assertEq(perennial.redeemable(id, alice), aYes);
@@ -329,7 +345,7 @@ contract FeeModelTest is Test {
         vm.expectEmit(true, false, false, true, address(perennial));
         emit VoidFeesPaid(id, 0, escrow, 0, address(0));
         perennial.voidMarket(id);
-        assertEq(ledger.balanceOf(address(pool)) - pool0, escrow, "unclaimed escrow to the commons");
+        assertEq(ledger.balanceOf(address(pool)) - pool0, escrow, "unclaimed escrow to the season pool");
         assertEq(perennial.voidTraderPool(id), aCost + 198e6, "min(totalNetCost, C)");
         assertEq(perennial.voidNetCostTotal(id), aCost + 198e6);
 
@@ -433,7 +449,8 @@ contract FeeModelTest is Test {
         perennial.voidMarket(id);
         assertEq(ledger.balanceOf(challenger), 18e5, "challenger reward = the agent's escrow");
         assertEq(ledger.balanceOf(agent), 0, "the agent earns nothing");
-        assertEq(ledger.balanceOf(address(pool)), 45e5, "commons keeps only its per-trade 50%");
+        assertEq(ledger.balanceOf(address(fund)), 45e5, "builder keeps only its per-trade 50%");
+        assertEq(ledger.balanceOf(address(pool)), 0, "season pool gets nothing");
         assertEq(ledger.balanceOf(creator), c0, "nothing charged at void");
         vm.prank(alice);
         assertEq(perennial.redeem(id), 891e6, "900 in, minus the 9 fee");
@@ -460,8 +477,8 @@ contract FeeModelTest is Test {
         assertEq(ledger.balanceOf(treasury), 45e5);
     }
 
-    /// No successful challenger: the escrow goes to the commons / treasury.
-    function test_void_noChallenger_escrowToCommonsAndTreasury() public {
+    /// No successful challenger: the escrow goes to the season pool / treasury.
+    function test_void_noChallenger_escrowToSeasonPoolAndTreasury() public {
         bytes32 p = _p(100e6);
         bytes32 q = _v(100e6);
         vm.startPrank(alice);
@@ -475,7 +492,9 @@ contract FeeModelTest is Test {
         vm.expectEmit(true, false, false, true, address(v4));
         emit VoidFeesPaid(q, 0, 18e5, 0, address(0));
         v4.voidMarket(q);
-        assertEq(ledger.balanceOf(address(pool)), 45e5 + 18e5, "commons: 50% per trade + the escrow");
+        assertEq(ledger.balanceOf(address(fund)), 45e5, "builder: 50% per trade");
+        assertEq(ledger.balanceOf(address(pool)), 18e5, "season pool: the escrow");
+        assertEq(pool.unallocated(), 18e5);
         assertEq(ledger.balanceOf(treasury), 45e5 + 18e5, "treasury: 50% per trade + the escrow");
         assertEq(ledger.balanceOf(agent), 0);
         assertEq(perennial.agentEscrow(p), 0);
@@ -591,38 +610,50 @@ contract FeeModelTest is Test {
         v4.createMarket(f, userAgent, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
     }
 
-    // ───────────────────────── ProgressPool: 1% protocol fee ─────────────────────────
+    // ───────────────────────── BuilderFund: 1% protocol fee ─────────────────────────
 
-    function test_progressPool_protocolFee_onePercent_streamCarries99() public {
-        pool.grantRole(pool.PROGRESS_ROLE(), address(this));
+    /// Under the untaxed bracket the builder gets 99% of its income, instantly.
+    function test_builderFund_protocolFee_onePercent_net99() public {
+        FundKit.wire(fund, address(this));
         vm.prank(alice);
-        ledger.internalTransfer(address(pool), 1_000e6);
-        pool.addProgress(BUILDER_ID, 1);
-        vm.warp(vm.getBlockTimestamp() + 1 days + 1);
-        pool.closeEpoch();
-        assertEq(pool.PROTOCOL_FEE_BPS(), 100);
-        assertEq(pool.PROTOCOL_TREASURY(), protocolTreasury);
-        assertEq(pool.claimable(0, BUILDER_ID), 990e6, "claimable is net");
+        ledger.internalTransfer(address(fund), 1_000e6);
+        fund.credit(BUILDER_ID, 1_000e6);
+        vm.warp(fund.epochEnd(0));
+        assertEq(fund.PROTOCOL_FEE_BPS(), 100);
+        assertEq(fund.PROTOCOL_TREASURY(), protocolTreasury);
+        (uint256 g, uint256 t, uint256 f, uint256 n) = fund.quote(0, BUILDER_ID);
+        assertEq(g, 1_000e6);
+        assertEq(t, 0, "$1,000 is inside the 0% bracket");
+        assertEq(f, 10e6);
+        assertEq(n, 990e6);
 
-        vm.expectEmit(true, true, false, true, address(pool));
-        emit ProtocolFeePaid(0, BUILDER_ID, 10e6);
-        uint256 net = pool.claimFor(0, BUILDER_ID);
+        vm.expectEmit(true, true, false, true, address(fund));
+        emit Claimed(0, BUILDER_ID, 1_000e6, 0, 10e6, 990e6, builder);
+        uint256 net = fund.claimFor(0, BUILDER_ID);
         assertEq(net, 990e6);
         assertEq(ledger.balanceOf(protocolTreasury), 10e6, "1% to the protocol treasury");
-        (, address to,, uint256 cap,,,) = ledger.streams(pool.streamIdOf(0, BUILDER_ID));
-        assertEq(to, builder);
-        assertEq(cap, 990e6, "the stream carries 99%");
-        assertEq(pool.claimable(0, BUILDER_ID), 0);
-        assertEq(pool.unclaimedReserved(), 0);
-        vm.warp(vm.getBlockTimestamp() + 2 hours);
-        ledger.settleStream(pool.streamIdOf(0, BUILDER_ID));
-        assertEq(ledger.balanceOf(builder), 990e6);
+        assertEq(ledger.balanceOf(builder), 990e6, "99% to the builder, no stream");
+        assertEq(fund.outstanding(), 0);
         _solvent();
     }
 
-    function test_progressPool_rejectsZeroProtocolTreasury() public {
-        vm.expectRevert(ProgressPool.ZeroAddress.selector);
-        new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours, address(0));
+    /// Above it, the fee is 1% of the after-tax income.
+    function test_builderFund_protocolFee_isOnTheAfterTaxIncome() public {
+        FundKit.wire(fund, address(this));
+        vm.prank(alice);
+        ledger.internalTransfer(address(fund), 20_000e6);
+        fund.credit(BUILDER_ID, 20_000e6); // tax 900 + 2,000 = 2,900
+        vm.warp(fund.epochEnd(0));
+        fund.claimFor(0, BUILDER_ID);
+        assertEq(ledger.balanceOf(address(pool)), 2_900e6);
+        assertEq(ledger.balanceOf(protocolTreasury), 171e6, "1% of 17,100");
+        assertEq(ledger.balanceOf(builder), 16_929e6);
+    }
+
+    function test_builderFund_rejectsZeroProtocolTreasury() public {
+        BuilderFund.Bracket[] memory s = fund.scheduleFor(0);
+        vm.expectRevert(BuilderFund.ZeroAddress.selector);
+        new BuilderFund(ledger, builders, caretakers, pool, address(0), address(this), 1 days, s);
     }
 
     // ───────────────────────── solvency fuzz ─────────────────────────
@@ -630,7 +661,7 @@ contract FeeModelTest is Test {
     struct Books {
         uint256 totalIn; // LP seed + every buy's collateralIn
         uint256 sold; // what sellers received
-        uint256 fees; // every trade's 1% fee (creator + commons/treasury paid, agent escrowed)
+        uint256 fees; // every trade's 1% fee (creator + builder/treasury paid, agent escrowed)
         uint256 redeemed;
         uint256 lp;
         uint256 feeRecipients; // what the fee recipients actually received
@@ -683,8 +714,10 @@ contract FeeModelTest is Test {
             perennial.voidMarket(id);
         }
         assertEq(ledger.balanceOf(address(perennial)), c, "only the escrow left at settlement");
-        b.feeRecipients = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(address(pool)) + ledger.balanceOf(agent);
-        assertEq(b.feeRecipients, b.fees, "every fee reached creator, commons or agent");
+        b.feeRecipients = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(address(fund))
+            + ledger.balanceOf(address(pool)) + ledger.balanceOf(agent);
+        assertEq(b.feeRecipients, b.fees, "every fee reached creator, builder income, season pool or agent");
+        assertEq(ledger.balanceOf(address(fund)), fund.incomeOf(0, BUILDER_ID), "fund holds exactly the builder's income");
 
         for (uint256 i; i < 4; i++) {
             uint256 owed = perennial.redeemable(id, who[i]);

@@ -10,8 +10,8 @@ import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
-import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
-import {ProgressArbiter} from "../../src/perennial/ProgressArbiter.sol";
+import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
+import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 import {DeployBase} from "../../script/lib/DeployBase.sol";
@@ -21,7 +21,7 @@ import {DeployNanoLedger} from "../../script/DeployNanoLedger.s.sol";
 import {DeployPerennial} from "../../script/DeployPerennial.s.sol";
 import {DeployBuilders} from "../../script/DeployBuilders.s.sol";
 import {VerifiedBuilderBadge} from "../../src/perennial/VerifiedBuilderBadge.sol";
-import {DeployArbiter} from "../../script/DeployArbiter.s.sol";
+import {LaunchSchedule} from "../../script/lib/LaunchSchedule.sol";
 import {DeployNanoStack} from "../../script/DeployNanoStack.s.sol";
 import {Handoff} from "../../script/Handoff.s.sol";
 import {VerifyRoles} from "../../script/VerifyRoles.s.sol";
@@ -52,16 +52,16 @@ contract EnvHarness is DeployBase {
 }
 
 /// @notice Runs the real deploy-script logic, in the forced mainnet order,
-/// against a local chain: DeployOracle -> DeployNanoLedger -> DeployPerennial ->
-/// DeployArbiter -> DeployNanoStack -> Handoff -> VerifyRoles.
+/// against a local chain: (phase 1: DeployBuilders) then DeployOracle ->
+/// DeployNanoLedger -> DeployPerennial (season pool + fund + markets) ->
+/// DeployNanoStack -> Handoff -> VerifyRoles.
 contract DeployScriptsTest is Test {
     MockUSDC usdc;
     address deployer = makeAddr("deployer");
     address admin;
     address agent = makeAddr("agent");
     address disputeResolver = makeAddr("disputeResolver");
-    address proposer = makeAddr("proposer");
-    address arbResolver = makeAddr("arbResolver");
+    address operator = makeAddr("operator"); // the keeper operator
     address treasury = makeAddr("treasury");
     address protocolTreasury = makeAddr("protocolTreasury");
 
@@ -71,17 +71,16 @@ contract DeployScriptsTest is Test {
     NanoLedger ledger;
     BuilderRegistry builders;
     CaretakerRegistry caretakers;
-    ProgressPool pool;
+    SeasonPool pool;
+    BuilderFund fund;
     MarketsPerennial perennial;
-    ProgressArbiter arbiter;
     MarketsV4 v4;
 
     bytes32 constant DEFAULT_ADMIN = 0x00;
     bytes32 constant GOVERNOR = keccak256("GOVERNOR_ROLE");
     bytes32 constant REGISTRAR = keccak256("REGISTRAR_ROLE");
-    bytes32 constant PROGRESS = keccak256("PROGRESS_ROLE");
-    bytes32 constant PROPOSER = keccak256("PROPOSER_ROLE");
-    bytes32 constant RESOLVER = keccak256("RESOLVER_ROLE");
+    bytes32 constant MARKETS = keccak256("MARKETS_ROLE");
+    bytes32 constant FUNDER = keccak256("FUNDER_ROLE");
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -103,9 +102,12 @@ contract DeployScriptsTest is Test {
             (BuilderRegistry b1, CaretakerRegistry c1,) = new DeployBuilders().deploy(_buildersCfg());
             (pc.builders, pc.caretakers) = (address(b1), address(c1));
         }
-        (builders, caretakers, pool, perennial) = new DeployPerennial().deploy(pc);
-        arbiter = new DeployArbiter().deploy(_arbiterCfg());
+        _take(new DeployPerennial().deploy(pc));
         (, v4) = new DeployNanoStack().deploy(_v4Cfg());
+    }
+
+    function _take(DeployPerennial.Deployed memory d) internal {
+        (builders, caretakers, pool, fund, perennial) = (d.builders, d.caretakers, d.seasonPool, d.fund, d.markets);
     }
 
     function _perennialCfg() internal view returns (DeployPerennial.Config memory c) {
@@ -114,26 +116,11 @@ contract DeployScriptsTest is Test {
         c.attestation = address(attestation);
         c.ledger = address(ledger);
         c.epochLength = 30 days;
-        c.streamWindow = 30 days;
         c.settlementWindow = 24 hours;
         c.resolutionGrace = 7 days;
         c.protocolTreasury = protocolTreasury;
         c.approvedAgent = agent;
         c.disputeResolver = disputeResolver;
-    }
-
-    function _arbiterCfg() internal view returns (DeployArbiter.Config memory c) {
-        c.deployer = deployer;
-        c.ledger = address(ledger);
-        c.pool = address(pool);
-        c.builders = address(builders);
-        c.caretakers = address(caretakers);
-        c.proposer = proposer;
-        c.resolver = arbResolver;
-        c.challengeWindow = 1 hours;
-        c.stakePerProposal = 50e6;
-        c.maxWeight = 10;
-        c.resolveTimeout = 7 days;
     }
 
     function _v4Cfg() internal view returns (DeployNanoStack.Config memory c) {
@@ -154,19 +141,19 @@ contract DeployScriptsTest is Test {
         s.ledger = address(ledger);
         s.builders = address(builders);
         s.caretakers = address(caretakers);
-        s.pool = address(pool);
+        s.fund = address(fund);
+        s.seasonPool = address(pool);
         s.perennial = address(perennial);
         s.v4 = address(v4);
-        s.arbiter = address(arbiter);
     }
 
     /// Every (contract, role) that exists anywhere in the stack.
     function _allRoles() internal view returns (address[] memory w, bytes32[] memory r) {
-        w = new address[](17);
-        r = new bytes32[](17);
-        address[9] memory acs = [
-            address(ledger), address(builders), address(caretakers), address(pool), address(perennial), address(v4),
-            address(arbiter), address(0), address(0)
+        w = new address[](16);
+        r = new bytes32[](16);
+        address[7] memory acs = [
+            address(ledger), address(builders), address(caretakers), address(fund), address(pool), address(perennial),
+            address(v4)
         ];
         uint256 n;
         for (uint256 i; i < 7; i++) {
@@ -176,14 +163,13 @@ contract DeployScriptsTest is Test {
         (w[n], r[n++]) = (address(ledger), GOVERNOR);
         (w[n], r[n++]) = (address(builders), REGISTRAR);
         (w[n], r[n++]) = (address(caretakers), GOVERNOR);
+        (w[n], r[n++]) = (address(fund), GOVERNOR);
+        (w[n], r[n++]) = (address(fund), MARKETS);
         (w[n], r[n++]) = (address(pool), GOVERNOR);
-        (w[n], r[n++]) = (address(pool), PROGRESS);
+        (w[n], r[n++]) = (address(pool), FUNDER);
         (w[n], r[n++]) = (address(perennial), GOVERNOR);
         (w[n], r[n++]) = (address(v4), GOVERNOR);
-        (w[n], r[n++]) = (address(arbiter), PROPOSER);
-        (w[n], r[n++]) = (address(arbiter), RESOLVER);
-        (w[n], r[n++]) = (address(arbiter), DEFAULT_ADMIN); // repeat is harmless
-        assertEq(n, 17);
+        assertEq(n, 16);
     }
 
     function _assertDeployerHoldsNothing() internal view {
@@ -198,10 +184,15 @@ contract DeployScriptsTest is Test {
     function test_forcedOrder_thenHandoff_deployerHoldsNothing() public {
         _deployAll();
         // before Handoff the deployer holds the admin roles (the wiring needs them)
-        assertTrue(pool.hasRole(DEFAULT_ADMIN, deployer));
+        assertTrue(fund.hasRole(DEFAULT_ADMIN, deployer) && pool.hasRole(DEFAULT_ADMIN, deployer));
         assertFalse(ledger.isSource(address(v4)), "V4 needs no ledger role");
-        assertEq(perennial.commons(), address(pool));
-        assertEq(pool.PROTOCOL_TREASURY(), protocolTreasury);
+        assertEq(address(perennial.FUND()), address(fund));
+        assertEq(address(fund.SEASON_POOL()), address(pool));
+        assertEq(fund.PROTOCOL_TREASURY(), protocolTreasury);
+        assertEq(fund.EPOCH_LENGTH(), 30 days);
+        assertEq(fund.START(), block.timestamp);
+        assertEq(fund.scheduleFor(0).length, 4, "launch schedule");
+        assertEq(fund.progressiveTax(60_000e6, fund.scheduleFor(0)), 11_900e6);
         assertEq(v4.TREASURY(), treasury);
         assertTrue(perennial.approvedAgent(agent));
         assertTrue(perennial.approvedResolver(disputeResolver));
@@ -211,13 +202,14 @@ contract DeployScriptsTest is Test {
         new Handoff().handoff(_stack(), admin, deployer);
 
         _assertDeployerHoldsNothing();
-        assertFalse(pool.hasRole(DEFAULT_ADMIN, deployer), "deployer lacks DEFAULT_ADMIN after Handoff");
-        assertTrue(pool.hasRole(DEFAULT_ADMIN, admin));
-        assertTrue(arbiter.hasRole(DEFAULT_ADMIN, admin));
+        assertFalse(fund.hasRole(DEFAULT_ADMIN, deployer), "deployer lacks DEFAULT_ADMIN after Handoff");
+        assertTrue(fund.hasRole(DEFAULT_ADMIN, admin) && fund.hasRole(GOVERNOR, admin));
+        assertTrue(pool.hasRole(DEFAULT_ADMIN, admin) && pool.hasRole(GOVERNOR, admin));
         assertTrue(v4.hasRole(GOVERNOR, admin));
         assertTrue(builders.hasRole(REGISTRAR, admin));
-        assertTrue(pool.hasRole(PROGRESS, address(arbiter)));
-        assertFalse(pool.hasRole(PROGRESS, admin));
+        assertTrue(fund.hasRole(MARKETS, address(perennial)));
+        assertTrue(pool.hasRole(FUNDER, address(fund)));
+        assertFalse(fund.hasRole(MARKETS, admin) || pool.hasRole(FUNDER, admin));
         new VerifyRoles().verify(_stack(), admin, deployer);
     }
 
@@ -228,7 +220,7 @@ contract DeployScriptsTest is Test {
     function _buildersCfg() internal view returns (DeployBuilders.Config memory c) {
         c.deployer = deployer;
         c.admin = admin;
-        c.operator = proposer; // the keeper operator
+        c.operator = operator; // the keeper operator
         c.onboarder = onboarder;
         c.chainLabel = "Arc Mainnet";
         c.imageBase = "https://registrai.cc/badge/arc/";
@@ -244,7 +236,7 @@ contract DeployScriptsTest is Test {
         assertFalse(builders.hasRole(DEFAULT_ADMIN, deployer));
         assertFalse(caretakers.hasRole(GOVERNOR, deployer));
         assertTrue(builders.hasRole(REGISTRAR, admin) && caretakers.hasRole(GOVERNOR, admin));
-        assertTrue(badge.hasRole(badge.STATUS_ROLE(), proposer) && !badge.hasRole(badge.ISSUER_ROLE(), proposer));
+        assertTrue(badge.hasRole(badge.STATUS_ROLE(), operator) && !badge.hasRole(badge.ISSUER_ROLE(), operator));
 
         // the gallery's life before any market: claim, then the ONBOARDER (hot
         // wallet) onboards without the Safe
@@ -252,7 +244,7 @@ contract DeployScriptsTest is Test {
         vm.prank(alice);
         (uint256 id,) = builders.registerBuilderWithProject("", "github:alice/app");
         vm.startPrank(onboarder);
-        caretakers.setCaretaker(id, proposer);
+        caretakers.setCaretaker(id, operator);
         uint256 serial = badge.issue(id);
         vm.stopPrank();
 
@@ -264,30 +256,27 @@ contract DeployScriptsTest is Test {
         DeployPerennial.Config memory pc = _perennialCfg();
         pc.builders = address(builders);
         pc.caretakers = address(caretakers);
-        (BuilderRegistry b2, CaretakerRegistry c2, ProgressPool p2, MarketsPerennial m2) = new DeployPerennial().deploy(pc);
-        (pool, perennial) = (p2, m2);
-        assertEq(address(b2), address(builders), "registry reused");
-        assertEq(address(c2), address(caretakers), "caretakers reused");
+        DeployPerennial.Deployed memory d = new DeployPerennial().deploy(pc);
+        (pool, fund, perennial) = (d.seasonPool, d.fund, d.markets);
+        assertEq(address(d.builders), address(builders), "registry reused");
+        assertEq(address(d.caretakers), address(caretakers), "caretakers reused");
+        assertEq(address(fund.BUILDERS()), address(builders));
+        assertEq(address(fund.CARETAKERS()), address(caretakers));
         assertEq(address(pool.BUILDERS()), address(builders));
+        assertEq(address(pool.CARETAKERS()), address(caretakers));
         assertEq(address(perennial.BUILDERS()), address(builders));
-        arbiter = new DeployArbiter().deploy(_arbiterCfg());
         (, v4) = new DeployNanoStack().deploy(_v4Cfg());
         new Handoff().handoff(_stack(), admin, deployer);
         _assertDeployerHoldsNothing();
         new VerifyRoles().verify(_stack(), admin, deployer);
-        if (block.chainid == 5042) {
-            // audit M-1: on mainnet the hot wallet must lose setCaretaker before markets
-            OnboarderCheck chk = new OnboarderCheck();
-            vm.expectRevert(bytes("mainnet: revoke the ONBOARDER's CaretakerRegistry GOVERNOR before markets"));
-            chk.check(_stack(), onboarder);
-            vm.prank(admin);
-            caretakers.revokeRole(GOVERNOR, onboarder);
-        }
+        // audit M-1 revisited: with no arbiter, setCaretaker moves no money, so
+        // the hot wallet may keep onboarding after markets launch, on mainnet too.
+        assertTrue(caretakers.hasRole(GOVERNOR, onboarder));
         new OnboarderCheck().check(_stack(), onboarder);
 
         // everything done in phase 1 carried over
         assertEq(builders.builderIdOf(alice), id);
-        assertTrue(caretakers.isCaretaker(id, proposer));
+        assertTrue(caretakers.isCaretaker(id, operator));
         assertEq(badge.ownerOf(serial), alice);
     }
 
@@ -334,7 +323,7 @@ contract DeployScriptsTest is Test {
         vm.prank(bob);
         (uint256 id,) = b.registerBuilderWithProject("", "domain:bob.xyz");
         vm.startPrank(onboarder);
-        ct.setCaretaker(id, proposer);
+        ct.setCaretaker(id, operator);
         badge.issue(id);
         vm.expectRevert();
         badge.revoke(id); // REVOKER stays with the Safe (audit L-3)
@@ -382,7 +371,7 @@ contract DeployScriptsTest is Test {
         c.onboarder = admin;
         vm.expectRevert(bytes("ONBOARDER must differ from ADMIN, OPERATOR and the deployer"));
         d.deploy(c);
-        c.onboarder = proposer;
+        c.onboarder = operator;
         vm.expectRevert(bytes("ONBOARDER must differ from ADMIN, OPERATOR and the deployer"));
         d.deploy(c);
         c.onboarder = deployer;
@@ -393,11 +382,30 @@ contract DeployScriptsTest is Test {
     /// Phase 2 guard: an onboarder holding any market/admin role fails VerifyRoles.
     function test_phase2_verifyRolesRefusesOnboarderWithMarketRole() public {
         _phase1ThenMarkets();
+        OnboarderCheck chk = new OnboarderCheck();
+        RoleTable.Stack memory st = _stack();
         vm.prank(admin);
         pool.grantRole(GOVERNOR, onboarder);
-        OnboarderCheck chk = new OnboarderCheck();
-        vm.expectRevert(bytes("ONBOARDER holds ProgressPool GOVERNOR"));
-        chk.check(_stack(), onboarder);
+        vm.expectRevert(bytes("ONBOARDER holds SeasonPool GOVERNOR"));
+        chk.check(st, onboarder);
+        vm.startPrank(admin);
+        pool.revokeRole(GOVERNOR, onboarder);
+        fund.grantRole(DEFAULT_ADMIN, onboarder);
+        vm.stopPrank();
+        vm.expectRevert(bytes("ONBOARDER holds BuilderFund DEFAULT_ADMIN"));
+        chk.check(st, onboarder);
+        vm.startPrank(admin);
+        fund.revokeRole(DEFAULT_ADMIN, onboarder);
+        fund.grantRole(MARKETS, onboarder);
+        vm.stopPrank();
+        vm.expectRevert(bytes("ONBOARDER holds BuilderFund MARKETS"));
+        chk.check(st, onboarder);
+        vm.startPrank(admin);
+        fund.revokeRole(MARKETS, onboarder);
+        pool.grantRole(FUNDER, onboarder);
+        vm.stopPrank();
+        vm.expectRevert(bytes("ONBOARDER holds SeasonPool FUNDER"));
+        chk.check(st, onboarder);
     }
 
     function test_perennial_reuseNeedsBothMatchingRegistries() public {
@@ -419,8 +427,8 @@ contract DeployScriptsTest is Test {
         p.deploy(pc);
 
         pc.caretakers = address(c1);
-        (BuilderRegistry b,,,) = p.deploy(pc);
-        assertEq(address(b), address(b1));
+        DeployPerennial.Deployed memory d = p.deploy(pc);
+        assertEq(address(d.builders), address(b1));
     }
 
     /// The same order on chainid 5042, with every mainnet validation active.
@@ -470,29 +478,33 @@ contract DeployScriptsTest is Test {
 
     // ───────────── regression ports (PoC) ─────────────
 
-    /// PoC test_deployerAdminDrainsCommons: the deployer kept DEFAULT_ADMIN on the
-    /// pool, re-granted itself PROGRESS_ROLE and drained the commons. After
-    /// Handoff every step of that attack reverts.
-    function test_regression_deployerCannotDrainCommonsAfterHandoff() public {
+    /// PoC test_deployerAdminDrainsCommons, ported to the fund: the deployer
+    /// kept DEFAULT_ADMIN, re-granted itself the income-writer role and drained
+    /// the builders' money. After Handoff every step of that attack reverts.
+    function test_regression_deployerCannotDrainFundAfterHandoff() public {
         _deployAll();
         new Handoff().handoff(_stack(), admin, deployer);
         vm.startPrank(deployer);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, DEFAULT_ADMIN)
         );
-        pool.grantRole(PROGRESS, deployer);
+        fund.grantRole(MARKETS, deployer);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, REGISTRAR)
         );
         builders.registerFor(address(0xD3AD), "me");
         vm.expectRevert(
-            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, PROGRESS)
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, MARKETS)
         );
-        pool.addProgress(1, 1);
+        fund.credit(1, 1);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, GOVERNOR)
         );
-        pool.setEpochLength(0);
+        fund.setSchedule(LaunchSchedule.brackets());
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, GOVERNOR)
+        );
+        fund.sweepFrozen(0, 1);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, GOVERNOR)
         );
@@ -500,38 +512,124 @@ contract DeployScriptsTest is Test {
         vm.stopPrank();
     }
 
-    /// PoC test_arbiterAdminBypassesChallengeWindow: the deployer shrank the
-    /// challenge window, made itself proposer and pushed 1e30 weight. After
-    /// Handoff it has no arbiter power.
-    function test_regression_deployerCannotBypassArbiterAfterHandoff() public {
+    /// Nor can it touch the season pool: no funder, no seasons, no caretakers.
+    /// ADMIN (the Safe) keeps those powers.
+    function test_regression_deployerCannotTouchSeasonPoolAfterHandoff() public {
         _deployAll();
         new Handoff().handoff(_stack(), admin, deployer);
         vm.startPrank(deployer);
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, DEFAULT_ADMIN)
         );
-        arbiter.setParams(1, 1);
+        pool.grantRole(FUNDER, deployer);
         vm.expectRevert(
-            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, DEFAULT_ADMIN)
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, FUNDER)
         );
-        arbiter.setMaxWeightPerProposal(type(uint256).max);
+        pool.fund(1);
         vm.expectRevert(
-            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, DEFAULT_ADMIN)
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, GOVERNOR)
         );
-        arbiter.grantRole(PROPOSER, deployer);
+        pool.publishSeason(1, bytes32(uint256(1)), 1, uint64(block.timestamp + 1));
         vm.expectRevert(
             abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, GOVERNOR)
         );
         caretakers.setCaretaker(1, deployer);
-        vm.expectRevert(
-            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, deployer, PROPOSER)
-        );
-        arbiter.propose(1, 1);
         vm.stopPrank();
-        // ADMIN (the Safe) keeps the powers
         vm.prank(admin);
-        arbiter.setMaxWeightPerProposal(20);
-        assertEq(arbiter.maxWeightPerProposal(), 20);
+        fund.setSchedule(LaunchSchedule.brackets());
+        assertEq(fund.scheduleCount(), 2);
+    }
+
+    // ───────────── negative wiring (VerifyRoles) ─────────────
+
+    function _handedOff() internal returns (VerifyRoles v, RoleTable.Stack memory st) {
+        _deployAll();
+        new Handoff().handoff(_stack(), admin, deployer);
+        v = new VerifyRoles();
+        st = _stack();
+    }
+
+    function test_verifyRoles_refusesMarketsWithoutFundRole() public {
+        (VerifyRoles v, RoleTable.Stack memory st) = _handedOff();
+        vm.prank(admin);
+        fund.revokeRole(MARKETS, address(perennial));
+        vm.expectRevert(bytes("markets lack BuilderFund MARKETS"));
+        v.verify(st, admin, deployer);
+    }
+
+    function test_verifyRoles_refusesAdminAsIncomeWriterOrFunder() public {
+        (VerifyRoles v, RoleTable.Stack memory st) = _handedOff();
+        vm.prank(admin);
+        fund.grantRole(MARKETS, admin);
+        vm.expectRevert(bytes("ADMIN holds BuilderFund MARKETS (income is credited by the markets only)"));
+        v.verify(st, admin, deployer);
+        vm.startPrank(admin);
+        fund.revokeRole(MARKETS, admin);
+        pool.grantRole(FUNDER, admin);
+        vm.stopPrank();
+        vm.expectRevert(bytes("ADMIN holds SeasonPool FUNDER (the pool is funded by the fund only)"));
+        v.verify(st, admin, deployer);
+    }
+
+    function test_verifyRoles_refusesFundWithoutFunderRole() public {
+        (VerifyRoles v, RoleTable.Stack memory st) = _handedOff();
+        vm.prank(admin);
+        pool.revokeRole(FUNDER, address(fund));
+        vm.expectRevert(bytes("fund lacks SeasonPool FUNDER"));
+        v.verify(st, admin, deployer);
+    }
+
+    /// A stack naming another fund or season pool than the markets / fund use.
+    function test_verifyRoles_refusesMiswiredFundOrPool() public {
+        (VerifyRoles v, RoleTable.Stack memory st) = _handedOff();
+        // a second, correctly-roled pool the fund does not pay into
+        SeasonPool other = new SeasonPool(ledger, builders, caretakers, admin);
+        vm.startPrank(admin);
+        other.grantRole(FUNDER, address(fund));
+        vm.stopPrank();
+        RoleTable.Stack memory bad = st;
+        bad.seasonPool = address(other);
+        vm.expectRevert(bytes("fund season pool"));
+        v.verify(bad, admin, deployer);
+
+        // a second fund the markets do not credit
+        BuilderFund otherFund =
+            new BuilderFund(ledger, builders, caretakers, pool, protocolTreasury, admin, 30 days, LaunchSchedule.brackets());
+        vm.startPrank(admin);
+        otherFund.grantRole(MARKETS, address(perennial));
+        pool.grantRole(FUNDER, address(otherFund));
+        vm.stopPrank();
+        bad = _stack();
+        bad.fund = address(otherFund);
+        vm.expectRevert(bytes("perennial fund"));
+        v.verify(bad, admin, deployer);
+    }
+
+    function test_verifyRoles_refusesFundOnOtherBuilders() public {
+        (VerifyRoles v, RoleTable.Stack memory st) = _handedOff();
+        RoleTable.Stack memory bad = st;
+        bad.builders = address(new BuilderRegistry(admin));
+        vm.expectRevert(bytes("fund builders"));
+        v.verify(bad, admin, deployer);
+    }
+
+    /// Mainnet: the fund's protocol treasury must not be the deployer.
+    function test_verifyRoles_mainnetRefusesDeployerProtocolTreasury() public {
+        vm.chainId(5042);
+        vm.etch(0x3600000000000000000000000000000000000000, address(usdc).code);
+        _deployAll();
+        // hand-built fund paying the deployer (the script refuses this on mainnet)
+        vm.startPrank(deployer);
+        pool = new SeasonPool(ledger, builders, caretakers, deployer);
+        fund = new BuilderFund(ledger, builders, caretakers, pool, deployer, deployer, 30 days, LaunchSchedule.brackets());
+        perennial = new MarketsPerennial(ledger, registry, attestation, builders, deployer, fund, 24 hours, 7 days);
+        fund.grantRole(MARKETS, address(perennial));
+        pool.grantRole(FUNDER, address(fund));
+        vm.stopPrank();
+        Handoff h = new Handoff();
+        RoleTable.Stack memory st = _stack();
+        vm.expectRevert(bytes("deployer is the protocol treasury"));
+        h.handoff(st, admin, deployer);
     }
 
     // ───────────── chain guard + required inputs ─────────────
@@ -548,10 +646,6 @@ contract DeployScriptsTest is Test {
         DeployPerennial.Config memory pc = _perennialCfg();
         vm.expectRevert(bytes("unsupported chain: only Arc mainnet 5042, Arc testnet 5042002, local 31337"));
         p.deploy(pc);
-        DeployArbiter a = new DeployArbiter();
-        DeployArbiter.Config memory ac = _arbiterCfg();
-        vm.expectRevert(bytes("unsupported chain: only Arc mainnet 5042, Arc testnet 5042002, local 31337"));
-        a.deploy(ac);
         DeployNanoStack n = new DeployNanoStack();
         DeployNanoStack.Config memory nc = _v4Cfg();
         vm.expectRevert(bytes("unsupported chain: only Arc mainnet 5042, Arc testnet 5042002, local 31337"));
@@ -580,8 +674,8 @@ contract DeployScriptsTest is Test {
         e.addrReq(unset, address(0xBEEF));
     }
 
-    /// M4: EPOCH_LENGTH = 0 lets finalize + closeEpoch in one tx grab the pot.
-    function test_perennial_mainnetRequiresPositiveEpoch() public {
+    /// EPOCH_LENGTH = 0 is refused on every chain (time-based epochs need a length).
+    function test_perennial_requiresPositiveEpoch() public {
         vm.chainId(5042);
         vm.etch(0x3600000000000000000000000000000000000000, address(usdc).code);
         (registry, attestation, dispute) = new DeployOracle().deploy(
@@ -591,18 +685,21 @@ contract DeployScriptsTest is Test {
         DeployPerennial p = new DeployPerennial();
         DeployPerennial.Config memory c = _perennialCfg();
         c.epochLength = 0;
-        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be > 0"));
+        vm.expectRevert(bytes("EPOCH_LENGTH must be > 0"));
         p.deploy(c);
         c.epochLength = 30 days;
         c.disputeResolver = deployer;
         vm.expectRevert(bytes("mainnet: DISPUTE_RESOLVER must not be the deployer"));
         p.deploy(c);
-        // testnet keeps the same-session demo default
+        // testnet refuses 0 as well; a short epoch is fine
         vm.chainId(5042002);
         c = _perennialCfg();
         c.epochLength = 0;
-        (,, ProgressPool pl,) = p.deploy(c);
-        assertEq(pl.epochLength(), 0);
+        vm.expectRevert(bytes("EPOCH_LENGTH must be > 0"));
+        p.deploy(c);
+        c.epochLength = 1 hours;
+        DeployPerennial.Deployed memory d = p.deploy(c);
+        assertEq(d.fund.EPOCH_LENGTH(), 1 hours);
     }
 
     function test_perennial_mainnetRefusesDeployerAsProtocolTreasury() public {
@@ -651,17 +748,6 @@ contract DeployScriptsTest is Test {
         c.disputeResolver = deployer;
         vm.expectRevert(bytes("mainnet: DISPUTE_RESOLVER must not be the deployer"));
         n.deploy(c);
-    }
-
-    function test_arbiter_mainnetRefusesDeployerAsProposer() public {
-        vm.chainId(5042);
-        vm.etch(0x3600000000000000000000000000000000000000, address(usdc).code);
-        _deployAll();
-        DeployArbiter a = new DeployArbiter();
-        DeployArbiter.Config memory c = _arbiterCfg();
-        c.proposer = deployer;
-        vm.expectRevert(bytes("mainnet: deployer must not propose/resolve"));
-        a.deploy(c);
     }
 
     function test_oracle_minBondAndPointsSealed() public {

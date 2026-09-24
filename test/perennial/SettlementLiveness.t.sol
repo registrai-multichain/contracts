@@ -9,7 +9,9 @@ import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
 import {SettlementPolicy} from "../../src/nanopay/SettlementPolicy.sol";
-import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
+import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
+import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
+import {FundKit} from "./FundKit.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
@@ -17,7 +19,7 @@ import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 /// never settle on a value that was public while trading was open, and must not
 /// pay the agent for a settlement it did not deliver (its 20% of the trading
 /// fees is escrowed; on void it goes to a successful challenger, else to the
-/// commons).
+/// season pool).
 contract SettlementLivenessTest is Test {
     MockUSDC usdc;
     Registry registry;
@@ -25,7 +27,8 @@ contract SettlementLivenessTest is Test {
     Dispute dispute;
     NanoLedger ledger;
     MarketsPerennial markets;
-    ProgressPool pool;
+    BuilderFund fund;
+    SeasonPool pool;
     BuilderRegistry builders;
 
     address agent = address(0x0AC1E);
@@ -53,10 +56,11 @@ contract SettlementLivenessTest is Test {
         builders = new BuilderRegistry(address(this));
         CaretakerRegistry caretakers = new CaretakerRegistry(builders, address(this));
         builders.registerFor(address(0xB111), "github.com/example/builder");
-        pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours, address(0x7EA5));
+        (pool, fund) = FundKit.deploy(ledger, builders, caretakers, address(0x7EA5), 1 days);
         markets = new MarketsPerennial(
-            ledger, registry, attestation, builders, address(this), address(pool), WINDOW, GRACE
+            ledger, registry, attestation, builders, address(this), fund, WINDOW, GRACE
         );
+        FundKit.wire(fund, address(markets));
         markets.setApprovedAgent(agent, true);
         markets.setApprovedResolver(resolver, true);
 
@@ -345,9 +349,9 @@ contract SettlementLivenessTest is Test {
         uint256 poolBefore = ledger.balanceOf(address(pool));
         vm.warp(_expiry(id) + WINDOW + 1);
         markets.voidMarket(id);
-        // fees 3 + 2: the agent's escrowed 1 goes to the challenger, commons gets nothing more
+        // fees 3 + 2: the agent's escrowed 1 goes to the challenger, the season pool gets nothing
         assertEq(ledger.balanceOf(challenger) - chBefore, 1e6, "challenger earns the agent's escrow");
-        assertEq(ledger.balanceOf(address(pool)), poolBefore, "commons already had its 50% per trade");
+        assertEq(ledger.balanceOf(address(pool)), poolBefore, "season pool gets nothing");
         _solvent();
     }
 
@@ -390,7 +394,7 @@ contract SettlementLivenessTest is Test {
         assertEq(markets.agentEscrow(id), 0);
     }
 
-    function test_agentGetsNothingOnVoid_legGoesToCommons() public {
+    function test_agentGetsNothingOnVoid_legGoesToSeasonPool() public {
         bytes32 id = _market();
         _trade(id); // fees 3 + 2, escrow 1
         uint256 agentBefore = ledger.balanceOf(agent);
@@ -398,7 +402,7 @@ contract SettlementLivenessTest is Test {
         vm.warp(_expiry(id) + WINDOW + 1);
         markets.voidMarket(id);
         assertEq(ledger.balanceOf(agent), agentBefore, "the agent keeps nothing for a market it failed");
-        assertEq(ledger.balanceOf(address(pool)) - poolBefore, 1e6, "commons receives the unclaimed escrow");
+        assertEq(ledger.balanceOf(address(pool)) - poolBefore, 1e6, "season pool receives the unclaimed escrow");
     }
 
     function test_forfeitSinkIsGone() public {
@@ -422,9 +426,9 @@ contract SettlementLivenessTest is Test {
 
     function test_constructorRejectsOutOfBoundsParams() public {
         vm.expectRevert(SettlementPolicy.BadSettlementParams.selector);
-        new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), 1 minutes, GRACE);
+        new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, 1 minutes, GRACE);
         vm.expectRevert(SettlementPolicy.BadSettlementParams.selector);
-        new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), WINDOW, 365 days);
+        new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, WINDOW, 365 days);
     }
 
     // ───────────────────────────── solvency under fuzz ─────────────────────────────

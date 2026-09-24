@@ -6,7 +6,10 @@ pragma solidity ^0.8.24;
 /// DeployBuilders / DeployPerennial (reuse path) / DeployBadge.
 /// Updated for builders-with-projects (2026-09-24-builder-projects-design):
 /// M-2 is superseded (the badge names no project), M-3 is fixed (owner
-/// transfer + REGISTRAR recovery + payout fallback); pool/arbiter by builder id.
+/// transfer + REGISTRAR recovery + payout fallback). Updated for builder income
+/// (2026-09-24-builder-income-tax-design): ProgressPool + ProgressArbiter gave
+/// way to BuilderFund + SeasonPool; M-1 is revisited (the caretaker no longer
+/// gates any money) and deactivation now stops payouts.
 ///
 /// Naming: test_POC_* demonstrate an issue (they PASS when the issue is real);
 ///         test_OK_*  are regression tests for properties that were checked and hold.
@@ -20,8 +23,10 @@ import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
-import {ProgressPool} from "../../src/perennial/ProgressPool.sol";
-import {ProgressArbiter} from "../../src/perennial/ProgressArbiter.sol";
+import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
+import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {LaunchSchedule} from "../../script/lib/LaunchSchedule.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 import {VerifiedBuilderBadge, IERC5192} from "../../src/perennial/VerifiedBuilderBadge.sol";
@@ -31,7 +36,6 @@ import {DeployNanoLedger} from "../../script/DeployNanoLedger.s.sol";
 import {DeployPerennial} from "../../script/DeployPerennial.s.sol";
 import {DeployBuilders} from "../../script/DeployBuilders.s.sol";
 import {DeployBadge} from "../../script/DeployBadge.s.sol";
-import {DeployArbiter} from "../../script/DeployArbiter.s.sol";
 import {DeployNanoStack} from "../../script/DeployNanoStack.s.sol";
 import {Handoff} from "../../script/Handoff.s.sol";
 import {VerifyRoles} from "../../script/VerifyRoles.s.sol";
@@ -133,7 +137,7 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
 
     address safe = makeAddr("safe");
     address onboarder = makeAddr("onboarder");
-    address operator = makeAddr("operator"); // keeper: badge STATUS (and, in phase 2, caretaker/proposer)
+    address operator = makeAddr("operator"); // keeper: badge STATUS (and, in phase 2, caretaker)
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
     address mallory = makeAddr("mallory");
@@ -563,30 +567,28 @@ contract BuilderSideAuditPhase1Test is JsonHelpers {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Phase 2: the same registries under ProgressPool + ProgressArbiter.
-// operator = caretaker = arbiter PROPOSER (runbook / run-arc-caretaker.sh).
+// Phase 2: the same registries under BuilderFund + SeasonPool.
+// operator = caretaker (keeper: crank claims, badge status); `markets` stands in
+// for MarketsPerennial, the fund's only MARKETS_ROLE.
 // ═══════════════════════════════════════════════════════════════════════════
 contract BuilderSideAuditPhase2Test is Test {
     MockUSDC usdc;
     NanoLedger ledger;
     BuilderRegistry builders;
     CaretakerRegistry caretakers;
-    ProgressPool pool;
-    ProgressArbiter arb;
+    SeasonPool pool;
+    BuilderFund fund;
 
     address safe = makeAddr("safe");
     address onboarder = makeAddr("onboarder");
     address operator = makeAddr("operator");
-    address resolver = makeAddr("resolver");
+    address markets = makeAddr("markets");
     address treasury = makeAddr("treasury");
     address alice = makeAddr("alice");
     address mallory = makeAddr("mallory");
-    address funder = makeAddr("funder");
 
     uint256 aliceId;
     uint256 constant EPOCH = 7 days;
-    uint256 constant WINDOW = 1 hours;
-    uint256 constant STAKE = 50e6;
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -596,12 +598,11 @@ contract BuilderSideAuditPhase2Test is Test {
         bytes32 gov = caretakers.GOVERNOR_ROLE();
         vm.prank(safe);
         caretakers.grantRole(gov, onboarder);
-        pool = new ProgressPool(ledger, builders, caretakers, safe, EPOCH, 30 days, treasury);
-        arb = new ProgressArbiter(ledger, pool, builders, caretakers, safe, WINDOW, STAKE, 10, 7 days);
+        pool = new SeasonPool(ledger, builders, caretakers, safe);
+        fund = new BuilderFund(ledger, builders, caretakers, pool, treasury, safe, EPOCH, LaunchSchedule.brackets());
         vm.startPrank(safe);
-        pool.grantRole(pool.PROGRESS_ROLE(), address(arb));
-        arb.grantRole(arb.PROPOSER_ROLE(), operator);
-        arb.grantRole(arb.RESOLVER_ROLE(), resolver);
+        pool.grantRole(pool.FUNDER_ROLE(), address(fund));
+        fund.grantRole(fund.MARKETS_ROLE(), markets);
         vm.stopPrank();
 
         vm.prank(alice);
@@ -609,88 +610,79 @@ contract BuilderSideAuditPhase2Test is Test {
         vm.prank(onboarder);
         caretakers.setCaretaker(aliceId, operator);
 
-        _fund(operator, 500e6);
-        vm.prank(operator);
-        arb.depositBond(500e6);
-        _fund(funder, 1_000e6);
-        vm.prank(funder);
-        ledger.internalTransfer(address(pool), 1_000e6); // stands in for the commons fee leg
-    }
-
-    function _fund(address a, uint256 amt) internal {
-        usdc.mint(a, amt);
-        vm.startPrank(a);
+        usdc.mint(markets, 1_000_000e6);
+        vm.startPrank(markets);
         usdc.approve(address(ledger), type(uint256).max);
-        ledger.deposit(amt);
-        ledger.approveSpender(address(arb), type(uint256).max);
+        ledger.deposit(1_000_000e6);
         vm.stopPrank();
     }
 
-    function _proposeAndFinalize(uint256 builderId, uint256 w) internal {
-        vm.prank(operator);
-        uint256 id = arb.propose(builderId, w);
-        vm.warp(block.timestamp + WINDOW + 1);
-        arb.finalize(id);
+    /// The builder leg of trades on markets about `builderId`.
+    function _earn(uint256 builderId, uint256 amount) internal {
+        vm.startPrank(markets);
+        ledger.internalTransfer(address(fund), amount);
+        fund.credit(builderId, amount);
+        vm.stopPrank();
     }
 
-    /// FINDING (Medium, phase 2): CaretakerRegistry GOVERNOR is the sole on-chain
-    /// gate on who can draw from the commons. The keeper proposes for every
-    /// builder whose caretaker == operator and whose proof is valid, and the
-    /// arbiter accepts the operator's proposals exactly for those ids. A
-    /// compromised onboarder (GOVERNOR) can admit its own self-registered
-    /// sybils (with proofs for repos it controls) and cut real builders off.
-    /// Streams opened by the pool are irrevocable (the pool has no cancel), so
-    /// revoking the onboarder afterwards does not claw anything back.
-    function test_POC_onboarderGovernor_admitsSybilToCommons_andCutsOffBuilder() public {
+    /// REVISITED (was M-1, Medium): CaretakerRegistry GOVERNOR was the sole
+    /// on-chain gate on who could draw from the commons (the arbiter accepted
+    /// the operator's proposals exactly for the ids it caretook). With the
+    /// ProgressArbiter gone, no contract reads caretakerOf: income follows the
+    /// builder id each market names, and is paid to payoutOf (owner-set). A
+    /// compromised onboarder (GOVERNOR) can re-point caretakers but moves no
+    /// money: alice is still paid in full, the sybil earns only what markets
+    /// about it earn. What remains is off-chain: the keeper's / gallery's
+    /// "verified" status and the season eligibility the Safe re-derives before
+    /// publishing a root (the same kind of power as the onboarder's badge
+    /// ISSUER). VerifyRoles therefore only logs its GOVERNOR on mainnet.
+    function test_REVISITED_M1_onboarderGovernor_movesNoMoney() public {
         vm.prank(mallory);
         (uint256 sybilId,) = builders.registerBuilderWithProject("", "github:mallory/tags-farm");
+        _earn(aliceId, 1_000e6);
 
-        // before: the operator cannot propose for the sybil
-        vm.prank(operator);
-        vm.expectRevert(ProgressArbiter.UnauthorizedCaretaker.selector);
-        arb.propose(sybilId, 10);
-
-        // compromised onboarder: admit sybil, cut alice off
+        // compromised onboarder: admit the sybil, cut alice off
         vm.startPrank(onboarder);
         caretakers.setCaretaker(sybilId, operator);
         caretakers.setCaretaker(aliceId, address(0xdead));
         vm.stopPrank();
 
-        vm.prank(operator);
-        vm.expectRevert(ProgressArbiter.UnauthorizedCaretaker.selector);
-        arb.propose(aliceId, 5); // alice's real progress can no longer be proposed
+        vm.warp(fund.epochEnd(0));
+        assertEq(fund.claimFor(0, aliceId), 990e6, "alice keeps her income");
+        assertEq(ledger.balanceOf(alice), 990e6);
+        vm.expectRevert(BuilderFund.NoIncome.selector);
+        fund.claimFor(0, sybilId); // being caretaken earns nothing
+        assertEq(ledger.balanceOf(mallory), 0);
+        assertEq(ledger.balanceOf(address(0xdead)) + ledger.balanceOf(onboarder), 0);
+    }
 
-        // the keeper proposes the sybil's (real, self-made) tags; nothing to challenge
-        _proposeAndFinalize(sybilId, 10);
-
-        vm.warp(block.timestamp + EPOCH);
-        pool.closeEpoch();
-
-        // Safe reacts: revokes the onboarder, deactivates the sybil
-        bytes32 gov = caretakers.GOVERNOR_ROLE();
-        vm.startPrank(safe);
-        caretakers.revokeRole(gov, onboarder);
+    /// FIXED (the lever the audit found missing): the old pool's claimFor had
+    /// no active check and its streams were irrevocable, so deactivating a
+    /// builder never stopped a payout. Now a deactivated builder's claim
+    /// reverts and the Safe sweeps the income to the season pool.
+    function test_FIXED_deactivationStopsPayouts() public {
+        vm.prank(mallory);
+        (uint256 sybilId,) = builders.registerBuilderWithProject("", "github:mallory/tags-farm");
+        _earn(sybilId, 1_000e6); // e.g. wash-traded markets about the sybil
+        vm.prank(safe);
         builders.setActive(sybilId, false);
-        vm.stopPrank();
-
-        // too late: claimFor has no active check and the stream cannot be cancelled
-        uint256 amount = pool.claimFor(0, sybilId);
-        assertEq(amount, 990e6, "sybil took the whole pot (net of 1% fee)");
-        vm.warp(block.timestamp + 31 days); // integer rate vests slightly after the window
-        ledger.settleStream(pool.streamIdOf(0, sybilId));
-        assertEq(ledger.balanceOf(mallory), 990e6);
-        assertEq(pool.claimable(0, aliceId), 0);
+        vm.warp(fund.epochEnd(0));
+        vm.expectRevert(BuilderFund.BuilderInactive.selector);
+        fund.claimFor(0, sybilId);
+        vm.prank(safe);
+        fund.sweepFrozen(0, sybilId);
+        assertEq(pool.unallocated(), 1_000e6, "swept whole to the season pool");
+        assertEq(ledger.balanceOf(mallory), 0);
     }
 
     /// FIXED (was M-3): builder ownership was immutable with no recovery. Now
     /// the Safe (REGISTRAR) recovers a builder to a fresh wallet after
     /// RECOVERY_DELAY; the thief-set payout is ignored once the owner changed
-    /// (CaretakerRegistry stores who set it), and claims are keyed by builder id,
+    /// (CaretakerRegistry stores who set it), and income is keyed by builder id,
     /// so the next claim pays the recovered owner.
     function test_FIXED_M3_builderKeyCompromise_safeRecovers_payoutFallsBack() public {
-        _proposeAndFinalize(aliceId, 10);
-        vm.warp(block.timestamp + EPOCH);
-        pool.closeEpoch();
+        _earn(aliceId, 1_000e6);
+        vm.warp(fund.epochEnd(0));
 
         address thief = makeAddr("thief");
         vm.prank(alice); // attacker holding alice's key
@@ -708,9 +700,7 @@ contract BuilderSideAuditPhase2Test is Test {
         assertEq(builders.builderIdOf(alice), 0, "the stolen key holds nothing");
         assertEq(caretakers.payoutOf(aliceId), aliceNew, "thief-set payout ignored");
 
-        uint256 amount = pool.claimFor(0, aliceId); // permissionless
-        vm.warp(block.timestamp + 31 days); // integer rate vests slightly after the window
-        ledger.settleStream(pool.streamIdOf(0, aliceId));
+        uint256 amount = fund.claimFor(0, aliceId); // permissionless
         assertEq(amount, 990e6);
         assertEq(ledger.balanceOf(aliceNew), amount);
         assertEq(ledger.balanceOf(thief), 0);
@@ -728,11 +718,12 @@ contract BuilderSideAuditPhase2Test is Test {
     /// cancel a recovery for RECOVERY_DELAY, and an owner transfer clears it, so
     /// a thief who keeps using the key can block recovery indefinitely; and
     /// until a recovery finishes, claimFor pays the thief-set payout. The
-    /// Safe's levers are setActive(false) (stops new progress) and restarting.
-    function test_POC_residual_activeThiefCanCancelRecovery_andClaimMeanwhile() public {
-        _proposeAndFinalize(aliceId, 10);
-        vm.warp(block.timestamp + EPOCH);
-        pool.closeEpoch();
+    /// Safe's lever is now effective: setActive(false) freezes the builder's
+    /// claims (and sweepFrozen can park the income in the season pool).
+    function test_POC_residual_activeThiefCanCancelRecovery_safeFreezesClaims() public {
+        _earn(aliceId, 1_000e6);
+        vm.warp(fund.epochEnd(0));
+        _earn(aliceId, 500e6); // epoch 1
         address thief = makeAddr("thief");
         vm.prank(alice);
         caretakers.setPayout(aliceId, thief);
@@ -742,30 +733,50 @@ contract BuilderSideAuditPhase2Test is Test {
         builders.cancelRecovery(aliceId);
         (address pendingNew,) = builders.recoveryOf(aliceId);
         assertEq(pendingNew, address(0));
-        pool.claimFor(0, aliceId);
-        (, address to,,,,,) = ledger.streams(pool.streamIdOf(0, aliceId));
-        assertEq(to, thief);
+        fund.claimFor(0, aliceId); // residual: the Safe did not freeze in time
+        assertEq(ledger.balanceOf(thief), 990e6);
+
+        vm.prank(safe);
+        builders.setActive(aliceId, false); // freeze
+        vm.warp(fund.epochEnd(1));
+        vm.expectRevert(BuilderFund.BuilderInactive.selector);
+        fund.claimFor(1, aliceId);
+        assertEq(ledger.balanceOf(thief), 990e6, "no further payout while frozen");
     }
 
-    /// Context for the role table: in phase 2 the keeper operator is caretaker
-    /// of every verified builder AND arbiter PROPOSER, so a leaked operator key
-    /// can propose max weight for any of them repeatedly (bounded only by bond,
-    /// maxWeight and third-party challenges) — far beyond "flip a badge".
-    function test_POC_operatorKeyInPhase2_proposesForAnyCaretakenBuilder() public {
+    /// Holds: the keeper operator (caretaker) holds no money role. A leaked
+    /// operator key can crank claims (to the builders) and nothing else here.
+    function test_OK_operatorKeyInPhase2_holdsNoMoneyRole() public {
+        _earn(aliceId, 100e6);
+        vm.warp(fund.epochEnd(0));
         vm.startPrank(operator);
-        for (uint256 i; i < 10; i++) {
-            arb.propose(aliceId, 10);
-        }
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, operator, fund.MARKETS_ROLE())
+        );
+        fund.credit(aliceId, 1);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, operator, fund.GOVERNOR_ROLE())
+        );
+        fund.sweepFrozen(0, aliceId);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, operator, pool.FUNDER_ROLE())
+        );
+        pool.fund(1);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, operator, pool.GOVERNOR_ROLE())
+        );
+        pool.publishSeason(1, bytes32(uint256(1)), 1, uint64(block.timestamp + 1));
+        fund.claimFor(0, aliceId);
         vm.stopPrank();
-        assertEq(arb.entryCount(), 10);
+        assertEq(ledger.balanceOf(operator), 0);
+        assertEq(ledger.balanceOf(alice), 99e6);
     }
 
     /// Holds: payout is owner-controlled only; neither the GOVERNOR nor the
     /// caretaker nor the Safe can redirect a builder's claim.
     function test_OK_payoutOnlyOwnerControlled_inClaims() public {
-        _proposeAndFinalize(aliceId, 10);
-        vm.warp(block.timestamp + EPOCH);
-        pool.closeEpoch();
+        _earn(aliceId, 1_000e6);
+        vm.warp(fund.epochEnd(0));
         vm.prank(onboarder);
         vm.expectRevert(CaretakerRegistry.NotOwner.selector);
         caretakers.setPayout(aliceId, onboarder);
@@ -776,9 +787,8 @@ contract BuilderSideAuditPhase2Test is Test {
         vm.expectRevert(CaretakerRegistry.NotOwner.selector);
         caretakers.setPayout(aliceId, safe);
         vm.prank(operator);
-        pool.claimFor(0, aliceId);
-        (, address to,,,,,) = ledger.streams(pool.streamIdOf(0, aliceId));
-        assertEq(to, alice);
+        fund.claimFor(0, aliceId);
+        assertEq(ledger.balanceOf(alice), 990e6);
     }
 }
 
@@ -791,8 +801,7 @@ contract BuilderSideAuditDeployTest is Test {
     address admin;
     address agent = makeAddr("agent");
     address disputeResolver = makeAddr("disputeResolver");
-    address operator = makeAddr("operator"); // keeper: badge STATUS + arbiter PROPOSER
-    address arbResolver = makeAddr("arbResolver");
+    address operator = makeAddr("operator"); // keeper: badge STATUS + caretaker
     address treasury = makeAddr("treasury");
     address protocolTreasury = makeAddr("protocolTreasury");
     address onboarder = makeAddr("onboarder");
@@ -804,9 +813,9 @@ contract BuilderSideAuditDeployTest is Test {
     BuilderRegistry builders;
     CaretakerRegistry caretakers;
     VerifiedBuilderBadge badge;
-    ProgressPool pool;
+    BuilderFund fund;
+    SeasonPool pool;
     MarketsPerennial perennial;
-    ProgressArbiter arbiter;
     MarketsV4 v4;
 
     function setUp() public {
@@ -841,26 +850,11 @@ contract BuilderSideAuditDeployTest is Test {
         c.attestation = address(attestation);
         c.ledger = address(ledger);
         c.epochLength = 30 days;
-        c.streamWindow = 30 days;
         c.settlementWindow = 24 hours;
         c.resolutionGrace = 7 days;
         c.protocolTreasury = protocolTreasury;
         c.approvedAgent = agent;
         c.disputeResolver = disputeResolver;
-    }
-
-    function _arbiterCfg(address caretakerReg) internal view returns (DeployArbiter.Config memory c) {
-        c.deployer = deployer;
-        c.ledger = address(ledger);
-        c.pool = address(pool);
-        c.builders = address(builders);
-        c.caretakers = caretakerReg;
-        c.proposer = operator;
-        c.resolver = arbResolver;
-        c.challengeWindow = 1 hours;
-        c.stakePerProposal = 50e6;
-        c.maxWeight = 10;
-        c.resolveTimeout = 7 days;
     }
 
     function _v4Cfg() internal view returns (DeployNanoStack.Config memory c) {
@@ -881,10 +875,10 @@ contract BuilderSideAuditDeployTest is Test {
         s.ledger = address(ledger);
         s.builders = address(builders);
         s.caretakers = address(caretakers);
-        s.pool = address(pool);
+        s.fund = address(fund);
+        s.seasonPool = address(pool);
         s.perennial = address(perennial);
         s.v4 = address(v4);
-        s.arbiter = address(arbiter);
     }
 
     /// FIXED (was L-1): on mainnet DeployPerennial requires the phase-1
@@ -909,47 +903,32 @@ contract BuilderSideAuditDeployTest is Test {
 
         pc.builders = address(b1);
         pc.caretakers = address(c1);
-        (BuilderRegistry b,,,) = p.deploy(pc);
-        assertEq(address(b), address(b1));
+        DeployPerennial.Deployed memory d = p.deploy(pc);
+        assertEq(address(d.builders), address(b1));
+        assertEq(address(d.fund.CARETAKERS()), address(c1));
+        assertEq(address(d.seasonPool.CARETAKERS()), address(c1));
     }
 
-    /// FIXED (was L-2): DeployArbiter refuses registries that are not the
-    /// pool's, and Handoff/VerifyRoles refuse an arbiter wired elsewhere.
-    function test_FIXED_arbiterRegistryMismatchIsRefused() public {
+    /// FIXED (was L-2, re-targeted from the arbiter to the fund): a fund or
+    /// season pool paying through registries other than phase 1's is refused
+    /// by Handoff/VerifyRoles' final check.
+    function test_FIXED_fundRegistryMismatchIsRefused() public {
         (builders, caretakers, badge) = new DeployBuilders().deploy(_buildersCfg());
         _oracleAndLedger();
-        DeployPerennial.Config memory pc = _perennialCfg();
-        pc.builders = address(builders);
-        pc.caretakers = address(caretakers);
-        (,, pool, perennial) = new DeployPerennial().deploy(pc);
-
-        CaretakerRegistry rogue = new CaretakerRegistry(builders, makeAddr("rogueGov"));
-        DeployArbiter da = new DeployArbiter();
-        DeployArbiter.Config memory ac = _arbiterCfg(address(rogue));
-        vm.expectRevert(bytes("CARETAKER_REGISTRY is not the pool's"));
-        da.deploy(ac);
-
-        // hand-built arbiter on the rogue registry: Handoff's final check refuses it
-        _handBuiltArbiter(rogue, ac);
         (, v4) = new DeployNanoStack().deploy(_v4Cfg());
-        Handoff h = new Handoff();
-        vm.expectRevert(bytes("arbiter caretakers"));
-        h.handoff(_stack(), admin, deployer);
-    }
 
-    function _arbiterArgs(CaretakerRegistry ct, DeployArbiter.Config memory ac) internal view returns (bytes memory) {
-        bytes memory head = abi.encode(address(ledger), address(pool), address(builders), address(ct), deployer);
-        return bytes.concat(head, abi.encode(ac.challengeWindow, ac.stakePerProposal, ac.maxWeight, ac.resolveTimeout));
-    }
-
-    function _handBuiltArbiter(CaretakerRegistry ct, DeployArbiter.Config memory ac) internal {
-        bytes memory args = _arbiterArgs(ct, ac);
+        // hand-built fund + pool on a rogue CaretakerRegistry (same builders)
+        CaretakerRegistry rogue = new CaretakerRegistry(builders, makeAddr("rogueGov"));
         vm.startPrank(deployer);
-        arbiter = ProgressArbiter(deployCode("ProgressArbiter.sol:ProgressArbiter", args));
-        pool.grantRole(pool.PROGRESS_ROLE(), address(arbiter));
-        arbiter.grantRole(arbiter.PROPOSER_ROLE(), ac.proposer);
-        arbiter.grantRole(arbiter.RESOLVER_ROLE(), ac.resolver);
+        pool = new SeasonPool(ledger, builders, rogue, deployer);
+        fund = new BuilderFund(ledger, builders, rogue, pool, protocolTreasury, deployer, 30 days, LaunchSchedule.brackets());
+        perennial = new MarketsPerennial(ledger, registry, attestation, builders, deployer, fund, 24 hours, 7 days);
+        fund.grantRole(fund.MARKETS_ROLE(), address(perennial));
+        pool.grantRole(pool.FUNDER_ROLE(), address(fund));
         vm.stopPrank();
+        Handoff h = new Handoff();
+        vm.expectRevert(bytes("fund caretakers"));
+        h.handoff(_stack(), admin, deployer);
     }
 
     function test_OK_deployBuilders_roleLayout() public {
