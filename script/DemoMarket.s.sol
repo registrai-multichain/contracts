@@ -10,8 +10,8 @@ import {MarketsV4} from "../src/nanopay/MarketsV4.sol";
 
 /// @notice Stands up one live MarketsV4 market end-to-end on the nanopay stack:
 ///         a bonded feed (deployer = agent), an attestation, a ledger deposit,
-///         a market, and a demo buy (no trading fee; the 1% resolution fee is
-///         charged at settlement). Prints feedId +
+///         a market, and a demo buy (which pays the 1% trading fee). Prints
+///         feedId +
 ///         marketId to wire into the frontend.
 contract DemoMarket is Script {
     function run() external {
@@ -45,7 +45,7 @@ contract DemoMarket is Script {
             block.timestamp + 7 days, 10e6
         );
 
-        // 5. Demo buy (no trading fee; the resolution fee is paid at settlement).
+        // 5. Demo buy (pays the 1% trading fee: creator/treasury now, agent escrowed).
         mkt.buy(marketId, MarketsV4.Outcome.Yes, 5e6, 0);
 
         vm.stopBroadcast();

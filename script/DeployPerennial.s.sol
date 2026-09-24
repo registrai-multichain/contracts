@@ -13,7 +13,7 @@ import {CaretakerRegistry} from "../src/perennial/CaretakerRegistry.sol";
 
 /// @notice Step 3 of the mainnet order. Deploys Perennial: BuilderRegistry +
 ///         CaretakerRegistry + ProgressPool (the commons) + MarketsPerennial
-///         (whose commons leg of the 1% resolution fee routes to the pool), over
+///         (whose commons leg of the 1% trading fee routes to the pool), over
 ///         the NanoLedger and the oracle stack. Fees are fixed in code (no fee
 ///         inputs). The deployer holds every admin role until Handoff.s.sol.
 ///

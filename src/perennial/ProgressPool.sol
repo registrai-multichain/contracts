@@ -7,7 +7,7 @@ import {BuilderRegistry} from "./BuilderRegistry.sol";
 import {CaretakerRegistry} from "./CaretakerRegistry.sol";
 
 /// @title ProgressPool. The Perennial funding commons.
-/// @notice Receives the commons leg of every Perennial market's resolution fee
+/// @notice Receives the commons leg of every Perennial market's trading fee
 /// as a NanoLedger balance (MarketsPerennial internalTransfers it here), and
 /// distributes it to builders by VERIFIED PROGRESS, never by who attracted the
 /// betting. Attention fills the pool; progress draws it.
