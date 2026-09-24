@@ -86,7 +86,7 @@ class Chain:
     def __init__(self):
         s = socket.socket(); s.bind(("127.0.0.1", 0)); self.port = s.getsockname()[1]; s.close()
         self.rpc = f"http://127.0.0.1:{self.port}"
-        self.proc = subprocess.Popen(["anvil", "--port", str(self.port), "--silent", "--accounts", "12"])
+        self.proc = subprocess.Popen(["anvil", "--port", str(self.port), "--silent", "--accounts", "15"])
         for _ in range(50):
             if run(["cast", "chain-id", "--rpc-url", self.rpc], ok=False).stdout.strip() == "31337":
                 break
@@ -134,7 +134,7 @@ def main():
     # two more dev accounts from anvil's public test mnemonic: a second builder and an
     # independent watcher who challenges a wrong answer
     mn = "test test test test test test test test test test test junk"
-    for name, idx in (("builder2", 10), ("watcher", 11)):
+    for name, idx in (("builder2", 10), ("watcher", 11), ("vbuilderA", 12), ("vbuilderB", 13), ("stranger", 14)):
         KEYS[name] = run(["cast", "wallet", "private-key", "--mnemonic", mn, "--mnemonic-index", str(idx)]).stdout.strip()
     A = {k: c.addr(k) for k in KEYS}
     try:
@@ -145,7 +145,7 @@ def main():
 
 
 def forge_script(c, name, env):
-    r = run(["forge", "script", f"script/{name}.s.sol:{name}", "--rpc-url", c.rpc, "--broadcast",
+    r = run(["forge", "script", f"script/{name}.s.sol:{name}", "--rpc-url", c.rpc, "--broadcast", "--slow",
              "--private-key", KEYS["deployer"], "-vv"], env=env, cwd=CONTRACTS)
     return r.stdout
 
@@ -499,6 +499,8 @@ def rehearse(c, A):
     c.send("builder", S["NanoLedger"], "withdraw(uint256)", got)
     check(c.uint(USDC, "balanceOf(address)(uint256)", A["builder"]) - usdc_before == got, "builder withdrew real USDC")
 
+    verified_builders_stage(c, A, S, ui, run)
+
     print("== 8. accounting")
     # every USDC unit minted is somewhere accountable: wallets + ledger (which backs all internal balances)
     minted = len(MINTED) * 1_000 * U
@@ -511,6 +513,161 @@ def rehearse(c, A):
           f"USDC conserved: wallets {wallets/U:.2f} + ledger {ledger_held/U:.2f} + bonds {registry_held/U:.2f} = {minted/U:.0f}")
     total_owed = c.uint(S["NanoLedger"], "totalOwed()(uint256)")
     check(ledger_held >= total_owed, f"ledger solvent: holds {ledger_held} >= owes {total_owed}")
+
+
+
+def verified_builders_stage(c, A, S, ui, run):
+    """Registrai Verified Builders: /verify's own claim code -> proof served -> self-register ->
+    the real onboard-batch script (executed as the multisig) -> real keeper ticks."""
+    import tempfile, threading, http.server, functools, datetime
+    print("== 9. verified builders: claim -> batch -> keeper (website lib and keeper must agree)")
+    root = pathlib.Path(tempfile.mkdtemp(prefix="vb-e2e-"))
+    def serve(d):
+        d.mkdir(parents=True, exist_ok=True)
+        h = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(d))
+        h.log_message = lambda *a, **k: None
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), h)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv, srv.server_address[1]
+    gh_srv, gh_port = serve(root / "raw")        # stand-in for raw.githubusercontent.com
+    dom_srv, dom_port = serve(root / "domain")   # a builder's own site
+    api_srv, api_port = serve(root / "api")      # stand-in for api.github.com
+    proof_env = {"PROOF_GITHUB_BASE": f"http://127.0.0.1:{gh_port}", "PROOF_DOMAIN_SCHEME": "http",
+                 "PROOF_DOMAIN_PORT": str(dom_port), "GITHUB_API_BASE": f"http://127.0.0.1:{api_port}"}
+    os.environ.update(proof_env)   # the ui() driver and the batch script inherit these
+    today = datetime.date.today().isoformat()
+    try:
+        # open-source builder A: one release + one tag on acme/tool
+        rel = root / "api/repos/acme/tool/releases"; rel.mkdir(parents=True)
+        (rel / "latest").write_text(json.dumps({"tag_name": "v1.0.0"}))
+        (root / "api/repos/acme/tool/tags").write_text(json.dumps([{"name": "v1.0.0"}]))
+        claimA = {"builder": A["vbuilderA"].lower(), "source": "github:acme/tool", "deployers": [], "country": "PL", "chain": 31337, "issued": today}
+        fa = ui("claim", claim=claimA, builderKey=KEYS["vbuilderA"])["file"]
+        d = root / "raw/acme/tool/HEAD"; d.mkdir(parents=True); (d / ".registrai.json").write_text(json.dumps(fa))
+        c.send("vbuilderA", S["BuilderRegistry"], "registerBuilder(string)", "registrai:github:acme/tool")
+
+        # closed-source builder B: two contracts deployed by B itself (nonces 0, 1), then the domain claim
+        init = "0x600a600c600039600a6000f3602a60005260206000f3"   # tiny contract returning 42
+        for _ in range(2):
+            run(["cast", "send", "--rpc-url", c.rpc, "--private-key", KEYS["vbuilderB"], "--create", init])
+        claimB = {"builder": A["vbuilderB"].lower(), "source": "domain:127.0.0.1", "deployers": [A["vbuilderB"].lower()], "country": "DE", "chain": 31337, "issued": today}
+        fb = ui("claim", claim=claimB, builderKey=KEYS["vbuilderB"])["file"]
+        wk = root / "domain/.well-known"; wk.mkdir(parents=True); (wk / "registrai.json").write_text(json.dumps(fb))
+        c.send("vbuilderB", S["BuilderRegistry"], "registerBuilder(string)", "registrai:domain:127.0.0.1")
+        idA = c.uint(S["BuilderRegistry"], "builderIdOf(address)(uint256)", A["vbuilderA"])
+        idB = c.uint(S["BuilderRegistry"], "builderIdOf(address)(uint256)", A["vbuilderB"])
+
+        # forgeries: both implementations must refuse
+        import verified as kv
+        forged_dep = {"builder": A["stranger"].lower(), "source": "domain:127.0.0.1", "deployers": [A["vbuilderB"].lower()], "country": "DE", "chain": 31337, "issued": today}
+        ff = ui("claim", claim=forged_dep, builderKey=KEYS["stranger"])["file"]      # B never signed
+        ts = ui("validateProof", file=ff, expectedSource="domain:127.0.0.1", onchainOwner=A["stranger"], chainId=31337)["result"]
+        py_ok, py_why = kv.validate_proof(ff, "domain:127.0.0.1", A["stranger"], 31337)
+        check(not ts["valid"] and ts["rule"] == 5 and not py_ok,
+              f"claiming someone else's deployer is refused by the website (rule {ts['rule']}) and the keeper ({py_why[:40]})")
+        wrong = ui("claim", claim=claimA, builderKey=KEYS["stranger"])["file"]       # signed by the wrong wallet
+        ts2 = ui("validateProof", file=wrong, expectedSource="github:acme/tool", onchainOwner=A["vbuilderA"], chainId=31337)["result"]
+        py2, _ = kv.validate_proof(wrong, "github:acme/tool", A["vbuilderA"], 31337)
+        check(not ts2["valid"] and not py2, "a claim signed by the wrong wallet is refused by both")
+        py3, why3 = kv.validate_proof(fa, "github:acme/tool", A["vbuilderA"], 31337)
+        check(py3, "the keeper accepts the proof file the website library produced", why3)
+
+        # the soulbound badge: ADMIN issues, the operator may only flip lapsed, the deployer holds nothing
+        blog = forge_script(c, "DeployBadge", {"BUILDER_REGISTRY": S["BuilderRegistry"], "ADMIN": A["admin"],
+                            "OPERATOR": A["operator"], "BADGE_CHAIN_LABEL": "Local",
+                            "BADGE_IMAGE_BASE": "https://registrai.cc/badge/local/"})
+        BADGE = re.search(r"VerifiedBuilderBadge:\s*(0x[0-9a-fA-F]{40})", blog).group(1)
+        check(c.call(BADGE, "hasRole(bytes32,address)(bool)", "0x" + "00" * 32, A["deployer"]) == "false"
+              and c.call(BADGE, "hasRole(bytes32,address)(bool)", run(["cast", "keccak", "STATUS_ROLE"]).stdout.strip(), A["operator"]) == "true",
+              "badge deployed: the deployer holds no role, the operator holds STATUS only")
+
+        # the real onboarding batch, executed as the multisig would
+        out_dir = root / "batch"
+        r = run(["npx", "--yes", "tsx", "scripts/onboard-batch.ts", "--network", "local", "--rpc", c.rpc,
+                 "--builder-registry", S["BuilderRegistry"], "--caretaker-registry", S["CaretakerRegistry"],
+                 "--operator", A["operator"], "--chain-id", "31337", "--badge", BADGE, "--out", str(out_dir)], cwd=FRONTEND)
+        batch = json.loads((out_dir / "onboard-batch.safe.json").read_text())
+        txs = batch["transactions"]
+        to_ct = [t for t in txs if t["to"].lower() == S["CaretakerRegistry"].lower()]
+        to_badge = [t for t in txs if t["to"].lower() == BADGE.lower()]
+        check(len(txs) == 4 and len(to_ct) == 2 and len(to_badge) == 2,
+              f"onboard-batch: setCaretaker + issue for each of the two pending builders ({len(txs)} txs)")
+        check(all(txs.index(to_ct[k]) < txs.index(to_badge[k]) for k in range(2)),
+              "each builder's badge is issued after its caretaker is set, in the same batch")
+        for t in txs:
+            run(["cast", "send", t["to"], t["data"], "--rpc-url", c.rpc, "--private-key", KEYS["admin"]])
+        check(all(c.call(S["CaretakerRegistry"], "isCaretaker(uint256,address)(bool)", i, A["operator"]) == "true" for i in (idA, idB)),
+              "after the batch our operator is caretaker of both builders")
+        sA = c.uint(BADGE, "serialOf(uint256)(uint256)", idA); sB = c.uint(BADGE, "serialOf(uint256)(uint256)", idB)
+        check(sorted([sA, sB]) == [1, 2]
+              and c.call(BADGE, "ownerOf(uint256)(address)", sA).lower() == A["vbuilderA"].lower()
+              and c.call(BADGE, "ownerOf(uint256)(address)", sB).lower() == A["vbuilderB"].lower(),
+              f"badges No. {sA:03d} and No. {sB:03d} are held by the builders themselves")
+        err = c.fails_with("vbuilderA", BADGE, "transferFrom(address,address,uint256)", A["vbuilderA"], A["stranger"], sA)
+        check(err != "", "the badge is soulbound: its holder cannot transfer it")
+        err = c.fails_with("operator", BADGE, "issue(uint256)", idA)
+        check(err != "", "the keeper's operator key cannot issue a badge")
+        def badge_json(serial):
+            uri = c.call(BADGE, "tokenURI(uint256)(string)", serial).strip().strip('"')
+            import base64
+            return json.loads(base64.b64decode(uri.split(",", 1)[1]))
+        jA = badge_json(sA)
+        attrs = {a["trait_type"]: a["value"] for a in jA["attributes"]}
+        check(jA["name"] == f"Registrai Verified Builder No. {sA:03d}" and attrs["Status"] == "Verified"
+              and attrs["Source"] == "github:acme/tool" and jA["image"] == f"https://registrai.cc/badge/local/{sA}.jpg"
+              and jA["external_url"].endswith(f"?builder={idA}"),
+              "tokenURI: on-chain JSON names the serial, source, status and image")
+        # the badge art for this serial renders (the image the metadata points at)
+        art = root / "badge-art"
+        run(["python3", "scripts/render-badges.py", "--network", "local", "--upto", "2", "--out", str(art)], cwd=FRONTEND)
+        check(all((art / "local" / f).stat().st_size > 20_000 for f in ("1.jpg", "2.jpg", "2-lapsed.jpg", "card.jpg")),
+              "render-badges produces the badge, lapsed and share-card images")
+
+        # keeper ticks, isolated from the live state files
+        data_dir = root / "keeper-data"; data_dir.mkdir()
+        kenv = {"RPC": c.rpc, "PRIVATE_KEY": KEYS["operator"], "PROGRESS_POOL": S["ProgressPool"], "MARKETS_PERENNIAL": S["MarketsPerennial"],
+                "NANO_LEDGER": S["NanoLedger"], "CARETAKER_REGISTRY": S["CaretakerRegistry"], "BUILDER_REGISTRY": S["BuilderRegistry"],
+                "PROGRESS_ARBITER": S["ProgressArbiter"], "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"],
+                "FEED_RESOLVER": A["resolver"], "FEED_CHALLENGE_WINDOW": "3600", "CHAIN_ID": "31337", "AUTO_OPEN_MARKETS": "false",
+                "CARETAKER_DATA_DIR": str(data_dir), "VERIFIED_BADGE": BADGE, "BADGE_LAPSE_TICKS": "1", **proof_env}
+        def keeper_tick_full():
+            r = run(["python3", "keeper/caretaker.py"], env=kenv, cwd=ARC, ok=False)
+            return r.stdout + r.stderr
+        markets_by_op_before = c.uint(S["MarketsPerennial"], "createdBy(address)(uint256)", A["operator"])
+        log1 = keeper_tick_full()
+        check("2 verified" in log1, "keeper sees both builders as verified", log1[-1500:])
+        st = json.loads((data_dir / "caretaker-state.json").read_text())
+        feeds = {k: v.get("milestoneFeedId") for k, v in st.items() if isinstance(v, dict) and v.get("milestoneFeedId")}
+        fA = next(v for k, v in feeds.items() if "acme/tool" in k); fB = next(v for k, v in feeds.items() if "domain:127.0.0.1" in k)
+        latest = lambda f: int(c.call(S["Attestation"], "latestValue(bytes32,address)(int256,uint256,bool)", f, A["operator"]).split()[0])
+        check(latest(fA) == 2, f"open-source milestone published on-chain: release + tag = {latest(fA)}", log1[-3000:])
+        check(latest(fB) == 2, f"closed-source milestone published on-chain: contracts deployed by B = {latest(fB)}", log1[-3000:])
+        check(c.call(S["MarketsPerennial"], "isApprovedFeed(bytes32,address)(bool)", fA, A["operator"]) == "true",
+              "the new milestone feed passes the oracle allowlist (independent resolver)")
+        check(c.uint(S["MarketsPerennial"], "createdBy(address)(uint256)", A["operator"]) == markets_by_op_before,
+              "the keeper opened no market itself (auto_open_markets=false)")
+        m = ui("create", "bob", builderId=idA, feedId=fA, expiryIn=7 * 86400, liquidity=str(5 * U))
+        check(m["threshold"] == "3", "a community member opens a market on the verified builder: >= 2 + 1 = 3")
+
+        # proof removed -> lapsed: alert, count frozen, existing market still settleable
+        (wk / "registrai.json").unlink()
+        run(["cast", "send", "--rpc-url", c.rpc, "--private-key", KEYS["vbuilderB"], "--create", init])   # a 3rd deploy
+        log2 = keeper_tick_full()
+        check("lapsed" in log2 and "ALERT" in log2, "removing the proof: the keeper alerts the builder has lapsed", log2[-1200:])
+        check(latest(fB) == 2, "lapsed builder: no heartbeat, the published count stays at 2 despite a 3rd deploy")
+        check(latest(fA) == 2, "the other builder is unaffected")
+        check(c.call(BADGE, "lapsed(uint256)(bool)", sB) == "true" and badge_json(sB)["image"].endswith(f"/{sB}-lapsed.jpg"),
+              "the keeper marks the lapsed builder's badge lapsed on-chain (image switches to the lapsed art)", log2[-1200:])
+        check(c.call(BADGE, "lapsed(uint256)(bool)", sA) == "false" and c.call(BADGE, "ownerOf(uint256)(address)", sB).lower() == A["vbuilderB"].lower(),
+              "the verified builder's badge stays verified; the lapsed badge stays with its builder")
+        (wk / "registrai.json").write_text(json.dumps(fb))          # proof back
+        log3 = keeper_tick_full()
+        check(c.call(BADGE, "lapsed(uint256)(bool)", sB) == "false", "proof restored: the badge is verified again on the next tick", log3[-1200:])
+    finally:
+        for srv in (gh_srv, dom_srv, api_srv):
+            srv.shutdown()
+        for k in proof_env:
+            os.environ.pop(k, None)
 
 
 if __name__ == "__main__":
