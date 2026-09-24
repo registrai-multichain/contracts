@@ -46,6 +46,7 @@ contract DeployNanoStack is Script {
             ledger,
             Registry(registry),
             Attestation(attestation),
+            msg.sender,
             treasury,
             forfeitSink,
             settlementWindow,

@@ -58,6 +58,8 @@ contract PocRegressionTest is Test {
         builders.registerFor(address(0xB111), "b1");
         pool = new ProgressPool(ledger, builders, caretakers, deployer, 0, 60);
         markets = new MarketsPerennial(ledger, registry, attestation, builders, deployer, address(pool), WINDOW, GRACE);
+        markets.setApprovedAgent(agent, true);
+        markets.setApprovedResolver(resolver, true);
         arb = new ProgressArbiter(ledger, pool, builders, caretakers, deployer, 300, 50e6, 10);
         pool.grantRole(pool.PROGRESS_ROLE(), address(arb));
         arb.grantRole(arb.PROPOSER_ROLE(), caretaker);
@@ -122,5 +124,33 @@ contract PocRegressionTest is Test {
         assertEq(v, 1);
         markets.resolve(b);
         assertTrue(markets.getMarket(b).yesWon);
+    }
+
+    // ── B1: no market on a self-resolved feed ──
+
+    /// PoC: the attacker created a feed naming itself resolver, registered as its
+    /// agent, opened a market, attested a lie and ruled the honest challenge
+    /// Valid. Now the market cannot be opened at all.
+    function test_regression_selfResolvedFeedMarketRefused() public {
+        address attacker = address(0xA77);
+        usdc.mint(attacker, 1_000e6);
+        vm.startPrank(attacker);
+        usdc.approve(address(registry), type(uint256).max);
+        bytes32 f = registry.createFeed("looks-legit", keccak256("m"), 10e6, 1 hours, attacker);
+        registry.registerAgent(f, keccak256("m"), 10e6);
+        vm.stopPrank();
+        _fund(attacker);
+
+        vm.prank(attacker);
+        vm.expectRevert(MarketsPerennial.AgentNotApproved.selector);
+        markets.createMarket(1, f, attacker, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
+
+        // Even if the governor had vetted the attacker as an agent, its own
+        // resolver still is not: the self-resolved feed is refused.
+        markets.setApprovedAgent(attacker, true);
+        vm.prank(attacker);
+        vm.expectRevert(MarketsPerennial.ResolverNotApproved.selector);
+        markets.createMarket(1, f, attacker, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
+        assertFalse(markets.isApprovedFeed(f, attacker));
     }
 }

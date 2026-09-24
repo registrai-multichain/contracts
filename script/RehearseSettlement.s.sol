@@ -46,6 +46,11 @@ contract RehearseSettlement is Script {
         ProgressPool pool = new ProgressPool(ledger, builders, caretakers, deployer, 1 days, 1 hours);
         MarketsPerennial markets =
             new MarketsPerennial(ledger, registry, attestation, builders, deployer, address(pool), 1 hours, 1 days);
+        // oracle allowlist: our agent, the foreign agent (so its market exists to
+        // be ignored), and the deployer as every feed's dispute resolver
+        markets.setApprovedAgent(agent, true);
+        markets.setApprovedAgent(otherAgent, true);
+        markets.setApprovedResolver(deployer, true);
         usdc.mint(agent, 1_000e6);
         usdc.mint(otherAgent, 1_000e6);
         usdc.mint(trader, 10_000e6);

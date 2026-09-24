@@ -91,6 +91,12 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     /// protocol revenue: when the protocol runs the agent, a penalty it pays to
     /// itself is no penalty. Defaults to the commons; a leaderboard can replace it.
     address public forfeitSink;
+    /// @notice Governor allowlist of bonded agents a market may settle on.
+    mapping(address => bool) public approvedAgent;
+    /// @notice Governor allowlist of dispute resolvers a market's feed may name.
+    /// A feed's resolver is fixed at Registry.createFeed (no setter) and Dispute
+    /// snapshots it per challenge, so checking it once at market creation is sound.
+    mapping(address => bool) public approvedResolver;
 
     event MarketCreated(
         bytes32 indexed marketId,
@@ -128,6 +134,8 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     event AgentFeeReleased(bytes32 indexed marketId, address indexed agent, uint256 amount);
     event AgentFeeForfeited(bytes32 indexed marketId, address indexed sink, uint256 amount);
     event ForfeitSinkSet(address sink);
+    event AgentApprovalSet(address indexed agent, bool approved);
+    event ResolverApprovalSet(address indexed resolver, bool approved);
 
     error MarketMissing();
     error MarketExists();
@@ -146,6 +154,8 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     error BadSplit();
     error ZeroAddress();
     error BuilderInactive();
+    error AgentNotApproved();
+    error ResolverNotApproved();
 
     constructor(
         NanoLedger ledger_,
@@ -183,6 +193,7 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         if (liquidity < MIN_LIQUIDITY) revert LiquidityTooLow();
         if (!BUILDERS.isActiveBuilderId(builderId)) revert BuilderInactive();
         if (!REGISTRY.isActiveAgent(feedId, agent)) revert AgentNotRegistered();
+        _requireApprovedOracle(feedId, agent);
         _requireSettleableFeed(REGISTRY, feedId);
 
         uint256 nonce = createdBy[msg.sender]++;
@@ -393,7 +404,30 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         emit LPClaimed(marketId, msg.sender, payout);
     }
 
+    /// @dev Refuse a market whose oracle the governor has not vetted: both the
+    /// agent that attests and the resolver that adjudicates disputes on its feed.
+    /// Without this, anyone could open a market on a feed where they are agent
+    /// AND resolver and settle it however they like. Checked at creation only:
+    /// the feed's resolver cannot change afterwards, and revoking an approval
+    /// must not strand markets already open (they settle or void as before).
+    function _requireApprovedOracle(bytes32 feedId, address agent) internal view {
+        if (!approvedAgent[agent]) revert AgentNotApproved();
+        if (!approvedResolver[REGISTRY.getFeed(feedId).resolver]) revert ResolverNotApproved();
+    }
+
     // ──────────────────────────── governor ────────────────────────────
+
+    function setApprovedAgent(address agent, bool approved) external onlyRole(GOVERNOR_ROLE) {
+        if (agent == address(0)) revert ZeroAddress();
+        approvedAgent[agent] = approved;
+        emit AgentApprovalSet(agent, approved);
+    }
+
+    function setApprovedResolver(address resolver, bool approved) external onlyRole(GOVERNOR_ROLE) {
+        if (resolver == address(0)) revert ZeroAddress();
+        approvedResolver[resolver] = approved;
+        emit ResolverApprovalSet(resolver, approved);
+    }
 
     function setFeeSplit(uint256 creatorBps_, uint256 treasuryBps_, uint256 agentBps_)
         external
@@ -419,6 +453,15 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     }
 
     // ───────────────────────────── views ─────────────────────────────
+
+    /// @notice True when a market on `feedId` settled by `agent` passes the oracle
+    /// allowlist: the feed exists, the agent is approved, and the feed's resolver
+    /// is approved. (createMarket additionally needs the agent registered and
+    /// active on the feed, a settleable dispute window, and an active builder.)
+    function isApprovedFeed(bytes32 feedId, address agent) external view returns (bool) {
+        Registry.Feed memory f = REGISTRY.getFeed(feedId);
+        return f.exists && approvedAgent[agent] && approvedResolver[f.resolver];
+    }
 
     function getMarket(bytes32 marketId) external view returns (Market memory) {
         return _markets[marketId];

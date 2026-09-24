@@ -40,6 +40,8 @@ contract MarketsPerennialTest is Test {
         builders.registerFor(builder, "github.com/example/builder");
         commons = address(0xC0117);
         markets = new MarketsPerennial(ledger, registry, attestation, builders, address(this), commons, 1 hours, 1 days);
+        markets.setApprovedAgent(oracle, true);
+        markets.setApprovedResolver(resolver, true);
 
         usdc.mint(oracle, 1_000e6);
         vm.startPrank(oracle);

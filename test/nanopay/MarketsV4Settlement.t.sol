@@ -44,7 +44,9 @@ contract MarketsV4SettlementTest is Test {
         registry.wire(address(attestation), address(dispute));
         attestation.wire(address(dispute));
         ledger = new NanoLedger(usdc, address(this));
-        markets = new MarketsV4(ledger, registry, attestation, treasury, sink, WINDOW, GRACE);
+        markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, WINDOW, GRACE);
+        markets.setApprovedAgent(oracle, true);
+        markets.setApprovedResolver(resolver, true);
         ledger.setSource(address(markets), true);
 
         usdc.mint(oracle, 10_000e6);
@@ -165,12 +167,12 @@ contract MarketsV4SettlementTest is Test {
 
     function test_constructorRejectsBadParams() public {
         vm.expectRevert(SettlementPolicy.BadSettlementParams.selector);
-        new MarketsV4(ledger, registry, attestation, treasury, sink, 0, GRACE);
+        new MarketsV4(ledger, registry, attestation, address(this), treasury, sink, 0, GRACE);
     }
 
     function test_constructorRejectsZeroSink() public {
         vm.expectRevert(MarketsV4.ZeroAddress.selector);
-        new MarketsV4(ledger, registry, attestation, treasury, address(0), WINDOW, GRACE);
+        new MarketsV4(ledger, registry, attestation, address(this), treasury, address(0), WINDOW, GRACE);
     }
 
     // ───────────── the fee, carved out of the pool ─────────────

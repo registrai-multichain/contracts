@@ -46,6 +46,8 @@ contract MilestoneMarketTest is Test {
         builders.registerFor(builder, "github.com/example/builder");
         pool = new ProgressPool(ledger, builders, caretakers, address(this), 1 days, 1 hours);
         markets = new MarketsPerennial(ledger, registry, attestation, builders, address(this), address(pool), 1 hours, 1 days);
+        markets.setApprovedAgent(agent, true);
+        markets.setApprovedResolver(resolver, true);
 
         usdc.mint(agent, 1_000e6);
         vm.startPrank(agent);

@@ -55,6 +55,8 @@ contract SettlementLivenessTest is Test {
         markets = new MarketsPerennial(
             ledger, registry, attestation, builders, address(this), address(pool), WINDOW, GRACE
         );
+        markets.setApprovedAgent(agent, true);
+        markets.setApprovedResolver(resolver, true);
 
         usdc.mint(agent, 10_000e6);
         vm.startPrank(agent);

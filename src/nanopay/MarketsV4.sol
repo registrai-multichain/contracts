@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Registry} from "../Registry.sol";
 import {Attestation} from "../Attestation.sol";
 import {NanoLedger} from "./NanoLedger.sol";
@@ -28,7 +29,11 @@ import {SettlementPolicy} from "./SettlementPolicy.sol";
 /// MarketsV4 must be registered as a NanoLedger source (setSource) so it can
 /// create + credit fee pools. Traders approve MarketsV4 on the ledger
 /// (approveSpender) before trading.
-contract MarketsV4 is ReentrancyGuard, SettlementPolicy {
+///
+/// Governance is limited to the oracle allowlist (GOVERNOR_ROLE): which agents
+/// and dispute resolvers a new market may settle on. Fees, treasury and the
+/// forfeit sink stay immutable.
+contract MarketsV4 is AccessControl, ReentrancyGuard, SettlementPolicy {
     enum Outcome { Yes, No }
     enum Comparator { GreaterThan, GreaterOrEqual, LessThan, LessOrEqual }
     enum Phase { Trading, Resolved, Voided }
@@ -51,9 +56,11 @@ contract MarketsV4 is ReentrancyGuard, SettlementPolicy {
     Registry public immutable REGISTRY;
     Attestation public immutable ATTESTATION;
     address public immutable TREASURY;
-    /// @notice Receives a voided market's escrowed agent fee. Immutable because V4
-    /// has no governance; must not be protocol revenue, or the penalty is void.
+    /// @notice Receives a voided market's escrowed agent fee. Immutable; must not
+    /// be protocol revenue, or the penalty is void.
     address public immutable FORFEIT_SINK;
+
+    bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
 
     uint256 public constant MIN_LIQUIDITY = 5e6;
     uint256 public constant FEE_BPS_CREATOR = 40;
@@ -71,6 +78,12 @@ contract MarketsV4 is ReentrancyGuard, SettlementPolicy {
     mapping(bytes32 => uint256) public lpPotAtResolution;
     /// @notice Agent-cut fees held until the market settles.
     mapping(bytes32 => uint256) public agentEscrow;
+    /// @notice Governor allowlist of bonded agents a market may settle on.
+    mapping(address => bool) public approvedAgent;
+    /// @notice Governor allowlist of dispute resolvers a market's feed may name.
+    /// A feed's resolver is fixed at Registry.createFeed (no setter) and Dispute
+    /// snapshots it per challenge, so checking it once at market creation is sound.
+    mapping(address => bool) public approvedResolver;
 
     event MarketCreated(bytes32 indexed marketId, address indexed creator, bytes32 indexed feedId, address agent, int256 threshold, Comparator comparator, uint256 expiry, uint256 liquidity);
     event Bought(bytes32 indexed marketId, address indexed buyer, Outcome outcome, uint256 collateralIn, uint256 sharesOut, uint256 fee);
@@ -81,6 +94,8 @@ contract MarketsV4 is ReentrancyGuard, SettlementPolicy {
     event MarketVoided(bytes32 indexed marketId);
     event AgentFeeReleased(bytes32 indexed marketId, address indexed agent, uint256 amount);
     event AgentFeeForfeited(bytes32 indexed marketId, address indexed sink, uint256 amount);
+    event AgentApprovalSet(address indexed agent, bool approved);
+    event ResolverApprovalSet(address indexed resolver, bool approved);
 
     error MarketMissing();
     error MarketExists();
@@ -97,23 +112,28 @@ contract MarketsV4 is ReentrancyGuard, SettlementPolicy {
     error InsufficientShares();
     error NoLPShares();
     error ZeroAddress();
+    error AgentNotApproved();
+    error ResolverNotApproved();
 
     constructor(
         NanoLedger ledger_,
         Registry registry_,
         Attestation attestation_,
+        address admin,
         address treasury_,
         address forfeitSink_,
         uint256 settlementWindow_,
         uint256 resolutionGrace_
     ) SettlementPolicy(settlementWindow_, resolutionGrace_) {
         if (treasury_ == address(0)) revert AmountTooLow();
-        if (forfeitSink_ == address(0)) revert ZeroAddress();
+        if (forfeitSink_ == address(0) || admin == address(0)) revert ZeroAddress();
         FORFEIT_SINK = forfeitSink_;
         LEDGER = ledger_;
         REGISTRY = registry_;
         ATTESTATION = attestation_;
         TREASURY = treasury_;
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(GOVERNOR_ROLE, admin);
     }
 
     // ───────────────────────────── create ─────────────────────────────
@@ -129,6 +149,7 @@ contract MarketsV4 is ReentrancyGuard, SettlementPolicy {
         if (expiry <= block.timestamp) revert BadExpiry();
         if (liquidity < MIN_LIQUIDITY) revert LiquidityTooLow();
         if (!REGISTRY.isActiveAgent(feedId, agent)) revert AgentNotRegistered();
+        _requireApprovedOracle(feedId, agent);
         _requireSettleableFeed(REGISTRY, feedId);
 
         uint256 nonce = createdBy[msg.sender]++;
@@ -152,6 +173,17 @@ contract MarketsV4 is ReentrancyGuard, SettlementPolicy {
         _setFeeShares(marketId, msg.sender);
 
         emit MarketCreated(marketId, msg.sender, feedId, agent, threshold, comparator, expiry, liquidity);
+    }
+
+    /// @dev Refuse a market whose oracle the governor has not vetted: both the
+    /// agent that attests and the resolver that adjudicates disputes on its feed.
+    /// Without this, anyone could open a market on a feed where they are agent
+    /// AND resolver and settle it however they like. Checked at creation only:
+    /// the feed's resolver cannot change afterwards, and revoking an approval
+    /// must not strand markets already open (they settle or void as before).
+    function _requireApprovedOracle(bytes32 feedId, address agent) internal view {
+        if (!approvedAgent[agent]) revert AgentNotApproved();
+        if (!approvedResolver[REGISTRY.getFeed(feedId).resolver]) revert ResolverNotApproved();
     }
 
     function _setFeeShares(bytes32 marketId, address creator) internal {
@@ -335,7 +367,30 @@ contract MarketsV4 is ReentrancyGuard, SettlementPolicy {
         emit LPClaimed(marketId, msg.sender, payout);
     }
 
+    // ──────────────────────────── governor ────────────────────────────
+
+    function setApprovedAgent(address agent, bool approved) external onlyRole(GOVERNOR_ROLE) {
+        if (agent == address(0)) revert ZeroAddress();
+        approvedAgent[agent] = approved;
+        emit AgentApprovalSet(agent, approved);
+    }
+
+    function setApprovedResolver(address resolver, bool approved) external onlyRole(GOVERNOR_ROLE) {
+        if (resolver == address(0)) revert ZeroAddress();
+        approvedResolver[resolver] = approved;
+        emit ResolverApprovalSet(resolver, approved);
+    }
+
     // ───────────────────────────── views ─────────────────────────────
+
+    /// @notice True when a market on `feedId` settled by `agent` passes the oracle
+    /// allowlist: the feed exists, the agent is approved, and the feed's resolver
+    /// is approved. (createMarket additionally needs the agent registered and
+    /// active on the feed and a settleable dispute window.)
+    function isApprovedFeed(bytes32 feedId, address agent) external view returns (bool) {
+        Registry.Feed memory f = REGISTRY.getFeed(feedId);
+        return f.exists && approvedAgent[agent] && approvedResolver[f.resolver];
+    }
 
     /// @notice Where a market stands in settlement, and the settling value once
     /// it is resolvable.
