@@ -33,6 +33,8 @@ contract DeployV12 is Script {
             MarketMakerVault vault
         )
     {
+        // Legacy testnet script. The mainnet oracle stack is script/DeployOracle.s.sol.
+        require(block.chainid != 5042, "legacy script: not for Arc mainnet, use DeployOracle.s.sol");
         address usdc = vm.envAddress("USDC");
         // MM operator: defaults to deployer, can override via OPERATOR env var.
         address operator = vm.envOr("OPERATOR", msg.sender);

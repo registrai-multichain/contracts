@@ -18,6 +18,8 @@ import {Dispute} from "../src/Dispute.sol";
 ///         possible.
 contract DeployRegistryV11 is Script {
     function run() external returns (Registry registry, Attestation attestation, Dispute dispute) {
+        // Legacy testnet script. The mainnet oracle stack is script/DeployOracle.s.sol.
+        require(block.chainid != 5042, "legacy script: not for Arc mainnet, use DeployOracle.s.sol");
         address usdc = vm.envAddress("USDC");
 
         vm.startBroadcast();

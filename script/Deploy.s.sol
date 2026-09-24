@@ -15,6 +15,8 @@ contract Deploy is Script {
         external
         returns (Registry registry, Attestation attestation, Dispute dispute, Markets markets)
     {
+        // Legacy testnet script. The mainnet oracle stack is script/DeployOracle.s.sol.
+        require(block.chainid != 5042, "legacy script: not for Arc mainnet, use DeployOracle.s.sol");
         address usdc = vm.envAddress("USDC");
 
         vm.startBroadcast();
