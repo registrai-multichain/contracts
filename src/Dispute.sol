@@ -137,6 +137,14 @@ contract Dispute {
         return available < minBond ? available : minBond;
     }
 
+    /// @notice Who removed `attestationId`: the challenger of its dispute when the
+    /// resolver ruled it Invalid, else address(0) (never challenged, pending, or
+    /// upheld).
+    function invalidatedBy(bytes32 attestationId) external view returns (address) {
+        DisputeData storage d = _disputes[disputeOf[attestationId]];
+        return d.outcome == DisputeOutcome.AttestationInvalid ? d.challenger : address(0);
+    }
+
     function getDispute(bytes32 disputeId) external view returns (DisputeData memory) {
         return _disputes[disputeId];
     }

@@ -245,20 +245,47 @@ contract Attestation {
         returns (bool found, int256 value, uint256 timestamp, bool finalized)
     {
         bytes32[] storage h = _history[feedId][agent];
-        uint256 lo;
-        uint256 hi = h.length;
-        while (lo < hi) {
-            uint256 mid = (lo + hi) / 2;
-            if (_attestations[h[mid]].timestamp < from) lo = mid + 1;
-            else hi = mid;
-        }
-        for (uint256 i = lo; i < h.length; i++) {
+        for (uint256 i = _lowerBound(h, from); i < h.length; i++) {
             AttestationData storage att = _attestations[h[i]];
             if (att.timestamp > to) break;
             if (att.status == DisputeStatus.ResolvedInvalid) continue;
             return (true, att.value, att.timestamp, isFinalized(h[i]));
         }
         return (false, 0, 0, false);
+    }
+
+    /// @notice The first attestation stamped in [from, to] that a dispute ruled
+    /// Invalid, looking at no more than `maxScan` entries from the window start.
+    /// Read by markets that void: the challenger who removed the agent's answer
+    /// earns the agent's share of the fee. Bounded so the lookup cost never
+    /// grows with the feed's history.
+    function firstInvalidatedInWindow(bytes32 feedId, address agent, uint256 from, uint256 to, uint256 maxScan)
+        external
+        view
+        returns (bool found, bytes32 attestationId)
+    {
+        bytes32[] storage h = _history[feedId][agent];
+        uint256 i = _lowerBound(h, from);
+        uint256 end = h.length;
+        if (end - i > maxScan) end = i + maxScan;
+        for (; i < end; i++) {
+            AttestationData storage att = _attestations[h[i]];
+            if (att.timestamp > to) break;
+            if (att.status == DisputeStatus.ResolvedInvalid) return (true, h[i]);
+        }
+        return (false, bytes32(0));
+    }
+
+    /// @dev Index of the first entry stamped at or after `from` (history length if
+    /// none). History is append-only and stamped with block.timestamp, so it is
+    /// sorted by timestamp.
+    function _lowerBound(bytes32[] storage h, uint256 from) internal view returns (uint256 lo) {
+        uint256 hi = h.length;
+        while (lo < hi) {
+            uint256 mid = (lo + hi) / 2;
+            if (_attestations[h[mid]].timestamp < from) lo = mid + 1;
+            else hi = mid;
+        }
     }
 
     function historyLength(bytes32 feedId, address agent) external view returns (uint256) {
