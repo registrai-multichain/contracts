@@ -1,0 +1,17 @@
+# Echidna config for PhaseOneEchidna (mainnet phase-1 property harness).
+# Run from the contracts root:
+#   echidna test/audit/echidna/PhaseOneEchidna.sol --contract PhaseOneEchidna \
+#     --config test/audit/echidna/echidna.yaml
+testMode: property
+testLimit: 200000
+seqLen: 100
+shrinkLimit: 5000
+maxTimeDelay: 864000 # up to 10 days between calls: drives the 7-day recovery
+maxBlockDelay: 60000
+codeSize: 0xffffff
+deployer: "0x30000"
+sender: ["0x10000", "0x20000", "0x30000"]
+coverage: true
+corpusDir: "cache/echidna-corpus"
+# solc 0.8.35 (the deployed compiler); override --solc if yours lives elsewhere.
+cryticArgs: ["--solc", "solc-0.8.35", "--solc-remaps", "@openzeppelin/=lib/openzeppelin-contracts/ forge-std/=lib/forge-std/src/", "--solc-args", "--via-ir --optimize --optimize-runs 200 --evm-version osaka"]

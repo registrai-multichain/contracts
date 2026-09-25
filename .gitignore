@@ -10,3 +10,7 @@ broadcast/
 
 # Python
 __pycache__/
+
+# audit tool output
+crytic-export/
+cache/echidna-corpus/
