@@ -17,6 +17,15 @@ import {BinaryMarket} from "./BinaryMarket.sol";
 ///         market settles. On void the escrow goes to the successful challenger,
 ///         else to the treasury, as does a settled market's rounding dust.
 ///
+///         Sessions (one-signature trading): an owner lets a delegate key, e.g.
+///         a key the app keeps in the browser, trade for it until an expiry and
+///         within a spend cap: buyFor / sellFor / redeemFor move the OWNER's
+///         ledger balance and positions, never the delegate's. Positions,
+///         proceeds and payouts stay the owner's; a leaked delegate key can at
+///         worst trade the capped amount badly until the session expires or is
+///         revoked. The owner still approves this contract on the ledger (the
+///         ledger allowance caps the delegate as well).
+///
 ///         Oracle vetting: only governor-approved agents may settle (as on
 ///         MarketsPerennial). A permissionless agent could skip its reading on a
 ///         market it trades and have it void (net-cost refunds): a free option.
@@ -46,6 +55,19 @@ contract MarketsV4 is BinaryMarket {
     /// @notice Governor allowlist of bonded agents a market may settle on.
     mapping(address => bool) public approvedAgent;
 
+    /// @notice Longest session an owner can grant.
+    uint256 public constant MAX_SESSION = 7 days;
+
+    struct Session {
+        /// Collateral the delegate may still spend on buys for the owner.
+        uint128 spendLeft;
+        /// The delegate may act for the owner while block.timestamp < expiry.
+        uint64 expiry;
+    }
+
+    /// @notice owner => delegate => session.
+    mapping(address => mapping(address => Session)) public sessions;
+
     event AgentApprovalSet(address indexed agent, bool approved);
     event MarketCreated(bytes32 indexed marketId, address indexed creator, bytes32 indexed feedId, address agent, int256 threshold, Comparator comparator, uint256 expiry, uint256 liquidity);
     event FeesPaid(bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 agentFee);
@@ -53,7 +75,12 @@ contract MarketsV4 is BinaryMarket {
         bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 challengerReward, address challenger
     );
 
+    event SessionSet(address indexed owner, address indexed delegate, uint256 spendCap, uint256 expiry);
+
     error AgentNotApproved();
+    error SessionInvalid();
+    error SessionSpendExceeded();
+    error GasForwardFailed();
 
     constructor(
         NanoLedger ledger_,
@@ -78,6 +105,71 @@ contract MarketsV4 is BinaryMarket {
     ) external nonReentrant returns (bytes32 marketId) {
         marketId = _open(feedId, agent, threshold, comparator, expiry, liquidity);
         emit MarketCreated(marketId, msg.sender, feedId, agent, threshold, comparator, expiry, liquidity);
+    }
+
+    // ─────────────────────────── sessions ───────────────────────────
+
+    /// @notice Let `delegate` trade for you until `expiry` (at most MAX_SESSION
+    /// ahead), spending at most `spendCap` of your ledger balance on buys. Replaces
+    /// any session with that delegate. Native value sent along is forwarded to the
+    /// delegate as its gas money (on Arc, gas is USDC).
+    function setSession(address delegate, uint128 spendCap, uint64 expiry) external payable nonReentrant {
+        if (delegate == address(0) || delegate == msg.sender) revert ZeroAddress();
+        if (expiry <= block.timestamp || expiry > block.timestamp + MAX_SESSION) revert SessionInvalid();
+        sessions[msg.sender][delegate] = Session({spendLeft: spendCap, expiry: expiry});
+        emit SessionSet(msg.sender, delegate, spendCap, expiry);
+        if (msg.value > 0) {
+            (bool ok,) = payable(delegate).call{value: msg.value}("");
+            if (!ok) revert GasForwardFailed();
+        }
+    }
+
+    /// @notice End a delegate's session now.
+    function revokeSession(address delegate) external {
+        delete sessions[msg.sender][delegate];
+        emit SessionSet(msg.sender, delegate, 0, 0);
+    }
+
+    /// @notice `buy` for `owner`, as its session delegate: the owner's ledger
+    /// balance pays (within the session's spend cap) and the shares are the owner's.
+    function buyFor(
+        address owner,
+        bytes32 marketId,
+        Outcome outcome,
+        uint256 collateralIn,
+        uint256 minSharesOut,
+        uint256 deadline
+    ) external nonReentrant returns (uint256) {
+        Session storage s = _session(owner);
+        if (collateralIn > s.spendLeft) revert SessionSpendExceeded();
+        s.spendLeft -= uint128(collateralIn);
+        return _buy(owner, marketId, outcome, collateralIn, minSharesOut, deadline);
+    }
+
+    /// @notice `sell` for `owner`, as its session delegate: the owner's shares go
+    /// in, the proceeds go to the owner's ledger balance.
+    function sellFor(
+        address owner,
+        bytes32 marketId,
+        Outcome outcome,
+        uint256 sharesIn,
+        uint256 minCollateralOut,
+        uint256 deadline
+    ) external nonReentrant returns (uint256) {
+        _session(owner);
+        return _sell(owner, marketId, outcome, sharesIn, minCollateralOut, deadline);
+    }
+
+    /// @notice `redeem` for `owner`, as its session delegate: the payout goes to
+    /// the owner's ledger balance.
+    function redeemFor(address owner, bytes32 marketId) external nonReentrant returns (uint256) {
+        _session(owner);
+        return _redeem(owner, marketId);
+    }
+
+    function _session(address owner) internal view returns (Session storage s) {
+        s = sessions[owner][msg.sender];
+        if (block.timestamp >= s.expiry) revert SessionInvalid();
     }
 
     // ───────────────────────────── hooks ─────────────────────────────
