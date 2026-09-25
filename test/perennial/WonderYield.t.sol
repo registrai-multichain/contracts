@@ -167,17 +167,45 @@ contract WonderYieldTest is Test {
         escrow.setVault(IERC4626(address(other)));
     }
 
-    function test_harvestTopsUpFromPrincipalWhenLedgerShort() public {
-        // 10 liquid + 90 deployed; a donation of 20 lands in the ledger, then a
-        // sweep pays 100 out of ledger+recall: principal exceeds what is owed.
+    /// A vault whose share price was inflated before our deposit (a donation to
+    /// an empty vault) would mint shares worth less than we put in: refused.
+    function test_deployRefusesSlippage() public {
+        vault.accrue(1_000e6); // donation into the empty vault
+        vm.prank(operator);
+        vm.expectRevert(WonderEscrow.Slippage.selector);
+        escrow.deploy(50e6);
+        assertEq(escrow.deployedPrincipal(), 0);
+        assertEq(ledger.balanceOf(address(escrow)), 100e6);
+    }
+
+    /// Surplus that sits in the vault as principal (it paid a sweep from the
+    /// ledger) is paid once the keeper recalls it; harvest itself pays only
+    /// from the ledger, so it never takes principal the book still counts.
+    function test_harvestPaysOnlyFromLiquid() public {
         vm.prank(operator);
         escrow.deploy(90e6);
         vm.prank(markets);
         ledger.internalTransfer(address(escrow), 20e6); // donation, not credited
         vm.warp(block.timestamp + 180 days);
-        escrow.sweep(KEY); // recalls 70, ledger 0, principal 20, owed 0
-        uint256 got = escrow.harvest(); // surplus 20 sits in the vault
-        assertEq(got, 20e6);
+        escrow.sweep(KEY); // recalls 70: ledger 0, principal 20, owed 0
+        assertEq(escrow.harvest(), 0);
+        vm.prank(operator);
+        escrow.recall(20e6);
+        assertEq(escrow.harvest(), 20e6);
         assertEq(escrow.deployedPrincipal(), 0);
+    }
+
+    /// At a high share price, withdrawing the yield by exact assets would burn a
+    /// rounded-up share out of principal; harvest redeems whole shares instead
+    /// and keeps book principal backed.
+    function test_harvestNeverDipsIntoPrincipalAtHighSharePrice() public {
+        vm.prank(operator);
+        escrow.deploy(1_000); // 1,000 wei of shares
+        vault.accrue(3_333_333); // share price ~3,334 assets
+        escrow.harvest();
+        assertGe(escrow.vaultAssets(), escrow.deployedPrincipal(), "principal still in the vault");
+        assertGe(
+            ledger.balanceOf(address(escrow)) + escrow.deployedPrincipal(), escrow.totalEscrow(), "book solvent"
+        );
     }
 }

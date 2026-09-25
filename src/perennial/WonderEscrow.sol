@@ -100,6 +100,7 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
     error YieldPausedError();
     error OverCap();
     error BelowMinLiquid();
+    error Slippage();
 
     constructor(NanoLedger ledger_, BuilderFund fund_, VerifiedBuilderBadge badge_, address admin, uint256 expiry_) {
         if (
@@ -237,7 +238,10 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
         LEDGER.withdraw(assets);
         IERC20 usdc = LEDGER.USDC();
         usdc.forceApprove(address(vault), assets);
-        vault.deposit(assets, address(this));
+        uint256 shares = vault.deposit(assets, address(this));
+        // The shares must be worth what went in, up to rounding (1 ppm + 1 wei):
+        // refuses a vault whose share price was inflated or that charges on deposit.
+        if (vault.convertToAssets(shares) + assets / 1e6 + 1 < assets) revert Slippage();
         deployedPrincipal += assets;
         emit Deployed(assets);
     }
@@ -246,38 +250,42 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
         _recall(assets);
     }
 
-    /// @notice Anyone. What the ledger account and the vault hold above what the
-    /// escrow owes (vault yield, donations) goes to the season pool. A shortfall
-    /// beyond LOSS_DUST pauses deposits; the Safe tops up.
-    /// Solvency: `ledger + deployedPrincipal >= totalEscrow` holds on every path
-    /// (credit checks it; deploy/recall move value 1:1 between the two; release
-    /// and sweep lower totalEscrow by what leaves), and the yield skim below only
-    /// withdraws what the vault holds above principal.
+    /// @notice Anyone. Yield (vault value above principal) is redeemed in whole
+    /// shares into the ledger account, and whatever the account holds above what
+    /// the escrow owes goes to the season pool. It pays from the ledger only and
+    /// never below book principal, so `ledger + deployedPrincipal >= totalEscrow`
+    /// (what `credit` checks) survives every harvest; principal the book no
+    /// longer needs (after a sweep or release paid from the ledger) is paid on a
+    /// later harvest once the keeper recalls it. A shortfall beyond LOSS_DUST
+    /// pauses deposits; the Safe tops up.
+    /// Solvency: the book invariant holds on every path (credit checks it;
+    /// deploy/recall move value 1:1 between ledger and principal; release and
+    /// sweep lower totalEscrow by what leaves; harvest pays only book surplus).
     function harvest() external nonReentrant returns (uint256 toSeason) {
         uint256 assets = vaultAssets();
         uint256 bal = LEDGER.balanceOf(address(this));
-        uint256 total = bal + assets;
-        if (total <= totalEscrow) {
-            uint256 shortfall = totalEscrow - total;
-            if (shortfall > LOSS_DUST) {
-                yieldPaused = true;
-                emit LossDetected(shortfall);
-            }
+        if (bal + assets + LOSS_DUST < totalEscrow) {
+            yieldPaused = true;
+            emit LossDetected(totalEscrow - bal - assets);
             return 0;
         }
-        toSeason = total - totalEscrow;
-        uint256 gain = assets > deployedPrincipal ? assets - deployedPrincipal : 0;
-        if (gain > toSeason) gain = toSeason;
-        if (gain > 0) {
-            vault.withdraw(gain, address(this), address(this));
-            IERC20 usdc = LEDGER.USDC();
-            usdc.forceApprove(address(LEDGER), gain);
-            LEDGER.deposit(gain);
+        if (assets > deployedPrincipal) {
+            // Shares round down, so what stays is worth at least principal.
+            uint256 shares = vault.convertToShares(assets - deployedPrincipal);
+            if (shares > 0) {
+                uint256 got = vault.redeem(shares, address(this), address(this));
+                IERC20 usdc = LEDGER.USDC();
+                usdc.forceApprove(address(LEDGER), got);
+                LEDGER.deposit(got);
+                bal += got;
+                assets = vaultAssets();
+            }
         }
-        // Only when principal already paid a release/sweep's share from the
-        // ledger: top the ledger up from principal (keeps book == vault).
-        uint256 liquid = LEDGER.balanceOf(address(this));
-        if (liquid < toSeason) _recall(toSeason - liquid);
+        uint256 backing = bal + (assets < deployedPrincipal ? assets : deployedPrincipal);
+        if (backing <= totalEscrow) return 0;
+        toSeason = backing - totalEscrow;
+        if (toSeason > bal) toSeason = bal;
+        if (toSeason == 0) return 0;
         LEDGER.internalTransfer(address(FUND), toSeason);
         FUND.creditSeason(toSeason);
         emit Harvested(toSeason);
