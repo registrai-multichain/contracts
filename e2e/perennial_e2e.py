@@ -273,11 +273,13 @@ def rehearse(c, A):
     log = forge_script(c, "DeployPerennial", {**common, "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"],
                        "NANO_LEDGER": S["NanoLedger"], "EPOCH_LENGTH": str(EPOCH_LENGTH),
                        "PROTOCOL_TREASURY": A["treasury"],
-                       "BUILDER_REGISTRY": S["BuilderRegistry"], "CARETAKER_REGISTRY": S["CaretakerRegistry"]})
+                       "BUILDER_REGISTRY": S["BuilderRegistry"], "CARETAKER_REGISTRY": S["CaretakerRegistry"],
+                       # the phase-1 badge: a builder market needs its builder's badge live
+                       "VERIFIED_BADGE": S["VerifiedBuilderBadge"], "OPERATOR": A["operator"], "ONBOARDER": A["onboarder"]})
     check(grab(log, "BuilderRegistry").lower() == S["BuilderRegistry"].lower()
           and grab(log, "CaretakerRegistry").lower() == S["CaretakerRegistry"].lower(),
           "DeployPerennial reuses the phase-1 registries (no second BuilderRegistry)")
-    for k in ("SeasonPool", "BuilderFund", "MarketsPerennial"):
+    for k in ("SeasonPool", "BuilderFund", "MarketsPerennial", "WonderEscrow"):
         S[k] = grab(log, k)
     FUND, POOL, MP = S["BuilderFund"], S["SeasonPool"], S["MarketsPerennial"]
     check(c.call(MP, "FUND()(address)").lower() == FUND.lower() and c.call(FUND, "SEASON_POOL()(address)").lower() == POOL.lower()
@@ -290,7 +292,8 @@ def rehearse(c, A):
     S["MarketsV4"] = grab(log, "MarketsV4")
     stack = {"ADMIN": A["admin"], "REGISTRY": S["Registry"], "ATTESTATION": S["Attestation"], "NANO_LEDGER": S["NanoLedger"],
              "BUILDER_REGISTRY": S["BuilderRegistry"], "CARETAKER_REGISTRY": S["CaretakerRegistry"],
-             "BUILDER_FUND": FUND, "SEASON_POOL": POOL, "MARKETS_PERENNIAL": MP, "MARKETS_V4": S["MarketsV4"]}
+             "BUILDER_FUND": FUND, "SEASON_POOL": POOL, "MARKETS_PERENNIAL": MP, "MARKETS_V4": S["MarketsV4"],
+             "WONDER_ESCROW": S["WonderEscrow"]}
     forge_script(c, "Handoff", stack)
     vlog = forge_script(c, "VerifyRoles", {**stack, "DEPLOYER": A["deployer"], "ONBOARDER": A["onboarder"]})
     check("OK: onboarder holds no market/admin role" in vlog, "phase 2 VerifyRoles: the onboarder holds no market or admin role")
@@ -313,11 +316,15 @@ def rehearse(c, A):
           "only MarketsPerennial credits builder income and only the fund funds the season pool")
 
     print("== 2. onboarding (post-handoff: every privileged step is ADMIN's)")
-    c.send("builder", S["BuilderRegistry"], "registerBuilder(string)", "github.com/example/shipper")
+    c.send("builder", S["BuilderRegistry"], "registerBuilderWithProject(string,string)", "github.com/example/shipper",
+           "github:example/shipper")   # a project: a badge (needed for builder markets) needs one
     bid = c.uint(S["BuilderRegistry"], "builderIdOf(address)(uint256)", A["builder"])
     c.send("admin", S["CaretakerRegistry"], "setCaretaker(uint256,address)", bid, A["operator"])
     check(bid > 0 and c.call(S["CaretakerRegistry"], "isCaretaker(uint256,address)(bool)", bid, A["operator"]) == "true",
           f"builder #{bid} registered, operator is its caretaker")
+    c.send("admin", S["VerifiedBuilderBadge"], "issue(uint256)", bid)   # builder markets need a live badge
+    check(c.uint(S["VerifiedBuilderBadge"], "serialOf(uint256)(uint256)", bid) > 0,
+          f"builder #{bid} holds a Verified Builder badge (a builder market needs a live one)")
 
     # The caretaker's own feed-provisioning parameters (independent resolver, bond from the Registry).
     os.environ.update({k: "0x0" for k in ("RPC", "PRIVATE_KEY", "MARKETS_PERENNIAL", "NANO_LEDGER",
@@ -332,6 +339,8 @@ def rehearse(c, A):
                           "example/shipper-ships-release", meth, fp["bond"], fp["window"], fp["resolver"]).stdout)
     feed = next(l["topics"][1] for l in r["logs"] if l["address"].lower() == S["Registry"].lower())
     c.send("operator", S["Registry"], "registerAgent(bytes32,bytes32,uint256)", feed, meth, fp["bond"])
+    # wonder markets: the operator (FEED_ROLE) binds the feed to its builder, or the builder leg goes to the SeasonPool
+    c.send("operator", MP, "setFeedSubject(bytes32,(uint8,uint256,bytes32))", feed, f"(1,{bid},{'0x' + '00' * 32})")
     check(c.call(MP, "isApprovedFeed(bytes32,address)(bool)", feed, A["operator"]) == "true",
           "milestone feed provisioned and passes the oracle allowlist")
 
@@ -517,8 +526,10 @@ def rehearse(c, A):
     coverage_matches("level 1", M5, r1, 10_000)
 
     print("== 5b. m4 (VOID by challenge): our agent answers wrong, a watcher proves it, and is paid")
-    c.send("builder2", S["BuilderRegistry"], "registerBuilder(string)", "github.com/example/second")
+    c.send("builder2", S["BuilderRegistry"], "registerBuilderWithProject(string,string)", "github.com/example/second",
+           "github:example/second")
     bid2 = c.uint(S["BuilderRegistry"], "builderIdOf(address)(uint256)", A["builder2"])
+    c.send("admin", S["VerifiedBuilderBadge"], "issue(uint256)", bid2)  # builder markets need a live badge
     c.send("admin", S["CaretakerRegistry"], "setCaretaker(uint256,address)", bid2, A["operator"])
     meth2 = run(["cast", "keccak", "example/second-ships-release"]).stdout.strip()
     c.send("operator", USDC, "approve(address,uint256)", S["Registry"], fp["bond"])
@@ -526,6 +537,7 @@ def rehearse(c, A):
                           "example/second-ships-release", meth2, fp["bond"], fp["window"], fp["resolver"]).stdout)
     feed2 = next(l["topics"][1] for l in r["logs"] if l["address"].lower() == S["Registry"].lower())
     c.send("operator", S["Registry"], "registerAgent(bytes32,bytes32,uint256)", feed2, meth2, fp["bond"])
+    c.send("operator", S["MarketsPerennial"], "setFeedSubject(bytes32,(uint8,uint256,bytes32))", feed2, f"(1,{bid2},{'0x' + '00' * 32})")
     c.send("operator", S["Attestation"], "attest(bytes32,int256,bytes32)", feed2, 0, "0x" + "00" * 31 + "02")   # first reading: 0
     m4 = ui("create", "alice", builderId=bid2, feedId=feed2, expiryIn=7200, liquidity=str(10 * U))
     M4 = m4["marketId"]
@@ -784,8 +796,9 @@ def verified_builders_stage(c, A, S, ui, keeper_tick_full, data_dir, led, income
     serial = c.uint(BADGE, "serialOf(uint256)(uint256)", vid)
     V["serial"] = serial
     issued_at = c.uint(BADGE, "issuedAt(uint256)(uint64)", serial)
-    check(serial == 1 and c.call(BADGE, "ownerOf(uint256)(address)", serial).lower() == A["vbuilder"].lower(),
-          f"badge No. {serial:03d} (one per builder, not per project) is held by the builder itself")
+    check(serial == 3 and c.call(BADGE, "ownerOf(uint256)(address)", serial).lower() == A["vbuilder"].lower(),
+          f"badge No. {serial:03d} (one per builder, not per project; builders #1 and #2 hold 001 and 002) is held by "
+          f"the builder itself")
     check(c.fails_with("vbuilder", BADGE, "transferFrom(address,address,uint256)", A["vbuilder"], A["stranger"], serial) != "",
           "the badge is soulbound: its holder cannot transfer it")
     check(c.fails_with("operator", BADGE, "issue(uint256)", vid) != "", "the keeper's operator key cannot issue a badge")
@@ -814,6 +827,8 @@ def verified_builders_stage(c, A, S, ui, keeper_tick_full, data_dir, led, income
     fA, fB = (st.get(kA) or {}).get("milestoneFeedId"), (st.get(kB) or {}).get("milestoneFeedId")
     check(bool(fA) and bool(fB) and fA != fB, f"state is keyed per project ({kA}, {kB}), one milestone feed each", list(st))
     V["fA"], V["fB"] = fA, fB
+    for f_ in (fA, fB):   # the operator binds each project feed to its builder (keeper/wonder.py does this live)
+        c.send("operator", MP, "setFeedSubject(bytes32,(uint8,uint256,bytes32))", f_, f"(1,{vid},{'0x' + '00' * 32})")
     check("[tool] recorded release(s) v1.0.0 (count 1" in log1 and "[tool] published milestone count 1 on-chain" in log1
           and latest(fA) == 1, f"open-source project milestone recorded and published on-chain: 1 published release "
           f"(the pre-release and the bare tag do not count) = {latest(fA)}", log1[-3000:])
