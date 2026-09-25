@@ -69,6 +69,12 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
     bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
 
     uint256 public constant MIN_LIQUIDITY = 5e6;
+    /// @notice Every market expires on the hour. The agent reads a feed once per
+    /// feed for all markets whose windows open together, as of their expiry; with
+    /// expiries on a 1-hour grid, markets on one feed that expire between two agent
+    /// ticks share an expiry, so no market can be opened a moment before another to
+    /// make the shared reading be taken as of the wrong time.
+    uint256 public constant EXPIRY_GRID = 1 hours;
     /// @notice The trading fee: 1% of every buy and every sell.
     uint256 public constant TRADE_FEE_BPS = 100;
     /// @notice Shares of each trading fee (of BPS); the payee takes the rest.
@@ -154,6 +160,7 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
     error AmountTooLow();
     error LiquidityTooLow();
     error BadExpiry();
+    error ExpiryOffGrid();
     error AgentNotRegistered();
     error SlippageExceeded();
     error InsufficientShares();
@@ -210,6 +217,7 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
         uint256 liquidity
     ) internal returns (bytes32 marketId) {
         if (expiry <= block.timestamp) revert BadExpiry();
+        if (expiry % EXPIRY_GRID != 0) revert ExpiryOffGrid();
         if (liquidity < MIN_LIQUIDITY) revert LiquidityTooLow();
         if (!REGISTRY.isActiveAgent(feedId, agent)) revert AgentNotRegistered();
         _requireApprovedOracle(feedId, agent);

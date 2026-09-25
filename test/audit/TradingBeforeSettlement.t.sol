@@ -79,6 +79,7 @@ contract TradingBeforeSettlementTest is Test {
     uint256 constant LIFE = 10 hours;
 
     function setUp() public {
+        vm.warp(3600); // markets expire on the hour (BinaryMarket.EXPIRY_GRID): start on the grid
         usdc = new MockUSDC();
         registry = new Registry(usdc, 10e6);
         attestation = new Attestation(registry);
@@ -119,6 +120,17 @@ contract TradingBeforeSettlementTest is Test {
         ledger.approveSpender(address(perennial), type(uint256).max);
         ledger.approveSpender(address(v4), type(uint256).max);
         vm.stopPrank();
+    }
+
+    function _marketAt(bool onV4, uint256 expiry) internal returns (IM m, bytes32 id) {
+        vm.prank(creator);
+        if (onV4) {
+            id = v4.createMarket(feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, expiry, 5e6);
+            m = IM(address(v4));
+        } else {
+            id = perennial.createMarket(1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, expiry, 5e6);
+            m = IM(address(perennial));
+        }
     }
 
     function _market(bool onV4, uint256 liq) internal returns (IM m, bytes32 id) {
@@ -337,6 +349,23 @@ contract TradingBeforeSettlementTest is Test {
         vm.prank(traders[1]);
         vm.expectRevert(BinaryMarket.MarketExpired.selector);
         m.buy(id, NO, 1e6, 0, type(uint256).max);
+    }
+
+    // ─────────────── expiry grid ───────────────
+
+    /// Markets expire on the hour on both contracts (BinaryMarket.EXPIRY_GRID), so
+    /// markets on one feed that expire between two agent ticks share one expiry and
+    /// the agent's single reading is taken as of the right time for all of them.
+    function testFuzz_expiryMustBeOnTheHour(uint256 offset, bool onV4) public {
+        offset = bound(offset, 1, 3599);
+        uint256 hour = (block.timestamp / 1 hours + 3) * 1 hours;
+        vm.startPrank(creator);
+        vm.expectRevert(BinaryMarket.ExpiryOffGrid.selector);
+        if (onV4) v4.createMarket(feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, hour + offset, 5e6);
+        else perennial.createMarket(1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, hour + offset, 5e6);
+        vm.stopPrank();
+        (IM m, bytes32 id) = _marketAt(onV4, hour);
+        assertGt(m.collateralOf(id), 0, "on the hour: opens");
     }
 
     // ─────────────── findings ───────────────

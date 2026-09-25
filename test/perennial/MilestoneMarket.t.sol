@@ -40,6 +40,7 @@ contract MilestoneMarketTest is Test {
     uint256 constant DW = 1 hours;
 
     function setUp() public {
+        vm.warp(3600); // markets expire on the hour (BinaryMarket.EXPIRY_GRID): start on the grid
         usdc = new MockUSDC();
         registry = new Registry(usdc, 10e6);
         attestation = new Attestation(registry);

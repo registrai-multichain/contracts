@@ -871,6 +871,7 @@ contract BuilderSideAuditDeployTest is Test {
         c.settlementWindow = 24 hours;
         c.resolutionGrace = 7 days;
         c.disputeResolver = disputeResolver;
+        c.approvedAgent = agent;
     }
 
     function _stack() internal view returns (RoleTable.Stack memory s) {

@@ -88,6 +88,7 @@ contract DeployScriptsTest is Test {
     bytes32 constant YIELD = keccak256("YIELD_ROLE");
 
     function setUp() public {
+        vm.warp(3600); // markets expire on the hour (BinaryMarket.EXPIRY_GRID): start on the grid
         usdc = new MockUSDC();
         admin = address(new SafeStub());
     }

@@ -96,6 +96,7 @@ contract FeeModelTest is Test {
     event AgentFeeReleased(bytes32 indexed marketId, address indexed agent, uint256 amount);
 
     function setUp() public {
+        vm.warp(3600); // markets expire on the hour (BinaryMarket.EXPIRY_GRID): start on the grid
         usdc = new MockUSDC();
         registry = new Registry(usdc, 10e6);
         attestation = new Attestation(registry);
@@ -589,8 +590,9 @@ contract FeeModelTest is Test {
         assertEq(ledger.balanceOf(userAgent), 18e5, "the user's agent earns its escrowed 20% of the trading fees");
         // Perennial stays gated on the governor's agent list
         vm.prank(creator);
+        uint256 onTheHour = (vm.getBlockTimestamp() / 1 hours + 2) * 1 hours; // markets expire on the grid
         vm.expectRevert(MarketsPerennial.AgentNotApproved.selector);
-        perennial.createMarket(1, f, userAgent, 1, BinaryMarket.Comparator.GreaterOrEqual, vm.getBlockTimestamp() + LIFE, 100e6);
+        perennial.createMarket(1, f, userAgent, 1, BinaryMarket.Comparator.GreaterOrEqual, onTheHour, 100e6);
     }
 
     function test_v4_selfResolvedFeed_refused_evenWithApprovedResolver() public {
