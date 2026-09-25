@@ -654,6 +654,7 @@ def rehearse(c, A):
     season_stage(c, A, S, V, led, unallocated, pool_expected, reverted_with)
     for srv in V["servers"]:
         srv.shutdown()
+    oracle_agent_stage(c, A, S, V, kenv, keeper_tick_full, data_dir, led)
 
     print("== 13. accounting")
     # one more trade in the current epoch: income that stays outstanding (not claimable yet)
@@ -718,10 +719,14 @@ def verified_builders_stage(c, A, S, ui, keeper_tick_full, data_dir, led, income
         gh_file.write_text(json.dumps(fa)); dom_file.write_text(json.dumps(fb))
         return fa, fb
 
-    # open source: one release + one tag on acme/tool
-    rel = root / "api/repos/acme/tool/releases"; rel.mkdir(parents=True)
-    (rel / "latest").write_text(json.dumps({"tag_name": "v1.0.0"}))
-    (root / "api/repos/acme/tool/tags").write_text(json.dumps([{"name": "v1.0.0"}]))
+    # open source: one published release on acme/tool (dated by the CHAIN clock, which
+    # this rehearsal warps), plus a pre-release and a bare tag that must NOT count
+    gh_iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+    rel = root / "api/repos/acme/tool/releases"; rel.parent.mkdir(parents=True)
+    releases = [{"tag_name": "v1.0.0", "published_at": gh_iso(c.now() - 3 * 86400), "draft": False, "prerelease": False},
+                {"tag_name": "v1.0.1-rc", "published_at": gh_iso(c.now() - 2 * 86400), "draft": False, "prerelease": True}]
+    rel.write_text(json.dumps(releases))
+    (root / "api/repos/acme/tool/tags").write_text(json.dumps([{"name": "v1.0.0"}, {"name": "just-a-tag"}]))
     # closed source: two contracts deployed by the project's deployer wallet (nonces 0, 1)
     init = "0x600a600c600039600a6000f3602a60005260206000f3"   # tiny contract returning 42
     for _ in range(2):
@@ -809,8 +814,9 @@ def verified_builders_stage(c, A, S, ui, keeper_tick_full, data_dir, led, income
     fA, fB = (st.get(kA) or {}).get("milestoneFeedId"), (st.get(kB) or {}).get("milestoneFeedId")
     check(bool(fA) and bool(fB) and fA != fB, f"state is keyed per project ({kA}, {kB}), one milestone feed each", list(st))
     V["fA"], V["fB"] = fA, fB
-    check("[tool] recorded release v1.0.0, tag v1.0.0 (count 2)" in log1 and "[tool] published milestone count 2 on-chain" in log1
-          and latest(fA) == 2, f"open-source project milestone recorded and published on-chain: release + tag = {latest(fA)}", log1[-3000:])
+    check("[tool] recorded release(s) v1.0.0 (count 1" in log1 and "[tool] published milestone count 1 on-chain" in log1
+          and latest(fA) == 1, f"open-source project milestone recorded and published on-chain: 1 published release "
+          f"(the pre-release and the bare tag do not count) = {latest(fA)}", log1[-3000:])
     check("[127.0.0.1] published milestone count 2 on-chain" in log1 and latest(fB) == 2,
           f"closed-source project milestone published on-chain: contracts deployed by its deployer = {latest(fB)}", log1[-3000:])
     check(all(c.call(MP, "isApprovedFeed(bytes32,address)(bool)", f, A["operator"]) == "true" for f in (fA, fB)),
@@ -820,12 +826,12 @@ def verified_builders_stage(c, A, S, ui, keeper_tick_full, data_dir, led, income
 
     # the season market: a community member opens it; traders (not the builder, creator or agent) trade it
     m9 = ui("create", "bob", builderId=vid, feedId=fA, expiryIn=7200, liquidity=str(5 * U))
-    check(m9["threshold"] == "3", "a community member opens a market on the verified builder's github project: >= 2 + 1 = 3")
+    check(m9["threshold"] == "2", "a community member opens a market on the verified builder's github project: >= 1 + 1 = 2")
     M9 = m9["marketId"]
     V["M9"] = M9
     ep1 = epoch_now()
     V["ep_whale"] = ep1
-    vol = 0
+    wash = 0
     ui("deposit", "whale", amount=str(MINTED["whale"] * U))
     for i in range(3):   # a high-volume trader: round trips, so this builder's epoch income crosses $1,000
         amt = led(A["whale"])
@@ -833,11 +839,14 @@ def verified_builders_stage(c, A, S, ui, keeper_tick_full, data_dir, led, income
         s = ui("sell", "whale", marketId=M9, side="Yes", shares=b["sharesOut"])
         check(b["quoteMatched"] and s["quoteMatched"],
               f"whale round trip {i + 1}: buys YES {amt/U:,.2f} and sells it all back, exactly at the UI quotes")
-        vol += amt + int(s["grossOut"])
+        wash += amt + int(s["grossOut"])
+    # season rule v2: round trips inside the 24h hold time count 0; only positions HELD count
+    hold = ui("buy", "whale", marketId=M9, side="Yes", amount=str(600 * U))
+    check(hold["quoteMatched"], "the whale then buys YES 600 and holds it to settlement")
     a9 = ui("buy", "alice", marketId=M9, side="Yes", amount=str(20 * U))
     check(a9["quoteMatched"], "alice buys YES 20 on the season market at the UI quote")
-    vol += 20 * U
-    V["m9_volume"] = vol
+    V["m9_volume"] = 600 * U + 20 * U
+    V["m9_wash"] = wash
     gross = income_of(ep1, vid)
     check(gross == credited[vid] and gross > 1_000 * U,
           f"builder #{vid}'s income in epoch {ep1}: {gross/U:,.6f} USDC (exactly the 50% legs; above the $1,000 tax-free bracket)")
@@ -855,7 +864,7 @@ def verified_builders_stage(c, A, S, ui, keeper_tick_full, data_dir, led, income
           and "builders: 1 verified (1 verified projects)" in log2,
           "removing the domain proof: that project gets an ALERT, the builder stays verified on its github project", log2[-2000:])
     check(latest(fB) == 2, "lapsed project: no heartbeat, its published count stays at 2 despite a 3rd deploy")
-    check(latest(fA) == 2 and c.call(BADGE, "lapsed(uint256)(bool)", serial) == "false",
+    check(latest(fA) == 1 and c.call(BADGE, "lapsed(uint256)(bool)", serial) == "false",
           "the other project is unaffected and the badge stays verified")
 
     print("== 9b. all proofs removed: the badge lapses; restored: verified again")
@@ -867,24 +876,26 @@ def verified_builders_stage(c, A, S, ui, keeper_tick_full, data_dir, led, income
     check(c.call(BADGE, "isLapsed(uint256)(bool)", serial) == "true" and badge_json(serial)["image"].endswith(f"/{serial}-lapsed.jpg")
           and c.call(BADGE, "ownerOf(uint256)(address)", serial).lower() == A["vbuilder"].lower(),
           "the lapsed badge reads Lapsed (lapsed art) and stays with its builder")
-    check(latest(fA) == 2 and latest(fB) == 2, "both counts frozen while lapsed")
+    check(latest(fA) == 1 and latest(fB) == 2, "both counts frozen while lapsed")
     gh_file.write_text(json.dumps(fa)); dom_file.write_text(json.dumps(fb))      # proofs back
-    (rel / "latest").write_text(json.dumps({"tag_name": "v1.1.0"}))              # and the builder ships a release
+    rel.write_text(json.dumps([{"tag_name": "v1.1.0", "published_at": gh_iso(c.now()), "draft": False,
+                                "prerelease": False}] + releases))                # and the builder ships a release
     log4 = keeper_tick_full()
     check(c.call(BADGE, "lapsed(uint256)(bool)", serial) == "false" and "builders: 1 verified (2 verified projects)" in log4,
           "proofs restored: the builder and its badge are verified again on the next tick", log4[-2000:])
-    check("[tool] recorded release v1.1.0 (count 3)" in log4 and latest(fA) == 3 and latest(fB) == 3,
-          "counts resume: github 3 (new release), domain 3 (the deploy made while lapsed)", log4[-3000:])
+    check("[tool] recorded release(s) v1.1.0 (count 2" in log4 and latest(fA) == 2 and latest(fB) == 3,
+          "counts resume: github 2 (a new release, days after the last), domain 3 (the deploy made while lapsed)", log4[-3000:])
 
     print("== 9c. the season market settles YES through the keeper")
     c.warp_to(int(m9["expiry"]) + 5)
     log5 = keeper_tick_full()
-    check(f"settle: attest {fA.lower()} 3" in log5.lower(), "keeper attests the github project's count (3) in M9's window", log5[-2000:])
+    check(f"settle: attest {fA.lower()} 2" in log5.lower() and f"as of {int(m9['expiry'])}" in log5,
+          "keeper attests the github project's count AS OF M9's expiry (2) in M9's window", log5[-2000:])
     c.warp_to(c.now() + FEED_WINDOW + 60)
     log6 = keeper_tick_full()
     check(f"settle: resolve {M9.lower()}" in log6.lower(), "keeper resolves M9", log6[-2000:])
     st9 = ui("status", marketId=M9)
-    check(st9["status"] == "resolved-yes" and st9["yesWon"], "M9 resolved YES (count 3 >= 3)")
+    check(st9["status"] == "resolved-yes" and st9["yesWon"], "M9 resolved YES (count 2 >= 2)")
     res = ui("redeem", "alice", marketId=M9)
     check(res["previewMatched"], f"alice redeems M9: {int(res['payout'])/U:.4f} USDC = UI preview")
     V["season_resolved_block"] = c.block()
@@ -978,6 +989,97 @@ def verified_builders_stage(c, A, S, ui, keeper_tick_full, data_dir, led, income
     return V
 
 
+def oracle_agent_stage(c, A, S, V, kenv, keeper_tick_full, data_dir, led):
+    """Our agent does every oracle duty, through the REAL keeper process: a
+    config-driven data feed (a Coinbase stand-in), bond health, a common market on
+    MarketsV4 settled as of its expiry, a challenge alerted with its preimage, the
+    ruling reported, the market resolved, claims counted to zero."""
+    print("== 12b. our agent, every oracle duty: data feed, bond health, MarketsV4, dispute watch")
+    from decimal import Decimal
+    V4, REG, ATT, DISP, OP = S["MarketsV4"], S["Registry"], S["Attestation"], S["Dispute"], A["operator"]
+    root = pathlib.Path(tempfile_mod.mkdtemp(prefix="cb-e2e-"))
+    srv, port = serve(root)
+    candles = root / "products/BTC-USD/candles"; candles.parent.mkdir(parents=True)
+    price = lambda t0: 64000 + (t0 // 60 % 1000) / 100          # a deterministic price per closed minute
+    t_start = (c.now() // 60) * 60 - 600
+    candles.write_text(json.dumps([[t, price(t), price(t), price(t), price(t), 1.0]
+                                   for t in range(t_start + 6 * 3600, t_start - 60, -60)]))   # newest first, like Coinbase
+    as_of = lambda at: max(t for t in range(t_start, t_start + 6 * 3600, 60) if t + 60 <= at)
+    scaled = lambda at: int(Decimal(str(price(as_of(at)))) * 100)
+    kenv.update({"MARKETS_V4": V4, "MARKETS_V4_DEPLOY_BLOCK": str(c.block()), "DISPUTE": DISP,
+                 "DATA_FEEDS": json.dumps([{"key": "btc-usd", "kind": "coinbase-spot", "product": "BTC-USD", "decimals": 2,
+                                            "disputeWindow": 3600, "publishEvery": 3600,
+                                            "apiBase": f"http://127.0.0.1:{port}"}])})
+    agent_bond = lambda f: int(c.call(REG, "getAgent(bytes32,address)((bytes32,uint256,uint256,uint256,uint256,bool,bool))",
+                                      f, OP).strip("()").split(",")[1].split()[0])
+    min_bond = lambda f: int(c.call(REG, "getFeed(bytes32)((address,string,bytes32,uint256,uint256,address,uint256,bool))",
+                                    f).strip("()").split(",")[-5].split()[0])
+
+    log = keeper_tick_full()
+    st = json.loads((data_dir / "caretaker-state.json").read_text())
+    feed = st["dataFeeds"]["btc-usd"]["feedId"]
+    pub = int(c.call(ATT, "latestValue(bytes32,address)(int256,uint256,bool)", feed, OP).split()[0])
+    check("data feed btc-usd provisioned" in log and "data feed btc-usd: published" in log and pub > 0,
+          f"config data_feeds: the keeper provisions registrai-data:btc-usd ({feed[:10]}…, independent resolver) and "
+          f"publishes {pub / 100:,.2f} from the Coinbase stand-in", log[-2500:])
+    check(agent_bond(feed) == 5 * min_bond(feed) and agent_bond(V["fA"]) == 5 * min_bond(V["fA"])
+          and "oracle: topUpBond" in log,
+          f"bond health: the data feed and the milestone feed are bonded at 5x minBond "
+          f"({agent_bond(feed) / U:.0f} USDC), so one challenge can no longer freeze them", log[-2500:])
+
+    # a common market on it, opened by a community member; our agent is its (approved) agent
+    expiry = ((c.now() // 3600) + 2) * 3600                      # on the hour
+    thr = scaled(expiry) - 1                                     # YES iff the price as of expiry >= thr
+    for who, amt in (("bob", 20), ("alice", 10)):
+        c.send(who, USDC, "approve(address,uint256)", S["NanoLedger"], amt * U)
+        c.send(who, S["NanoLedger"], "deposit(uint256)", amt * U)
+        c.send(who, S["NanoLedger"], "approveSpender(address,uint256)", V4, 2**256 - 1)
+    r = json.loads(c.send("bob", V4, "createMarket(bytes32,address,int256,uint8,uint256,uint256)",
+                          feed, OP, thr, 1, expiry, 5 * U).stdout)
+    mid = [l for l in r["logs"] if l["address"].lower() == V4.lower() and len(l["topics"]) == 4][0]["topics"][1]
+    q = c.call(V4, "quoteBuy(bytes32,uint8,uint256)(uint256,uint256)", mid, 0, 3 * U).splitlines()[0].split()[0]
+    c.send("alice", V4, "buy(bytes32,uint8,uint256,uint256,uint256)", mid, 0, 3 * U, q, 2**256 - 1)
+    keeper_tick_full()                                           # discovered while trading: nothing to do yet
+
+    c.warp_to(expiry + 5)
+    log = keeper_tick_full()
+    want = scaled(expiry)
+    check(f"settle: attest {feed.lower()} {want}" in log.lower() and f"as of {expiry}" in log,
+          f"MarketsV4: the keeper discovers the common market and attests BTC as of its expiry ({want / 100:,.2f}, "
+          f"the close of the minute ending at {expiry})", log[-2500:])
+    n = c.uint(ATT, "historyLength(bytes32,address)(uint256)", feed, OP)
+    att = None
+    for i in range(n):
+        a = c.call(ATT, "historyAt(bytes32,address,uint256)(bytes32)", feed, OP, i).strip()
+        ts = int(c.call(ATT, "getAttestation(bytes32)((bytes32,address,int256,uint256,bytes32,bytes32,uint8,uint256))",
+                        a).strip("()").split(",")[3].split()[0])
+        if ts >= expiry:
+            att = a; break
+    stake = c.uint(DISP, "challengeStake(bytes32)(uint256)", att)
+    c.send("watcher", USDC, "approve(address,uint256)", DISP, stake)
+    ch = json.loads(c.send("watcher", DISP, "challenge(bytes32,bytes32)", att, "0x" + "ab" * 32).stdout)
+    did = [l for l in ch["logs"] if l["address"].lower() == DISP.lower()][0]["topics"][1]
+    log = keeper_tick_full()
+    check("CHALLENGED" in log and f"preimage: feed {feed.lower()} value {want} as of {expiry}" in log.lower()
+          and "coinbase:btc-usd:1m-close@" in log.lower() and "FROZEN" not in log,
+          "dispute watch: the challenge is ALERTed at once with the reading's preimage (the resolver can recompute its "
+          "input hash); the feed is NOT frozen (4x minBond still free)", log[-2500:])
+    c.send("resolver", DISP, "resolve(bytes32,uint8)", did, 1)          # AttestationValid
+    log = keeper_tick_full()
+    check("ruled VALID" in log and f"settle: resolve {mid.lower()}" in log.lower(),
+          "the ruling (VALID) is reported, and the keeper resolves the common market on the upheld reading", log[-2500:])
+    phase = c.call(V4, "getMarket(bytes32)((bytes32,address,int256,uint8,uint256,address,uint256,uint256,uint8,bool,uint256))",
+                   mid).strip("()").split(",")
+    check(phase[8].strip() == "1" and phase[9].strip() == "true", "MarketsV4 market Resolved, YES (price >= threshold)")
+    c.send("alice", V4, "redeem(bytes32)", mid)
+    c.send("bob", V4, "claimLP(bytes32)", mid)
+    log = keeper_tick_full()
+    check(c.uint(V4, "claimsLeft(bytes32)(uint256)", mid) == 0 and c.uint(V4, "unpaid(bytes32)(uint256)", mid) == 0
+          and led(V4) == 0 and "tick done" in log,
+          "every claimant claimed; resolve left no dust to sweep; MarketsV4 holds nothing")
+    srv.shutdown()
+
+
 def season_stage(c, A, S, V, led, unallocated, pool_expected, reverted_with):
     print("== 12. a season: the pool (taxes + void escrow + frozen sweep) -> season-rewards -> Safe publish -> claim")
     POOL, vid = S["SeasonPool"], V["vid"]
@@ -1003,8 +1105,8 @@ def season_stage(c, A, S, V, led, unallocated, pool_expected, reverted_with):
           f"season-rewards: only builder #{vid} is eligible (badge verified, ours); its share is capped at 20% ({cap/U:.6f})",
           json.dumps(f)[:1500])
     check(V["M9"].lower() in mk and int(mk[V["M9"].lower()]["volume"]) == V["m9_volume"] >= 500 * U,
-          f"its points come from M9 (resolved YES in the window): counted volume {V['m9_volume']/U:,.2f} USDC by non-builder "
-          f"traders (the creator and the agent excluded)")
+          f"its points come from M9 (resolved YES in the window): counted volume {V['m9_volume']/U:,.2f} USDC — positions "
+          f"HELD by non-builder traders; the whale's {V['m9_wash']/U:,.2f} USDC of same-day round trips count 0 (rule v2)")
     tx = safe["transactions"][0]
     check(len(safe["transactions"]) == 1 and tx["to"].lower() == POOL.lower(), "the Safe file is one publishSeason call to the SeasonPool")
     check(c.fails_with("operator", POOL, "publishSeason(uint256,bytes32,uint256,uint64)", 1, f["root"], total, int(f["deadline"])) != "",
