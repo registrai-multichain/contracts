@@ -91,6 +91,7 @@ contract DeployScriptsTest is Test {
         vm.warp(3600); // markets expire on the hour (BinaryMarket.EXPIRY_GRID): start on the grid
         usdc = new MockUSDC();
         admin = address(new SafeStub());
+        vm.etch(disputeResolver, hex"00"); // a contract (a Safe): mainnet refuses an EOA resolver
     }
 
     function _usdcAddr() internal view returns (address) {
@@ -767,6 +768,32 @@ contract DeployScriptsTest is Test {
         c.epochLength = 1 hours;
         DeployPerennial.Deployed memory d = p.deploy(c);
         assertEq(d.fund.EPOCH_LENGTH(), 1 hours);
+    }
+
+    /// On mainnet the resolver that adjudicates every challenged reading must be a
+    /// contract (a Safe), and the builder-income epoch at least 7 days (the tax
+    /// brackets are per epoch: a short epoch multiplies every tax-free allowance).
+    function test_mainnet_requiresResolverSafe_andWeekLongEpoch() public {
+        vm.chainId(5042);
+        vm.etch(0x3600000000000000000000000000000000000000, address(usdc).code);
+        (registry, attestation, dispute) = new DeployOracle().deploy(
+            DeployOracle.Config({deployer: deployer, usdc: _usdcAddr(), minBond: 10e6, points: address(0)})
+        );
+        ledger = new DeployNanoLedger().deploy(DeployNanoLedger.Config({deployer: deployer, usdc: _usdcAddr()}));
+        DeployPerennial p = new DeployPerennial();
+        DeployPerennial.Config memory c = _perennialCfg();
+        c.disputeResolver = makeAddr("eoaResolver");
+        vm.expectRevert(bytes("mainnet: DISPUTE_RESOLVER must be a contract (a Safe)"));
+        p.deploy(c);
+        c = _perennialCfg();
+        c.epochLength = 1 days;
+        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be at least 7 days (runbook: 30 days)"));
+        p.deploy(c);
+        DeployNanoStack n = new DeployNanoStack();
+        DeployNanoStack.Config memory nc = _v4Cfg();
+        nc.disputeResolver = makeAddr("eoaResolver");
+        vm.expectRevert(bytes("mainnet: DISPUTE_RESOLVER must be a contract (a Safe)"));
+        n.deploy(nc);
     }
 
     function test_perennial_mainnetRefusesDeployerAsProtocolTreasury() public {

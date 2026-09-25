@@ -820,6 +820,7 @@ contract BuilderSideAuditDeployTest is Test {
     MarketsV4 v4;
 
     function setUp() public {
+        vm.etch(disputeResolver, hex"00"); // a contract (a Safe): mainnet refuses an EOA resolver
         usdc = new MockUSDC();
         admin = address(new AuditSafeStub());
     }

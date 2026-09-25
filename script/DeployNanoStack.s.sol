@@ -84,6 +84,7 @@ contract DeployNanoStack is DeployBase {
             require(c.disputeResolver != c.deployer, "mainnet: DISPUTE_RESOLVER must not be the deployer");
             require(c.approvedAgent != c.deployer, "mainnet: APPROVED_AGENT must not be the deployer");
             require(c.disputeResolver != c.approvedAgent, "mainnet: agent must not resolve its own disputes");
+            require(c.disputeResolver.code.length > 0, "mainnet: DISPUTE_RESOLVER must be a contract (a Safe)");
         }
 
         vm.startBroadcast(c.deployer);

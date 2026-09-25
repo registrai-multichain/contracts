@@ -148,6 +148,11 @@ contract DeployPerennial is DeployBase {
             require(c.approvedAgent != c.deployer, "mainnet: APPROVED_AGENT must not be the deployer");
             require(c.disputeResolver != c.approvedAgent, "mainnet: agent must not resolve its own disputes");
             require(c.protocolTreasury != c.deployer, "mainnet: PROTOCOL_TREASURY must not be the deployer");
+            // The resolver adjudicates every challenged reading: a Safe, never a hot key.
+            require(c.disputeResolver.code.length > 0, "mainnet: DISPUTE_RESOLVER must be a contract (a Safe)");
+            // The tax brackets are per builder per epoch: a short epoch multiplies every
+            // tax-free allowance (runbook: 30 days).
+            require(c.epochLength >= 7 days, "mainnet: EPOCH_LENGTH must be at least 7 days (runbook: 30 days)");
             // Phase 1 put the builder side on chain first; forgetting the reuse
             // env here would silently fork builders, caretakers and badges.
             require(
