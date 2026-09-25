@@ -3,6 +3,9 @@ pragma solidity ^0.8.24;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {NanoLedger} from "../nanopay/NanoLedger.sol";
 import {BuilderFund} from "./BuilderFund.sol";
 import {BuilderRegistry} from "./BuilderRegistry.sol";
@@ -20,15 +23,25 @@ import {SourceKey} from "./SourceKey.sol";
 /// fund. Unclaimed escrow is swept to the season pool EXPIRY after its first
 /// credit. Never the treasury.
 ///
+/// Idle escrow earns yield in one ERC-4626 vault (a curated Morpho USDC vault on
+/// mainnet): the keeper (YIELD_ROLE) deploys and recalls within the Safe's cap
+/// and liquid floor, releases and sweeps recall what they need, and `harvest`
+/// sends anything above what is owed to the season pool. A vault loss pauses
+/// deposits; it never reduces a team's escrow (the Safe tops up).
+///
 /// credit never calls out except to the ledger (and the fund once released),
-/// so trading never fails because of this contract's vault.
+/// so trading never fails because of the vault.
 contract WonderEscrow is AccessControl, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
     bytes32 public constant MARKETS_ROLE = keccak256("MARKETS_ROLE");
     bytes32 public constant RELEASER_ROLE = keccak256("RELEASER_ROLE");
     bytes32 public constant YIELD_ROLE = keccak256("YIELD_ROLE");
 
     uint256 public constant RELEASE_DELAY = 7 days;
+    /// @notice Shortfall below this is vault rounding, not a loss (0.01 USDC).
+    uint256 public constant LOSS_DUST = 1e4;
 
     NanoLedger public immutable LEDGER;
     BuilderFund public immutable FUND;
@@ -51,11 +64,24 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
     /// @notice Principal currently in the yield vault (book value); 0 without a vault.
     uint256 public deployedPrincipal;
 
+    IERC4626 public vault;
+    uint256 public cap;
+    uint256 public minLiquid;
+    bool public yieldPaused;
+
     event EscrowCredited(bytes32 indexed key, uint256 amount);
     event ReleaseQueued(bytes32 indexed key, uint256 indexed builderId, uint256 projectId, uint64 readyAt);
     event ReleaseCancelled(bytes32 indexed key);
     event Released(bytes32 indexed key, uint256 indexed builderId, uint256 amount);
     event Swept(bytes32 indexed key, uint256 amount);
+    event VaultSet(address vault);
+    event CapSet(uint256 cap);
+    event MinLiquidSet(uint256 minLiquid);
+    event YieldPausedSet(bool paused);
+    event Deployed(uint256 assets);
+    event Recalled(uint256 assets);
+    event Harvested(uint256 toSeason);
+    event LossDetected(uint256 shortfall);
 
     error ZeroAddress();
     error Mismatch();
@@ -68,6 +94,12 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
     error NotExpired();
     error NothingToSweep();
     error Illiquid();
+    error VaultNotSet();
+    error VaultInUse();
+    error WrongAsset();
+    error YieldPausedError();
+    error OverCap();
+    error BelowMinLiquid();
 
     constructor(NanoLedger ledger_, BuilderFund fund_, VerifiedBuilderBadge badge_, address admin, uint256 expiry_) {
         if (
@@ -168,6 +200,94 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
         emit Swept(key, amount);
     }
 
+    // ───────────────────────────── yield (GOVERNOR) ─────────────────────────────
+
+    /// @notice Point at an ERC-4626 vault over the ledger's USDC (or none), only
+    /// while this contract holds no shares of the current one.
+    function setVault(IERC4626 vault_) external onlyRole(GOVERNOR_ROLE) {
+        if (address(vault) != address(0) && vault.balanceOf(address(this)) != 0) revert VaultInUse();
+        if (address(vault_) != address(0) && vault_.asset() != address(LEDGER.USDC())) revert WrongAsset();
+        vault = vault_;
+        emit VaultSet(address(vault_));
+    }
+
+    function setCap(uint256 cap_) external onlyRole(GOVERNOR_ROLE) {
+        cap = cap_;
+        emit CapSet(cap_);
+    }
+
+    function setMinLiquid(uint256 minLiquid_) external onlyRole(GOVERNOR_ROLE) {
+        minLiquid = minLiquid_;
+        emit MinLiquidSet(minLiquid_);
+    }
+
+    function setYieldPaused(bool paused) external onlyRole(GOVERNOR_ROLE) {
+        yieldPaused = paused;
+        emit YieldPausedSet(paused);
+    }
+
+    // ───────────────────────────── yield (keeper) ─────────────────────────────
+
+    function deploy(uint256 assets) external onlyRole(YIELD_ROLE) nonReentrant {
+        if (address(vault) == address(0)) revert VaultNotSet();
+        if (yieldPaused) revert YieldPausedError();
+        if (deployedPrincipal + assets > cap) revert OverCap();
+        uint256 bal = LEDGER.balanceOf(address(this));
+        if (assets > bal || bal - assets < minLiquid) revert BelowMinLiquid();
+        LEDGER.withdraw(assets);
+        IERC20 usdc = LEDGER.USDC();
+        usdc.forceApprove(address(vault), assets);
+        vault.deposit(assets, address(this));
+        deployedPrincipal += assets;
+        emit Deployed(assets);
+    }
+
+    function recall(uint256 assets) external onlyRole(YIELD_ROLE) nonReentrant {
+        _recall(assets);
+    }
+
+    /// @notice Anyone. What the ledger account and the vault hold above what the
+    /// escrow owes (vault yield, donations) goes to the season pool. A shortfall
+    /// beyond LOSS_DUST pauses deposits; the Safe tops up.
+    /// Solvency: `ledger + deployedPrincipal >= totalEscrow` holds on every path
+    /// (credit checks it; deploy/recall move value 1:1 between the two; release
+    /// and sweep lower totalEscrow by what leaves), and the yield skim below only
+    /// withdraws what the vault holds above principal.
+    function harvest() external nonReentrant returns (uint256 toSeason) {
+        uint256 assets = vaultAssets();
+        uint256 bal = LEDGER.balanceOf(address(this));
+        uint256 total = bal + assets;
+        if (total <= totalEscrow) {
+            uint256 shortfall = totalEscrow - total;
+            if (shortfall > LOSS_DUST) {
+                yieldPaused = true;
+                emit LossDetected(shortfall);
+            }
+            return 0;
+        }
+        toSeason = total - totalEscrow;
+        uint256 gain = assets > deployedPrincipal ? assets - deployedPrincipal : 0;
+        if (gain > toSeason) gain = toSeason;
+        if (gain > 0) {
+            vault.withdraw(gain, address(this), address(this));
+            IERC20 usdc = LEDGER.USDC();
+            usdc.forceApprove(address(LEDGER), gain);
+            LEDGER.deposit(gain);
+        }
+        // Only when principal already paid a release/sweep's share from the
+        // ledger: top the ledger up from principal (keeps book == vault).
+        uint256 liquid = LEDGER.balanceOf(address(this));
+        if (liquid < toSeason) _recall(toSeason - liquid);
+        LEDGER.internalTransfer(address(FUND), toSeason);
+        FUND.creditSeason(toSeason);
+        emit Harvested(toSeason);
+    }
+
+    function vaultAssets() public view returns (uint256) {
+        if (address(vault) == address(0)) return 0;
+        return vault.convertToAssets(vault.balanceOf(address(this)));
+    }
+
     // ───────────────────────────── internals ─────────────────────────────
 
     /// @dev The project exists, is active, its source hashes to `key`, and its
@@ -181,8 +301,23 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
         return bId;
     }
 
-    /// @dev Make at least `amount` sit in the ledger account.
-    function _ensureLiquid(uint256 amount) internal view {
-        if (LEDGER.balanceOf(address(this)) < amount) revert Illiquid();
+    /// @dev Make at least `amount` sit in the ledger account, recalling the
+    /// shortfall from the vault. Reverts (and the caller retries later) when the
+    /// vault cannot pay.
+    function _ensureLiquid(uint256 amount) internal {
+        uint256 bal = LEDGER.balanceOf(address(this));
+        if (bal >= amount) return;
+        if (address(vault) == address(0)) revert Illiquid();
+        _recall(amount - bal);
+    }
+
+    function _recall(uint256 assets) internal {
+        if (address(vault) == address(0)) revert VaultNotSet();
+        vault.withdraw(assets, address(this), address(this));
+        IERC20 usdc = LEDGER.USDC();
+        usdc.forceApprove(address(LEDGER), assets);
+        LEDGER.deposit(assets);
+        deployedPrincipal = assets >= deployedPrincipal ? 0 : deployedPrincipal - assets;
+        emit Recalled(assets);
     }
 }
