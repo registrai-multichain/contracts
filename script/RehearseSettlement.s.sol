@@ -54,8 +54,7 @@ contract RehearseSettlement is Script {
         BuilderFund fund = new BuilderFund(
             ledger, builders, caretakers, pool, address(0x7EA5), deployer, 1 days, LaunchSchedule.brackets()
         );
-        // builder markets need a live badge; the rehearsal does not bind feeds, so
-        // the builder leg goes to the season pool (settlement is what it rehearses)
+        // builder markets need a live badge; their feeds are bound to builder #1 below
         VerifiedBuilderBadge badge = new VerifiedBuilderBadge(builders, deployer, deployer, "Anvil", "", "");
         badge.issue(1);
         WonderEscrow escrow = new WonderEscrow(ledger, fund, badge, deployer, 180 days);
@@ -90,11 +89,21 @@ contract RehearseSettlement is Script {
         registry.registerAgent(foreign, keccak256("m"), 100e6);
         vm.stopBroadcast();
 
+        // The keeper binds each milestone feed to its builder (FEED_ROLE, here the
+        // deployer): only markets on a bound feed pay their builder leg to builder #1.
+        vm.startBroadcast(DEPLOYER);
+        MarketsPerennial.Subject memory b1 = MarketsPerennial.Subject(MarketsPerennial.SubjectKind.Builder, 1, bytes32(0));
+        markets.setFeedSubject(served, b1);
+        markets.setFeedSubject(unserved, b1);
+        markets.setFeedSubject(foreign, b1);
+        vm.stopBroadcast();
+
         vm.startBroadcast(TRADER);
         usdc.approve(address(ledger), type(uint256).max);
         ledger.deposit(5_000e6);
         ledger.approveSpender(address(markets), type(uint256).max);
-        uint256 expiry = block.timestamp + 2 hours;
+        // on the markets' 1-hour expiry grid, at most 2 hours out (the tests warp 2h past now)
+        uint256 expiry = (block.timestamp / 1 hours + 2) * 1 hours;
         bytes32 mServed = markets.createMarket(1, served, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, expiry, 100e6);
         bytes32 mUnserved = markets.createMarket(1, unserved, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, expiry, 100e6);
         bytes32 mForeign = markets.createMarket(1, foreign, otherAgent, 1, BinaryMarket.Comparator.GreaterOrEqual, expiry, 100e6);
