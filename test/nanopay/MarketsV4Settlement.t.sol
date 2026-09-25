@@ -8,6 +8,7 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
+import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 import {SettlementPolicy} from "../../src/nanopay/SettlementPolicy.sol";
 
 /// The common markets share the settlement policy (and the fee model) with
@@ -72,7 +73,7 @@ contract MarketsV4SettlementTest is Test {
 
     function _market() internal returns (bytes32 id) {
         vm.prank(creator);
-        id = markets.createMarket(feedId, oracle, int256(100_000), MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
+        id = markets.createMarket(feedId, oracle, int256(100_000), BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
     }
 
     function _attest(int256 v) internal returns (bytes32) {
@@ -90,9 +91,9 @@ contract MarketsV4SettlementTest is Test {
 
     function _trade(bytes32 id) internal {
         vm.prank(yesTaker);
-        markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max);
         vm.prank(noTaker);
-        markets.buy(id, MarketsV4.Outcome.No, 700e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.No, 700e6, 0, type(uint256).max);
     }
 
     // ───────────── settlement rule ─────────────
@@ -113,7 +114,7 @@ contract MarketsV4SettlementTest is Test {
         vm.warp(_expiry(id) - 30 minutes);
         _attest(120_000); // public while trading is open
         vm.prank(sniper);
-        markets.buy(id, MarketsV4.Outcome.Yes, 500e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, 500e6, 0, type(uint256).max);
         vm.warp(_expiry(id) + WINDOW + DW + 1);
         vm.expectRevert(SettlementPolicy.SettlementPending.selector);
         markets.resolve(id);
@@ -158,7 +159,7 @@ contract MarketsV4SettlementTest is Test {
         vm.stopPrank();
         vm.prank(creator);
         vm.expectRevert(SettlementPolicy.FeedUnsettleable.selector);
-        markets.createMarket(slow, oracle, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
+        markets.createMarket(slow, oracle, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
     }
 
     function test_constructorRejectsBadParams() public {
@@ -168,7 +169,7 @@ contract MarketsV4SettlementTest is Test {
 
     /// L7: a zero treasury is a ZeroAddress error, not AmountTooLow.
     function test_constructorRejectsZeroTreasury() public {
-        vm.expectRevert(MarketsV4.ZeroAddress.selector);
+        vm.expectRevert(BinaryMarket.ZeroAddress.selector);
         new MarketsV4(ledger, registry, attestation, address(this), address(0), WINDOW, GRACE);
     }
 
@@ -218,10 +219,10 @@ contract MarketsV4SettlementTest is Test {
     function test_creatorIsAgent_collectsBothLegsWhenSettled() public {
         _fundAs(oracle);
         vm.prank(oracle);
-        bytes32 id = markets.createMarket(feedId, oracle, int256(100_000), MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
+        bytes32 id = markets.createMarket(feedId, oracle, int256(100_000), BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
         uint256 b0 = ledger.balanceOf(oracle);
         vm.prank(yesTaker);
-        markets.buy(id, MarketsV4.Outcome.Yes, 9_000e6, 0); // fee 90
+        markets.buy(id, BinaryMarket.Outcome.Yes, 9_000e6, 0, type(uint256).max); // fee 90
         assertEq(ledger.balanceOf(oracle) - b0, 27e6, "creator leg now");
         vm.warp(_expiry(id) + 1);
         _attest(120_000);
@@ -242,11 +243,11 @@ contract MarketsV4SettlementTest is Test {
     function testFuzz_voidIsSolvent(uint96 a, uint96 b, uint96 c) public {
         bytes32 id = _market();
         vm.prank(yesTaker);
-        markets.buy(id, MarketsV4.Outcome.Yes, bound(uint256(a), 1e6, 5_000e6), 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, bound(uint256(a), 1e6, 5_000e6), 0, type(uint256).max);
         vm.prank(noTaker);
-        markets.buy(id, MarketsV4.Outcome.No, bound(uint256(b), 1e6, 5_000e6), 0);
+        markets.buy(id, BinaryMarket.Outcome.No, bound(uint256(b), 1e6, 5_000e6), 0, type(uint256).max);
         vm.prank(sniper);
-        markets.buy(id, MarketsV4.Outcome.Yes, bound(uint256(c), 1e6, 5_000e6), 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, bound(uint256(c), 1e6, 5_000e6), 0, type(uint256).max);
         uint256 held = ledger.balanceOf(address(markets));
         vm.warp(_expiry(id) + WINDOW + 1);
         markets.voidMarket(id);

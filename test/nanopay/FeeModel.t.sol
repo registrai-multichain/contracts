@@ -9,6 +9,7 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
+import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 import {SettlementPolicy} from "../../src/nanopay/SettlementPolicy.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
@@ -65,7 +66,7 @@ contract FeeModelTest is Test {
     event Bought(
         bytes32 indexed marketId,
         address indexed buyer,
-        MarketsPerennial.Outcome outcome,
+        BinaryMarket.Outcome outcome,
         uint256 collateralIn,
         uint256 sharesOut,
         uint256 fee
@@ -73,7 +74,7 @@ contract FeeModelTest is Test {
     event Sold(
         bytes32 indexed marketId,
         address indexed seller,
-        MarketsPerennial.Outcome outcome,
+        BinaryMarket.Outcome outcome,
         uint256 sharesIn,
         uint256 collateralOut,
         uint256 fee
@@ -146,13 +147,13 @@ contract FeeModelTest is Test {
     function _p(uint256 liq) internal returns (bytes32 id) {
         vm.prank(creator);
         id = perennial.createMarket(
-            1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + LIFE, liq
+            1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + LIFE, liq
         );
     }
 
     function _v(uint256 liq) internal returns (bytes32 id) {
         vm.prank(creator);
-        id = v4.createMarket(feedId, agent, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + LIFE, liq);
+        id = v4.createMarket(feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + LIFE, liq);
     }
 
     function _attestAndFinalize(uint256 expiry, int256 value) internal {
@@ -173,7 +174,7 @@ contract FeeModelTest is Test {
         emit FeesPaid(id, 15e4, 25e4, 1e5); // fee 0.5: 30 / 50 / 20
         vm.recordLogs();
         vm.prank(alice);
-        uint256 shares = perennial.buy(id, MarketsPerennial.Outcome.Yes, 50e6, 0);
+        uint256 shares = perennial.buy(id, BinaryMarket.Outcome.Yes, 50e6, 0, type(uint256).max);
         assertEq(_lastFee(), 5e5, "Bought.fee == 1% of collateralIn");
         // 49.5 after the fee mints a full set: alice gets 149.5 - ceil(100 * 100 / 149.5)
         assertEq(shares, 1495e5 - (uint256(100e6) * 100e6 + 1495e5 - 1) / 1495e5);
@@ -188,7 +189,7 @@ contract FeeModelTest is Test {
 
         vm.recordLogs();
         vm.prank(alice);
-        uint256 out = perennial.sell(id, MarketsPerennial.Outcome.Yes, shares, 0);
+        uint256 out = perennial.sell(id, BinaryMarket.Outcome.Yes, shares, 0, type(uint256).max);
         uint256 gross = 1495e5 - perennial.collateralOf(id);
         uint256 fee = gross / 100;
         assertEq(_lastFee(), fee, "Sold.fee == 1% of the gross curve amount");
@@ -208,14 +209,14 @@ contract FeeModelTest is Test {
         emit FeesPaid(id, 15e4, 25e4, 1e5);
         vm.recordLogs();
         vm.prank(alice);
-        uint256 shares = v4.buy(id, MarketsV4.Outcome.No, 50e6, 0);
+        uint256 shares = v4.buy(id, BinaryMarket.Outcome.No, 50e6, 0, type(uint256).max);
         assertEq(_lastFee(), 5e5);
         assertEq(shares, 1495e5 - (uint256(100e6) * 100e6 + 1495e5 - 1) / 1495e5);
         assertEq(ledger.balanceOf(treasury), 25e4, "treasury 50% now");
         assertEq(v4.agentEscrow(id), 1e5);
         vm.recordLogs();
         vm.prank(alice);
-        uint256 out = v4.sell(id, MarketsV4.Outcome.No, shares, 0);
+        uint256 out = v4.sell(id, BinaryMarket.Outcome.No, shares, 0, type(uint256).max);
         uint256 gross = 1495e5 - v4.collateralOf(id);
         assertEq(_lastFee(), gross / 100);
         assertEq(out, gross - gross / 100);
@@ -242,7 +243,7 @@ contract FeeModelTest is Test {
         bytes32 id = _p(5e6);
         uint256 cr0 = ledger.balanceOf(creator);
         vm.prank(alice);
-        uint256 shares = perennial.buy(id, MarketsPerennial.Outcome.Yes, buyIn, 0);
+        uint256 shares = perennial.buy(id, BinaryMarket.Outcome.Yes, buyIn, 0, type(uint256).max);
         uint256 fee = buyIn / 100;
         uint256 legs = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(address(fund)) + perennial.agentEscrow(id);
         assertEq(legs, fee, "buy legs == fee");
@@ -251,7 +252,7 @@ contract FeeModelTest is Test {
         uint256 sellShares = bound(sellFrac, 1, shares);
         uint256 c0 = perennial.collateralOf(id);
         vm.prank(alice);
-        try perennial.sell(id, MarketsPerennial.Outcome.Yes, sellShares, 0) returns (uint256 out) {
+        try perennial.sell(id, BinaryMarket.Outcome.Yes, sellShares, 0, type(uint256).max) returns (uint256 out) {
             uint256 gross = c0 - perennial.collateralOf(id);
             uint256 legs2 = (ledger.balanceOf(creator) - cr0) + ledger.balanceOf(address(fund))
                 + perennial.agentEscrow(id);
@@ -266,9 +267,9 @@ contract FeeModelTest is Test {
     function test_perennial_resolve_releasesEscrow_winnersOneToOne_lpGetsReserve() public {
         bytes32 id = _p(100e6);
         vm.prank(alice);
-        uint256 aYes = perennial.buy(id, MarketsPerennial.Outcome.Yes, 600e6, 0); // fee 6
+        uint256 aYes = perennial.buy(id, BinaryMarket.Outcome.Yes, 600e6, 0, type(uint256).max); // fee 6
         vm.prank(bob);
-        perennial.buy(id, MarketsPerennial.Outcome.No, 300e6, 0); // fee 3
+        perennial.buy(id, BinaryMarket.Outcome.No, 300e6, 0, type(uint256).max); // fee 3
         assertEq(perennial.collateralOf(id), 991e6, "100 + 594 + 297");
         assertEq(perennial.agentEscrow(id), 18e5, "20% of 9");
         assertEq(ledger.balanceOf(address(fund)), 45e5, "50% of 9, paid per trade");
@@ -290,7 +291,7 @@ contract FeeModelTest is Test {
         vm.prank(alice);
         assertEq(perennial.redeem(id), aYes, "1 per winning share");
         vm.prank(bob);
-        vm.expectRevert(MarketsPerennial.InsufficientShares.selector);
+        vm.expectRevert(BinaryMarket.InsufficientShares.selector);
         perennial.redeem(id);
 
         assertEq(perennial.lpPotAtResolution(id), m.yesReserve, "LP pot = winning reserve");
@@ -304,7 +305,7 @@ contract FeeModelTest is Test {
     function test_v4_resolve_releasesEscrow_treasuryPaidPerTrade() public {
         bytes32 id = _v(100e6);
         vm.prank(alice);
-        uint256 aNo = v4.buy(id, MarketsV4.Outcome.No, 900e6, 0); // fee 9
+        uint256 aNo = v4.buy(id, BinaryMarket.Outcome.No, 900e6, 0, type(uint256).max); // fee 9
         assertEq(ledger.balanceOf(treasury), 45e5, "the 50% leg is the treasury's, per trade");
         MarketsV4.Market memory m = v4.getMarket(id);
         _attestAndFinalize(m.expiry, 0); // NO wins (0 < 1)
@@ -326,12 +327,12 @@ contract FeeModelTest is Test {
     function test_perennial_void_refundsNetCost_afterPartialSell() public {
         bytes32 id = _p(100e6);
         vm.prank(alice);
-        uint256 aYes = perennial.buy(id, MarketsPerennial.Outcome.Yes, 400e6, 0); // net 396
+        uint256 aYes = perennial.buy(id, BinaryMarket.Outcome.Yes, 400e6, 0, type(uint256).max); // net 396
         vm.prank(bob);
-        perennial.buy(id, MarketsPerennial.Outcome.No, 200e6, 0); // net 198
+        perennial.buy(id, BinaryMarket.Outcome.No, 200e6, 0, type(uint256).max); // net 198
         uint256 c0 = perennial.collateralOf(id);
         vm.prank(alice);
-        perennial.sell(id, MarketsPerennial.Outcome.Yes, aYes / 4, 0);
+        perennial.sell(id, BinaryMarket.Outcome.Yes, aYes / 4, 0, type(uint256).max);
         uint256 gross = c0 - perennial.collateralOf(id);
         assertLt(gross, 396e6);
         uint256 aCost = 396e6 - gross;
@@ -366,13 +367,13 @@ contract FeeModelTest is Test {
     function test_perennial_void_proRata_whenEarlySellerProfitExceedsLpSeed() public {
         bytes32 id = _p(5e6); // minimum seed
         vm.prank(bob);
-        perennial.buy(id, MarketsPerennial.Outcome.No, 1_000e6, 0); // YES becomes cheap; net 990
+        perennial.buy(id, BinaryMarket.Outcome.No, 1_000e6, 0, type(uint256).max); // YES becomes cheap; net 990
         vm.prank(alice);
-        uint256 aYes = perennial.buy(id, MarketsPerennial.Outcome.Yes, 10e6, 0); // net 9.9
+        uint256 aYes = perennial.buy(id, BinaryMarket.Outcome.Yes, 10e6, 0, type(uint256).max); // net 9.9
         vm.prank(carol);
-        perennial.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // YES becomes dear; net 1980
+        perennial.buy(id, BinaryMarket.Outcome.Yes, 2_000e6, 0, type(uint256).max); // YES becomes dear; net 1980
         vm.prank(alice);
-        uint256 out = perennial.sell(id, MarketsPerennial.Outcome.Yes, aYes, 0);
+        uint256 out = perennial.sell(id, BinaryMarket.Outcome.Yes, aYes, 0, type(uint256).max);
         assertGt(out - 10e6, 5e6, "alice's profit exceeds the LP seed");
         assertEq(perennial.netCost(id, alice), 0, "a profit is not a negative cost");
 
@@ -393,7 +394,7 @@ contract FeeModelTest is Test {
         assertEq(perennial.redeem(id), cPay);
         assertEq(perennial.redeemable(id, alice), 0);
         vm.prank(alice);
-        vm.expectRevert(MarketsPerennial.InsufficientShares.selector);
+        vm.expectRevert(BinaryMarket.InsufficientShares.selector);
         perennial.redeem(id);
         assertEq(perennial.claimableLP(id, creator), 0);
         vm.prank(creator);
@@ -405,9 +406,9 @@ contract FeeModelTest is Test {
     function test_v4_void_refundsNetCost() public {
         bytes32 id = _v(100e6);
         vm.prank(alice);
-        v4.buy(id, MarketsV4.Outcome.Yes, 500e6, 0);
+        v4.buy(id, BinaryMarket.Outcome.Yes, 500e6, 0, type(uint256).max);
         vm.prank(bob);
-        v4.buy(id, MarketsV4.Outcome.No, 250e6, 0);
+        v4.buy(id, BinaryMarket.Outcome.No, 250e6, 0, type(uint256).max);
         vm.warp(v4.getMarket(id).expiry + WINDOW + 1);
         v4.voidMarket(id);
         vm.prank(alice);
@@ -428,7 +429,7 @@ contract FeeModelTest is Test {
     function test_perennial_void_paysTheSuccessfulChallenger() public {
         bytes32 id = _p(100e6);
         vm.prank(alice);
-        perennial.buy(id, MarketsPerennial.Outcome.Yes, 900e6, 0); // fee 9, escrow 1.8
+        perennial.buy(id, BinaryMarket.Outcome.Yes, 900e6, 0, type(uint256).max); // fee 9, escrow 1.8
         uint256 expiry = perennial.getMarket(id).expiry;
 
         vm.warp(expiry + 5 minutes);
@@ -460,7 +461,7 @@ contract FeeModelTest is Test {
     function test_v4_void_paysTheSuccessfulChallenger() public {
         bytes32 id = _v(100e6);
         vm.prank(alice);
-        v4.buy(id, MarketsV4.Outcome.Yes, 900e6, 0);
+        v4.buy(id, BinaryMarket.Outcome.Yes, 900e6, 0, type(uint256).max);
         uint256 expiry = v4.getMarket(id).expiry;
         vm.warp(expiry);
         vm.prank(agent);
@@ -482,8 +483,8 @@ contract FeeModelTest is Test {
         bytes32 p = _p(100e6);
         bytes32 q = _v(100e6);
         vm.startPrank(alice);
-        perennial.buy(p, MarketsPerennial.Outcome.Yes, 900e6, 0);
-        v4.buy(q, MarketsV4.Outcome.Yes, 900e6, 0);
+        perennial.buy(p, BinaryMarket.Outcome.Yes, 900e6, 0, type(uint256).max);
+        v4.buy(q, BinaryMarket.Outcome.Yes, 900e6, 0, type(uint256).max);
         vm.stopPrank();
         vm.warp(perennial.getMarket(p).expiry + WINDOW + 1);
         vm.expectEmit(true, false, false, true, address(perennial));
@@ -506,7 +507,7 @@ contract FeeModelTest is Test {
     function test_void_outOfWindowChallenge_earnsNothing() public {
         bytes32 id = _p(100e6);
         vm.prank(alice);
-        perennial.buy(id, MarketsPerennial.Outcome.Yes, 100e6, 0); // escrow 0.2
+        perennial.buy(id, BinaryMarket.Outcome.Yes, 100e6, 0, type(uint256).max); // escrow 0.2
         uint256 expiry = perennial.getMarket(id).expiry;
         // an Invalid ruling on an attestation BEFORE the window
         vm.warp(expiry - 30 minutes);
@@ -566,9 +567,9 @@ contract FeeModelTest is Test {
         assertTrue(v4.isApprovedFeed(f, userAgent), "any active agent on an approved-resolver feed");
 
         vm.prank(creator);
-        bytes32 id = v4.createMarket(f, userAgent, 1, MarketsV4.Comparator.GreaterOrEqual, vm.getBlockTimestamp() + LIFE, 100e6);
+        bytes32 id = v4.createMarket(f, userAgent, 1, BinaryMarket.Comparator.GreaterOrEqual, vm.getBlockTimestamp() + LIFE, 100e6);
         vm.prank(alice);
-        v4.buy(id, MarketsV4.Outcome.Yes, 900e6, 0);
+        v4.buy(id, BinaryMarket.Outcome.Yes, 900e6, 0, type(uint256).max);
         vm.warp(v4.getMarket(id).expiry + 1);
         vm.prank(userAgent);
         attestation.attest(f, 1, keccak256("v"));
@@ -578,7 +579,7 @@ contract FeeModelTest is Test {
         // Perennial stays gated on the governor's agent list
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.AgentNotApproved.selector);
-        perennial.createMarket(1, f, userAgent, 1, MarketsPerennial.Comparator.GreaterOrEqual, vm.getBlockTimestamp() + LIFE, 100e6);
+        perennial.createMarket(1, f, userAgent, 1, BinaryMarket.Comparator.GreaterOrEqual, vm.getBlockTimestamp() + LIFE, 100e6);
     }
 
     function test_v4_selfResolvedFeed_refused_evenWithApprovedResolver() public {
@@ -592,8 +593,8 @@ contract FeeModelTest is Test {
         v4.setApprovedResolver(userAgent, true);
         assertFalse(v4.isApprovedFeed(f, userAgent));
         vm.prank(creator);
-        vm.expectRevert(MarketsV4.SelfResolvedFeed.selector);
-        v4.createMarket(f, userAgent, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
+        vm.expectRevert(BinaryMarket.SelfResolvedFeed.selector);
+        v4.createMarket(f, userAgent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
     }
 
     function test_v4_unapprovedResolver_refused() public {
@@ -606,8 +607,8 @@ contract FeeModelTest is Test {
         vm.stopPrank();
         assertFalse(v4.isApprovedFeed(f, userAgent));
         vm.prank(creator);
-        vm.expectRevert(MarketsV4.ResolverNotApproved.selector);
-        v4.createMarket(f, userAgent, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
+        vm.expectRevert(BinaryMarket.ResolverNotApproved.selector);
+        v4.createMarket(f, userAgent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
     }
 
     // ───────────────────────── BuilderFund: 1% protocol fee ─────────────────────────
@@ -678,20 +679,20 @@ contract FeeModelTest is Test {
         for (uint256 i; i < n; i++) {
             uint256 r = uint256(keccak256(abi.encode(seed, i)));
             address t = who[r % 4];
-            MarketsPerennial.Outcome o = (r >> 8) % 2 == 0 ? MarketsPerennial.Outcome.Yes : MarketsPerennial.Outcome.No;
+            BinaryMarket.Outcome o = (r >> 8) % 2 == 0 ? BinaryMarket.Outcome.Yes : BinaryMarket.Outcome.No;
             uint256 c0 = perennial.collateralOf(id);
             if ((r >> 16) % 3 == 0) {
-                uint256 bal = o == MarketsPerennial.Outcome.Yes ? perennial.yesBalance(id, t) : perennial.noBalance(id, t);
+                uint256 bal = o == BinaryMarket.Outcome.Yes ? perennial.yesBalance(id, t) : perennial.noBalance(id, t);
                 if (bal == 0) continue;
                 vm.prank(t);
-                try perennial.sell(id, o, bound(r >> 32, 1, bal), 0) returns (uint256 out) {
+                try perennial.sell(id, o, bound(r >> 32, 1, bal), 0, type(uint256).max) returns (uint256 out) {
                     b.sold += out;
                     b.fees += (c0 - perennial.collateralOf(id)) - out;
                 } catch {}
             } else {
                 uint256 amt = bound(r >> 32, 1, 20_000e6);
                 vm.prank(t);
-                try perennial.buy(id, o, amt, 0) {
+                try perennial.buy(id, o, amt, 0, type(uint256).max) {
                     b.totalIn += amt;
                     b.fees += amt / 100;
                 } catch {}
@@ -746,20 +747,20 @@ contract FeeModelTest is Test {
         for (uint256 i; i < n; i++) {
             uint256 r = uint256(keccak256(abi.encode(seed, i)));
             address t = who[r % 4];
-            MarketsV4.Outcome o = (r >> 8) % 2 == 0 ? MarketsV4.Outcome.Yes : MarketsV4.Outcome.No;
+            BinaryMarket.Outcome o = (r >> 8) % 2 == 0 ? BinaryMarket.Outcome.Yes : BinaryMarket.Outcome.No;
             uint256 c0 = v4.collateralOf(id);
             if ((r >> 16) % 3 == 0) {
-                uint256 bal = o == MarketsV4.Outcome.Yes ? v4.yesBalance(id, t) : v4.noBalance(id, t);
+                uint256 bal = o == BinaryMarket.Outcome.Yes ? v4.yesBalance(id, t) : v4.noBalance(id, t);
                 if (bal == 0) continue;
                 vm.prank(t);
-                try v4.sell(id, o, bound(r >> 32, 1, bal), 0) returns (uint256 out) {
+                try v4.sell(id, o, bound(r >> 32, 1, bal), 0, type(uint256).max) returns (uint256 out) {
                     b.sold += out;
                     b.fees += (c0 - v4.collateralOf(id)) - out;
                 } catch {}
             } else {
                 uint256 amt = bound(r >> 32, 1, 20_000e6);
                 vm.prank(t);
-                try v4.buy(id, o, amt, 0) {
+                try v4.buy(id, o, amt, 0, type(uint256).max) {
                     b.totalIn += amt;
                     b.fees += amt / 100;
                 } catch {}

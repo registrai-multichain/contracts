@@ -8,6 +8,7 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
+import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 import {SettlementPolicy} from "../../src/nanopay/SettlementPolicy.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
@@ -90,7 +91,7 @@ contract PocRegressionTest is Test {
 
     function _market(uint256 expiry) internal returns (bytes32 id) {
         vm.prank(creator);
-        id = markets.createMarket(1, feedId, agent, int256(1), MarketsPerennial.Comparator.GreaterOrEqual, expiry, 100e6);
+        id = markets.createMarket(1, feedId, agent, int256(1), BinaryMarket.Comparator.GreaterOrEqual, expiry, 100e6);
     }
 
     // ── M1: one challenge no longer freezes the agent across the feed ──
@@ -139,14 +140,14 @@ contract PocRegressionTest is Test {
 
         vm.prank(attacker);
         vm.expectRevert(MarketsPerennial.AgentNotApproved.selector);
-        markets.createMarket(1, f, attacker, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
+        markets.createMarket(1, f, attacker, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
 
         // Even if the governor had vetted the attacker as an agent, its own
         // resolver still is not: the self-resolved feed is refused.
         markets.setApprovedAgent(attacker, true);
         vm.prank(attacker);
-        vm.expectRevert(MarketsPerennial.ResolverNotApproved.selector);
-        markets.createMarket(1, f, attacker, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
+        vm.expectRevert(BinaryMarket.ResolverNotApproved.selector);
+        markets.createMarket(1, f, attacker, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
         assertFalse(markets.isApprovedFeed(f, attacker));
     }
 }

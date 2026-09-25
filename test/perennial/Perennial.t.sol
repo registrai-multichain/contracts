@@ -8,6 +8,7 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
+import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
@@ -96,7 +97,7 @@ contract PerennialTest is Test {
             feedId,
             oracle,
             int256(100_000),
-            MarketsPerennial.Comparator.GreaterOrEqual,
+            BinaryMarket.Comparator.GreaterOrEqual,
             block.timestamp + 2 hours,
             10e6
         );
@@ -121,10 +122,10 @@ contract PerennialTest is Test {
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.BuilderInactive.selector);
         markets.createMarket(
-            A_ID, feedId, oracle, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 1 days, 10e6
+            A_ID, feedId, oracle, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 1 days, 10e6
         );
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // still trades
+        markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max); // still trades
         assertEq(fund.incomeOf(0, A_ID), 5e6, "income accrues, frozen");
         vm.warp(fund.epochEnd(0));
         vm.expectRevert(BuilderFund.BuilderInactive.selector);
@@ -144,12 +145,12 @@ contract PerennialTest is Test {
         bytes32 mB = _market(B_ID);
         for (uint256 i; i < 6; i++) {
             vm.prank(taker);
-            markets.buy(mA, MarketsPerennial.Outcome.Yes, 1_000_000e6, 0); // fee 10,000: builder 5,000
+            markets.buy(mA, BinaryMarket.Outcome.Yes, 1_000_000e6, 0, type(uint256).max); // fee 10,000: builder 5,000
             vm.prank(taker);
-            markets.buy(mA, MarketsPerennial.Outcome.No, 1_000_000e6, 0);
+            markets.buy(mA, BinaryMarket.Outcome.No, 1_000_000e6, 0, type(uint256).max);
         }
         vm.prank(taker);
-        markets.buy(mB, MarketsPerennial.Outcome.Yes, 160_000e6, 0); // fee 1,600: builder 800
+        markets.buy(mB, BinaryMarket.Outcome.Yes, 160_000e6, 0, type(uint256).max); // fee 1,600: builder 800
         assertEq(fund.incomeOf(0, A_ID), 60_000e6);
         assertEq(fund.incomeOf(0, B_ID), 800e6);
         assertEq(ledger.balanceOf(address(fund)), 60_800e6);
@@ -186,7 +187,7 @@ contract PerennialTest is Test {
     function test_voidEscrow_joinsTheSeasonPool() public {
         bytes32 id = _market(A_ID);
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // escrow 4
+        markets.buy(id, BinaryMarket.Outcome.Yes, 2_000e6, 0, type(uint256).max); // escrow 4
         vm.warp(markets.getMarket(id).expiry + 1 hours + 1);
         markets.voidMarket(id);
         assertEq(pool.unallocated(), 4e6);
@@ -197,7 +198,7 @@ contract PerennialTest is Test {
     function test_claimFor_creditsBuilderNotCaller() public {
         bytes32 id = _market(A_ID);
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0); // builder 10
+        markets.buy(id, BinaryMarket.Outcome.Yes, 2_000e6, 0, type(uint256).max); // builder 10
         vm.warp(fund.epochEnd(0));
         address caretaker = address(0xCA4E);
         vm.prank(caretaker);

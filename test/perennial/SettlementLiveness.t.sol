@@ -8,6 +8,7 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
+import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 import {SettlementPolicy} from "../../src/nanopay/SettlementPolicy.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
@@ -90,7 +91,7 @@ contract SettlementLivenessTest is Test {
     function _market() internal returns (bytes32 id) {
         vm.prank(creator);
         id = markets.createMarket(
-            1, feedId, agent, int256(1), MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6
+            1, feedId, agent, int256(1), BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6
         );
     }
 
@@ -101,9 +102,9 @@ contract SettlementLivenessTest is Test {
 
     function _trade(bytes32 id) internal {
         vm.prank(yesTaker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 300e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, 300e6, 0, type(uint256).max);
         vm.prank(noTaker);
-        markets.buy(id, MarketsPerennial.Outcome.No, 200e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.No, 200e6, 0, type(uint256).max);
     }
 
     function _expiry(bytes32 id) internal view returns (uint256) {
@@ -133,7 +134,7 @@ contract SettlementLivenessTest is Test {
         _attest(1);
         vm.warp(block.timestamp + DW); // well inside a 1h window? DW == WINDOW here: at the edge
         markets.resolve(id);
-        assertEq(uint8(markets.getMarket(id).phase), uint8(MarketsPerennial.Phase.Resolved));
+        assertEq(uint8(markets.getMarket(id).phase), uint8(BinaryMarket.Phase.Resolved));
     }
 
     // ───────────────────────────── last look ─────────────────────────────
@@ -147,7 +148,7 @@ contract SettlementLivenessTest is Test {
         _attest(1); // "shipped" — while trading is still open
 
         vm.prank(sniper);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 50e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, 50e6, 0, type(uint256).max);
 
         vm.warp(_expiry(id) + WINDOW + DW + 1);
         (SettlementPolicy.Settlement s,) = markets.settlementState(id);
@@ -161,7 +162,7 @@ contract SettlementLivenessTest is Test {
         vm.warp(_expiry(id) - 1 hours);
         _attest(1); // pre-expiry: "shipped"
         vm.prank(sniper);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 50e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, 50e6, 0, type(uint256).max);
 
         vm.warp(_expiry(id) + 5 minutes);
         _attest(0); // the real post-expiry reading: not shipped
@@ -229,9 +230,9 @@ contract SettlementLivenessTest is Test {
         bytes32 a = _market();
         vm.warp(_expiry(a) + WINDOW + 1);
         markets.voidMarket(a);
-        vm.expectRevert(MarketsPerennial.AlreadyResolved.selector);
+        vm.expectRevert(BinaryMarket.AlreadyResolved.selector);
         markets.resolve(a);
-        vm.expectRevert(MarketsPerennial.AlreadyResolved.selector);
+        vm.expectRevert(BinaryMarket.AlreadyResolved.selector);
         markets.voidMarket(a);
     }
 
@@ -266,8 +267,8 @@ contract SettlementLivenessTest is Test {
     function test_voidRedeemPaysBothSidesAtOnce_andOnlyOnce() public {
         bytes32 id = _market();
         vm.startPrank(yesTaker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 100e6, 0);
-        markets.buy(id, MarketsPerennial.Outcome.No, 100e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, 100e6, 0, type(uint256).max);
+        markets.buy(id, BinaryMarket.Outcome.No, 100e6, 0, type(uint256).max);
         vm.stopPrank();
 
         vm.warp(_expiry(id) + WINDOW + 1);
@@ -276,7 +277,7 @@ contract SettlementLivenessTest is Test {
         assertEq(markets.redeem(id), 198e6, "one refund of the whole net cost (200 in, minus 2 in fees)");
         assertEq(markets.netCost(id, yesTaker), 0);
         vm.prank(yesTaker);
-        vm.expectRevert(MarketsPerennial.InsufficientShares.selector);
+        vm.expectRevert(BinaryMarket.InsufficientShares.selector);
         markets.redeem(id);
     }
 
@@ -304,7 +305,7 @@ contract SettlementLivenessTest is Test {
 
         vm.warp(_expiry(id) + WINDOW + GRACE + 1);
         markets.voidMarket(id);
-        assertEq(uint8(markets.getMarket(id).phase), uint8(MarketsPerennial.Phase.Voided));
+        assertEq(uint8(markets.getMarket(id).phase), uint8(BinaryMarket.Phase.Voided));
         _solvent();
     }
 
@@ -421,7 +422,7 @@ contract SettlementLivenessTest is Test {
         vm.stopPrank();
         vm.prank(creator);
         vm.expectRevert(SettlementPolicy.FeedUnsettleable.selector);
-        markets.createMarket(1, slow, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
+        markets.createMarket(1, slow, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + LIFE, 100e6);
     }
 
     function test_constructorRejectsOutOfBoundsParams() public {
@@ -441,16 +442,16 @@ contract SettlementLivenessTest is Test {
         uint256 y = bound(uint256(b), 1e6, 5_000e6);
         uint256 z = bound(uint256(c), 1e6, 5_000e6);
         vm.prank(yesTaker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, x, 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, x, 0, type(uint256).max);
         vm.prank(noTaker);
-        markets.buy(id, MarketsPerennial.Outcome.No, y, 0);
+        markets.buy(id, BinaryMarket.Outcome.No, y, 0, type(uint256).max);
         vm.prank(sniper);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, z, 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, z, 0, type(uint256).max);
         if (sellSome) {
             uint256 half = markets.yesBalance(id, yesTaker) / 2;
             if (half > 0) {
                 vm.prank(yesTaker);
-                markets.sell(id, MarketsPerennial.Outcome.Yes, half, 0);
+                markets.sell(id, BinaryMarket.Outcome.Yes, half, 0, type(uint256).max);
             }
         }
 

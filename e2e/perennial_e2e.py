@@ -431,8 +431,8 @@ def rehearse(c, A):
     exp1 = int(m1["expiry"])
     c.warp_to(exp1 + 5)
     check(ui("status", marketId=M1)["status"] == "waiting", "after expiry, before any attestation: UI says waiting")
-    err = c.fails_with("bob", MP, "buy(bytes32,uint8,uint256,uint256)", M1, 0, U, 0)
-    check(err != "", "no last look: buying after expiry reverts")
+    err = c.fails_with("bob", MP, "buy(bytes32,uint8,uint256,uint256,uint256)", M1, 0, U, 0, 2**256 - 1)
+    check("0xb2094b59" in err or "MarketExpired" in err, "no last look: buying after expiry reverts (MarketExpired)")
     count["v"] = 1                                   # the builder shipped a release
     r = keeper_tick()
     check([a[0] for a in r["actions"]] == ["attest"], "keeper attests inside the settlement window", r)

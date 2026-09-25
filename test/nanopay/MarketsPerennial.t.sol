@@ -8,6 +8,7 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
+import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
@@ -101,7 +102,7 @@ contract MarketsPerennialTest is Test {
             feedId,
             oracle,
             int256(100_000),
-            MarketsPerennial.Comparator.GreaterOrEqual,
+            BinaryMarket.Comparator.GreaterOrEqual,
             block.timestamp + 2 hours,
             10e6
         );
@@ -121,14 +122,14 @@ contract MarketsPerennialTest is Test {
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.BuilderInactive.selector);
         markets.createMarket(
-            999, feedId, oracle, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 10e6
+            999, feedId, oracle, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 10e6
         );
 
         builders.setActive(1, false);
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.BuilderInactive.selector);
         markets.createMarket(
-            1, feedId, oracle, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 10e6
+            1, feedId, oracle, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 10e6
         );
     }
 
@@ -153,7 +154,7 @@ contract MarketsPerennialTest is Test {
         vm.expectEmit(true, false, false, true, address(markets));
         emit FeesPaid(id, 3e6, 5e6, 2e6);
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // fee 10
+        markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max); // fee 10
 
         assertEq(ledger.balanceOf(creator) - creatorBefore, 3e6, "creator 30% now");
         assertEq(ledger.balanceOf(address(fund)), 5e6, "builder 50% now, held by the fund");
@@ -178,16 +179,16 @@ contract MarketsPerennialTest is Test {
         bytes32 m1 = _marketFor(1);
         bytes32 m2 = _marketFor(2);
         vm.prank(taker);
-        markets.buy(m1, MarketsPerennial.Outcome.No, 2_000e6, 0); // fee 20, builder 1 gets 10
+        markets.buy(m1, BinaryMarket.Outcome.No, 2_000e6, 0, type(uint256).max); // fee 20, builder 1 gets 10
         vm.prank(taker);
-        markets.buy(m2, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // fee 10, builder 2 gets 5
+        markets.buy(m2, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max); // fee 10, builder 2 gets 5
         assertEq(fund.incomeOf(0, 1), 10e6);
         assertEq(fund.incomeOf(0, 2), 5e6);
         assertEq(ledger.balanceOf(builder), 0, "nothing paid before the epoch ends");
 
         vm.warp(fund.epochEnd(0)); // next epoch, the market still trades
         vm.prank(taker);
-        markets.buy(m1, MarketsPerennial.Outcome.Yes, 400e6, 0); // fee 4, builder 1 gets 2
+        markets.buy(m1, BinaryMarket.Outcome.Yes, 400e6, 0, type(uint256).max); // fee 4, builder 1 gets 2
         assertEq(fund.incomeOf(1, 1), 2e6, "epoch 1 income");
         assertEq(fund.incomeOf(0, 1), 10e6, "epoch 0 unchanged");
 
@@ -203,7 +204,7 @@ contract MarketsPerennialTest is Test {
     function test_void_noChallenger_escrowToSeasonPool() public {
         bytes32 id = _market();
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // escrow 2
+        markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max); // escrow 2
         vm.warp(markets.getMarket(id).expiry + 1 hours + 1); // silent agent: window over
         vm.expectEmit(address(markets));
         emit VoidFeesPaid(id, 0, 2e6, 0, address(0));
@@ -219,7 +220,7 @@ contract MarketsPerennialTest is Test {
     function test_void_withChallenger_paysTheChallenger() public {
         bytes32 id = _market();
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // escrow 2
+        markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max); // escrow 2
         vm.warp(markets.getMarket(id).expiry + 1);
         vm.prank(oracle);
         bytes32 att = attestation.attest(feedId, int256(123_456), bytes32("ih"));
@@ -259,18 +260,18 @@ contract MarketsPerennialTest is Test {
         fund.revokeRole(fund.MARKETS_ROLE(), address(markets));
         vm.prank(taker);
         vm.expectRevert();
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max);
     }
 
     function test_sell_paysFeesAndProceeds() public {
         bytes32 id = _market();
         vm.prank(taker);
-        uint256 shares = markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0);
+        uint256 shares = markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max);
         uint256 fundBefore = ledger.balanceOf(address(fund));
         uint256 takerBefore = ledger.balanceOf(taker);
         uint256 cBefore = markets.collateralOf(id);
         vm.prank(taker);
-        uint256 out = markets.sell(id, MarketsPerennial.Outcome.Yes, shares, 0);
+        uint256 out = markets.sell(id, BinaryMarket.Outcome.Yes, shares, 0, type(uint256).max);
         uint256 gross = cBefore - markets.collateralOf(id);
         uint256 fee = gross / 100;
         assertEq(out, gross - fee, "seller receives gross minus 1%");
@@ -287,7 +288,7 @@ contract MarketsPerennialTest is Test {
     function test_resolve_redeem_endToEnd() public {
         bytes32 id = _market();
         vm.prank(taker);
-        uint256 shares = markets.buy(id, MarketsPerennial.Outcome.Yes, 2_000e6, 0);
+        uint256 shares = markets.buy(id, BinaryMarket.Outcome.Yes, 2_000e6, 0, type(uint256).max);
         _settleYes(id);
         assertTrue(markets.getMarket(id).yesWon);
         assertEq(markets.redeemable(id, taker), shares);

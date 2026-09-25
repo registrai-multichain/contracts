@@ -8,6 +8,7 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
+import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
@@ -95,20 +96,20 @@ contract ResolveLifecycleTest is Test {
         uint256 t0 = vm.getBlockTimestamp();
         vm.prank(creator);
         bytes32 id =
-            perennial.createMarket(1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, t0 + LIFE, liq);
+            perennial.createMarket(1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, t0 + LIFE, liq);
 
         for (uint256 i; i < n; i++) {
             uint256 r = uint256(keccak256(abi.encode(seed, i)));
             address who = traders[r % traders.length];
-            MarketsPerennial.Outcome o = (r >> 8) % 2 == 0 ? MarketsPerennial.Outcome.Yes : MarketsPerennial.Outcome.No;
+            BinaryMarket.Outcome o = (r >> 8) % 2 == 0 ? BinaryMarket.Outcome.Yes : BinaryMarket.Outcome.No;
             if ((r >> 16) % 3 == 0) {
-                uint256 bal = o == MarketsPerennial.Outcome.Yes ? perennial.yesBalance(id, who) : perennial.noBalance(id, who);
+                uint256 bal = o == BinaryMarket.Outcome.Yes ? perennial.yesBalance(id, who) : perennial.noBalance(id, who);
                 if (bal == 0) continue;
                 vm.prank(who);
-                try perennial.sell(id, o, bound(r >> 32, 1, bal), 0) {} catch {}
+                try perennial.sell(id, o, bound(r >> 32, 1, bal), 0, type(uint256).max) {} catch {}
             } else {
                 vm.prank(who);
-                try perennial.buy(id, o, bound(r >> 32, 1, 20_000e6), 0) {} catch {}
+                try perennial.buy(id, o, bound(r >> 32, 1, 20_000e6), 0, type(uint256).max) {} catch {}
             }
         }
 
@@ -158,20 +159,20 @@ contract ResolveLifecycleTest is Test {
         value = bound(value, -1, 2);
         uint256 t0 = vm.getBlockTimestamp();
         vm.prank(creator);
-        bytes32 id = v4.createMarket(feedId, agent, 1, MarketsV4.Comparator.GreaterOrEqual, t0 + LIFE, liq);
+        bytes32 id = v4.createMarket(feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, t0 + LIFE, liq);
 
         for (uint256 i; i < n; i++) {
             uint256 r = uint256(keccak256(abi.encode(seed, i)));
             address who = traders[r % traders.length];
-            MarketsV4.Outcome o = (r >> 8) % 2 == 0 ? MarketsV4.Outcome.Yes : MarketsV4.Outcome.No;
+            BinaryMarket.Outcome o = (r >> 8) % 2 == 0 ? BinaryMarket.Outcome.Yes : BinaryMarket.Outcome.No;
             if ((r >> 16) % 3 == 0) {
-                uint256 bal = o == MarketsV4.Outcome.Yes ? v4.yesBalance(id, who) : v4.noBalance(id, who);
+                uint256 bal = o == BinaryMarket.Outcome.Yes ? v4.yesBalance(id, who) : v4.noBalance(id, who);
                 if (bal == 0) continue;
                 vm.prank(who);
-                try v4.sell(id, o, bound(r >> 32, 1, bal), 0) {} catch {}
+                try v4.sell(id, o, bound(r >> 32, 1, bal), 0, type(uint256).max) {} catch {}
             } else {
                 vm.prank(who);
-                try v4.buy(id, o, bound(r >> 32, 1, 20_000e6), 0) {} catch {}
+                try v4.buy(id, o, bound(r >> 32, 1, 20_000e6), 0, type(uint256).max) {} catch {}
             }
         }
 

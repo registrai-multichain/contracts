@@ -8,6 +8,7 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
+import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {FundKit} from "./FundKit.sol";
@@ -78,14 +79,14 @@ contract MilestoneMarketTest is Test {
         vm.prank(creator);
         // threshold 1, GreaterOrEqual -> YES iff attested value >= 1 (a release shipped)
         id = markets.createMarket(
-            1, feedId, agent, int256(1), MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 10e6
+            1, feedId, agent, int256(1), BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 10e6
         );
     }
 
     function test_shipped_resolvesYes_andFundsCommons() public {
         bytes32 id = _milestoneMarket();
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.Yes, 1_000e6, 0); // fee 10: builder 5, agent 2 escrowed
+        markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max); // fee 10: builder 5, agent 2 escrowed
         assertEq(ledger.balanceOf(address(fund)), 5e6, "builder leg of the milestone market's trading fee");
         assertEq(fund.incomeOf(0, 1), 5e6, "income of the builder the market is about");
 
@@ -103,7 +104,7 @@ contract MilestoneMarketTest is Test {
     function test_notShipped_resolvesNo() public {
         bytes32 id = _milestoneMarket();
         vm.prank(taker);
-        markets.buy(id, MarketsPerennial.Outcome.No, 1_000e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.No, 1_000e6, 0, type(uint256).max);
 
         vm.warp(block.timestamp + 2 hours + 1); // trading closed; now the agent reads
         vm.prank(agent);

@@ -8,6 +8,7 @@ import {Attestation} from "../src/Attestation.sol";
 import {Dispute} from "../src/Dispute.sol";
 import {NanoLedger} from "../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../src/nanopay/MarketsPerennial.sol";
+import {BinaryMarket} from "../src/nanopay/BinaryMarket.sol";
 import {BuilderFund} from "../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../src/perennial/SeasonPool.sol";
 import {LaunchSchedule} from "./lib/LaunchSchedule.sol";
@@ -83,11 +84,11 @@ contract RehearseSettlement is Script {
         ledger.deposit(5_000e6);
         ledger.approveSpender(address(markets), type(uint256).max);
         uint256 expiry = block.timestamp + 2 hours;
-        bytes32 mServed = markets.createMarket(1, served, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, expiry, 100e6);
-        bytes32 mUnserved = markets.createMarket(1, unserved, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, expiry, 100e6);
-        bytes32 mForeign = markets.createMarket(1, foreign, otherAgent, 1, MarketsPerennial.Comparator.GreaterOrEqual, expiry, 100e6);
-        markets.buy(mServed, MarketsPerennial.Outcome.Yes, 500e6, 0);
-        markets.buy(mUnserved, MarketsPerennial.Outcome.No, 500e6, 0);
+        bytes32 mServed = markets.createMarket(1, served, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, expiry, 100e6);
+        bytes32 mUnserved = markets.createMarket(1, unserved, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, expiry, 100e6);
+        bytes32 mForeign = markets.createMarket(1, foreign, otherAgent, 1, BinaryMarket.Comparator.GreaterOrEqual, expiry, 100e6);
+        markets.buy(mServed, BinaryMarket.Outcome.Yes, 500e6, 0, type(uint256).max);
+        markets.buy(mUnserved, BinaryMarket.Outcome.No, 500e6, 0, type(uint256).max);
         vm.stopBroadcast();
 
         console2.log("REHEARSAL markets", address(markets));

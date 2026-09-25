@@ -1,64 +1,40 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Registry} from "../Registry.sol";
 import {Attestation} from "../Attestation.sol";
 import {NanoLedger} from "./NanoLedger.sol";
 import {BuilderRegistry} from "../perennial/BuilderRegistry.sol";
 import {BuilderFund} from "../perennial/BuilderFund.sol";
-import {SettlementPolicy} from "./SettlementPolicy.sol";
+import {BinaryMarket} from "./BinaryMarket.sol";
 
 /// @title MarketsPerennial. Builder-milestone prediction markets whose fees pay
 ///        the builder they are about.
-/// @notice Same constant-product binary market as MarketsV4 (settled entirely on
-///         NanoLedger), specialized for the Perennial funding model. Each market
-///         is tagged to a `builderId` it is about.
+/// @notice A BinaryMarket (trading, settlement, void and claims live there) whose
+///         markets are each tagged to a `builderId`.
 ///
-///         Fees: a TRADE_FEE_BPS (1%) trading fee on every buy (of collateralIn)
-///         and every sell (of the gross curve amount; the seller receives the
-///         rest), split per trade:
-///           - 30% to whoever opened the market (CREATOR_SHARE_BPS), paid now;
-///           - 20% to the bonded agent (AGENT_SHARE_BPS), HELD in `agentEscrow`
-///             until the market settles;
-///           - 50% to the builder the market is about (BUILDER_SHARE_BPS, takes
-///             the rounding remainder): paid now into the BuilderFund (`FUND`)
-///             and credited as that builder's income for the current epoch; the
-///             fund taxes it progressively per epoch (the tax feeds the
-///             SeasonPool) when the builder claims.
-///         Nothing is charged at settlement. resolve releases the escrow to the
-///         agent; winners redeem 1 per winning share; the LP gets the winning
-///         reserve.
+///         Fees: the 1% trading fee on every buy and sell splits 30% to whoever
+///         opened the market (paid now), 20% to the bonded agent (escrowed until
+///         the market settles) and 50% to the builder the market is about
+///         (BUILDER_SHARE_BPS, the rounding remainder): paid now into the
+///         BuilderFund (`FUND`) and credited as that builder's income for the
+///         current epoch; the fund taxes it progressively per epoch (the tax
+///         feeds the SeasonPool) when the builder claims.
 ///
-///         Void: a market that cannot be settled voids (SettlementPolicy). The
-///         escrow goes to the challenger who got the agent's reading ruled
-///         Invalid, else to the SeasonPool (through the fund). Every trader is
-///         refunded its net cost (what it put in after fees, minus what it took
-///         out; pro rata only if earlier sellers took profits larger than the LP
-///         seed); the LP gets the rest.
+///         Void: the escrow goes to the challenger who got the agent's reading
+///         ruled Invalid, else to the SeasonPool (through the fund), as does a
+///         settled market's rounding dust.
 ///
-///         Accounting invariant while trading: YES supply == NO supply ==
-///         collateralOf; the contract's ledger balance for the market is
-///         collateralOf + agentEscrow.
-///         Real USDC only crosses at NanoLedger.deposit/withdraw.
-contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
-    enum Outcome {
-        Yes,
-        No
-    }
-    enum Comparator {
-        GreaterThan,
-        GreaterOrEqual,
-        LessThan,
-        LessOrEqual
-    }
-    enum Phase {
-        Trading,
-        Resolved,
-        Voided
-    }
+///         Oracle vetting: only governor-approved agents may settle, and the
+///         feed must name a governor-approved resolver that is not the agent.
+contract MarketsPerennial is BinaryMarket {
+    /// @notice The builder leg of each trading fee (the rounding remainder).
+    uint256 public constant BUILDER_SHARE_BPS = 5000;
+
+    BuilderRegistry public immutable BUILDERS;
+    /// @notice The BuilderFund: receives the builder leg (credited per builder
+    /// and epoch) and forwards void escrows and dust to the SeasonPool. Immutable.
+    BuilderFund public immutable FUND;
 
     struct Market {
         bytes32 feedId;
@@ -75,57 +51,10 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         uint256 createdAt;
     }
 
-    bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
-
-    NanoLedger public immutable LEDGER;
-    Registry public immutable REGISTRY;
-    Attestation public immutable ATTESTATION;
-    BuilderRegistry public immutable BUILDERS;
-
-    uint256 public constant MIN_LIQUIDITY = 5e6;
-    /// @notice The trading fee: 1% of every buy and every sell.
-    uint256 public constant TRADE_FEE_BPS = 100;
-    /// @notice Shares of each trading fee (of BPS). The agent's 20% is escrowed
-    /// until settlement (the challenger reward on void); the builder takes the rounding remainder.
-    uint256 public constant CREATOR_SHARE_BPS = 3000;
-    uint256 public constant AGENT_SHARE_BPS = 2000;
-    uint256 public constant BUILDER_SHARE_BPS = 5000;
-    uint256 public constant BPS = 10_000;
-
-    /// @notice The BuilderFund: receives the builder leg (credited per builder
-    /// and epoch) and forwards unclaimed void escrows to the SeasonPool. Immutable.
-    BuilderFund public immutable FUND;
-
-    mapping(bytes32 => Market) internal _markets;
-    mapping(bytes32 => mapping(address => uint256)) public yesBalance;
-    mapping(bytes32 => mapping(address => uint256)) public noBalance;
-    mapping(address => uint256) public createdBy;
-    mapping(bytes32 => mapping(address => uint256)) public lpShares;
-    mapping(bytes32 => uint256) public totalLpShares;
-    mapping(bytes32 => uint256) public lpPotAtResolution;
-
-    /// @notice C: all collateral backing a market (== YES supply == NO supply).
-    mapping(bytes32 => uint256) public collateralOf;
-    /// @notice What a trader has put in after fees and not yet taken out (never
-    /// below 0; the LP seed is not a trader cost).
-    mapping(bytes32 => mapping(address => uint256)) public netCost;
-    /// @notice Sum of every trader's netCost.
-    mapping(bytes32 => uint256) public totalNetCost;
-    /// @notice The agent's 20% of every trading fee, held until the market
-    /// settles: released to the agent on resolve, to a successful challenger
-    /// (else the SeasonPool) on void.
-    mapping(bytes32 => uint256) public agentEscrow;
-    /// @notice At void: what traders share (their net cost, capped by what the
-    /// market holds), and the totalNetCost it is shared over.
-    mapping(bytes32 => uint256) public voidTraderPool;
-    mapping(bytes32 => uint256) public voidNetCostTotal;
+    mapping(bytes32 => uint256) internal _builderIdOf;
 
     /// @notice Governor allowlist of bonded agents a market may settle on.
     mapping(address => bool) public approvedAgent;
-    /// @notice Governor allowlist of dispute resolvers a market's feed may name.
-    /// A feed's resolver is fixed at Registry.createFeed (no setter) and Dispute
-    /// snapshots it per challenge, so checking it once at market creation is sound.
-    mapping(address => bool) public approvedResolver;
 
     event MarketCreated(
         bytes32 indexed marketId,
@@ -137,29 +66,8 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         Comparator comparator,
         uint256 expiry
     );
-    event Bought(
-        bytes32 indexed marketId,
-        address indexed buyer,
-        Outcome outcome,
-        uint256 collateralIn,
-        uint256 sharesOut,
-        uint256 fee
-    );
-    event Sold(
-        bytes32 indexed marketId,
-        address indexed seller,
-        Outcome outcome,
-        uint256 sharesIn,
-        uint256 collateralOut,
-        uint256 fee
-    );
     /// @notice Every trade: creator paid, builder credited, agent escrowed.
     event FeesPaid(bytes32 indexed marketId, uint256 creatorFee, uint256 builderFee, uint256 agentFee);
-    event Resolved(bytes32 indexed marketId, bool yesWon, int256 value);
-    event Redeemed(bytes32 indexed marketId, address indexed holder, uint256 payout);
-    event LPClaimed(bytes32 indexed marketId, address indexed lp, uint256 payout);
-    event MarketVoided(bytes32 indexed marketId);
-    event AgentFeeReleased(bytes32 indexed marketId, address indexed agent, uint256 amount);
     /// @notice At void: the agent escrow went to the challenger, else to the
     /// SeasonPool (`seasonPoolAmount`). `creatorFee` is always 0 (kept for the
     /// event's ABI shape).
@@ -171,28 +79,9 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         address challenger
     );
     event AgentApprovalSet(address indexed agent, bool approved);
-    event ResolverApprovalSet(address indexed resolver, bool approved);
 
-    error MarketMissing();
-    error MarketExists();
-    error NotTrading();
-    error MarketExpired();
-    error MarketNotExpired();
-    error AlreadyResolved();
-    error NotResolved();
-    error AmountTooLow();
-    error LiquidityTooLow();
-    error BadExpiry();
-    error AgentNotRegistered();
-    error SlippageExceeded();
-    error InsufficientShares();
-    error NoLPShares();
-    error ZeroAddress();
-    error ReserveDepleted();
     error BuilderInactive();
     error AgentNotApproved();
-    error ResolverNotApproved();
-    error SelfResolvedFeed();
     error FundMismatch();
 
     constructor(
@@ -204,24 +93,15 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         BuilderFund fund_,
         uint256 settlementWindow_,
         uint256 resolutionGrace_
-    ) SettlementPolicy(settlementWindow_, resolutionGrace_) {
-        if (address(builders_) == address(0) || admin == address(0) || address(fund_) == address(0)) {
-            revert ZeroAddress();
-        }
+    ) BinaryMarket(ledger_, registry_, attestation_, admin, settlementWindow_, resolutionGrace_) {
+        if (address(builders_) == address(0) || address(fund_) == address(0)) revert ZeroAddress();
         // The fund must pay on the same ledger and the same builder ids.
         if (address(fund_.LEDGER()) != address(ledger_) || address(fund_.BUILDERS()) != address(builders_)) {
             revert FundMismatch();
         }
-        LEDGER = ledger_;
-        REGISTRY = registry_;
-        ATTESTATION = attestation_;
         BUILDERS = builders_;
         FUND = fund_;
-        _grantRole(DEFAULT_ADMIN_ROLE, admin);
-        _grantRole(GOVERNOR_ROLE, admin);
     }
-
-    // ───────────────────────────── create ─────────────────────────────
 
     function createMarket(
         uint256 builderId,
@@ -232,286 +112,49 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         uint256 expiry,
         uint256 liquidity
     ) external nonReentrant returns (bytes32 marketId) {
-        if (expiry <= block.timestamp) revert BadExpiry();
-        if (liquidity < MIN_LIQUIDITY) revert LiquidityTooLow();
         if (!BUILDERS.isActiveBuilderId(builderId)) revert BuilderInactive();
-        if (!REGISTRY.isActiveAgent(feedId, agent)) revert AgentNotRegistered();
-        _requireApprovedOracle(feedId, agent);
-        _requireSettleableFeed(REGISTRY, feedId);
-
-        uint256 nonce = createdBy[msg.sender]++;
-        marketId = keccak256(abi.encode(msg.sender, nonce, feedId, agent, threshold, comparator, expiry));
-        if (_markets[marketId].createdAt != 0) revert MarketExists();
-
-        LEDGER.transferFromInternal(msg.sender, address(this), liquidity);
-
-        _markets[marketId] = Market({
-            feedId: feedId,
-            agent: agent,
-            threshold: threshold,
-            comparator: comparator,
-            expiry: expiry,
-            creator: msg.sender,
-            builderId: builderId,
-            yesReserve: liquidity,
-            noReserve: liquidity,
-            phase: Phase.Trading,
-            yesWon: false,
-            createdAt: block.timestamp
-        });
-        lpShares[marketId][msg.sender] = liquidity;
-        totalLpShares[marketId] = liquidity;
-        collateralOf[marketId] = liquidity;
-
+        marketId = _open(feedId, agent, threshold, comparator, expiry, liquidity);
+        _builderIdOf[marketId] = builderId;
         emit MarketCreated(marketId, builderId, msg.sender, feedId, agent, threshold, comparator, expiry);
     }
 
-    // ───────────────────────────── trade ─────────────────────────────
+    // ───────────────────────────── hooks ─────────────────────────────
 
-    function buy(bytes32 marketId, Outcome outcome, uint256 collateralIn, uint256 minSharesOut)
-        external
-        nonReentrant
-        returns (uint256 sharesOut)
+    function _payFeeLegs(bytes32 marketId, uint256 creatorFee, uint256 builderFee, uint256 agentFee)
+        internal
+        override
     {
-        Market storage m = _markets[marketId];
-        if (m.createdAt == 0) revert MarketMissing();
-        if (m.phase != Phase.Trading) revert NotTrading();
-        if (block.timestamp >= m.expiry) revert MarketExpired();
-        if (collateralIn == 0) revert LiquidityTooLow();
-
-        LEDGER.transferFromInternal(msg.sender, address(this), collateralIn);
-        uint256 fee = (collateralIn * TRADE_FEE_BPS) / BPS;
-        uint256 effectiveIn = collateralIn - fee;
-        _chargeFee(marketId, m, fee);
-        collateralOf[marketId] += effectiveIn;
-        netCost[marketId][msg.sender] += effectiveIn;
-        totalNetCost[marketId] += effectiveIn;
-
-        // what is left after the fee mints a full YES + NO set
-        uint256 yesAfterMint = m.yesReserve + effectiveIn;
-        uint256 noAfterMint = m.noReserve + effectiveIn;
-        uint256 k = m.yesReserve * m.noReserve;
-        if (outcome == Outcome.Yes) {
-            sharesOut = yesAfterMint - Math.ceilDiv(k, noAfterMint);
-            m.yesReserve = yesAfterMint - sharesOut;
-            m.noReserve = noAfterMint;
-            yesBalance[marketId][msg.sender] += sharesOut;
-        } else {
-            sharesOut = noAfterMint - Math.ceilDiv(k, yesAfterMint);
-            m.noReserve = noAfterMint - sharesOut;
-            m.yesReserve = yesAfterMint;
-            noBalance[marketId][msg.sender] += sharesOut;
-        }
-        if (sharesOut == 0) revert AmountTooLow();
-        if (m.yesReserve == 0 || m.noReserve == 0) revert ReserveDepleted();
-        if (sharesOut < minSharesOut) revert SlippageExceeded();
-        emit Bought(marketId, msg.sender, outcome, collateralIn, sharesOut, fee);
-    }
-
-    function sell(bytes32 marketId, Outcome outcome, uint256 sharesIn, uint256 minCollateralOut)
-        external
-        nonReentrant
-        returns (uint256 collateralOut)
-    {
-        Market storage m = _markets[marketId];
-        if (m.createdAt == 0) revert MarketMissing();
-        if (m.phase != Phase.Trading) revert NotTrading();
-        if (block.timestamp >= m.expiry) revert MarketExpired();
-        if (sharesIn == 0) revert LiquidityTooLow();
-
-        if (outcome == Outcome.Yes) {
-            if (yesBalance[marketId][msg.sender] < sharesIn) revert InsufficientShares();
-            yesBalance[marketId][msg.sender] -= sharesIn;
-        } else {
-            if (noBalance[marketId][msg.sender] < sharesIn) revert InsufficientShares();
-            noBalance[marketId][msg.sender] -= sharesIn;
-        }
-
-        uint256 yesPostSell = outcome == Outcome.Yes ? m.yesReserve + sharesIn : m.yesReserve;
-        uint256 noPostSell = outcome == Outcome.No ? m.noReserve + sharesIn : m.noReserve;
-        uint256 k = m.yesReserve * m.noReserve;
-        uint256 sumAB = yesPostSell + noPostSell;
-        uint256 prodAB = yesPostSell * noPostSell;
-        uint256 disc = sumAB * sumAB - 4 * (prodAB - k);
-        // Round in the protocol's favour: the exact payout is (sumAB - sqrt(disc)) / 2;
-        // ceiling the root and flooring the halving can only pay less, so k never
-        // decreases on a sell (a floored root could pay 1 unit over the curve).
-        uint256 grossOut = (sumAB - Math.sqrt(disc, Math.Rounding.Ceil)) / 2;
-
-        uint256 fee = (grossOut * TRADE_FEE_BPS) / BPS;
-        collateralOut = grossOut - fee;
-        if (collateralOut < minCollateralOut) revert SlippageExceeded();
-
-        m.yesReserve = yesPostSell - grossOut;
-        m.noReserve = noPostSell - grossOut;
-        if (m.yesReserve == 0 || m.noReserve == 0) revert ReserveDepleted();
-
-        _recordSell(marketId, grossOut);
-        _chargeFee(marketId, m, fee);
-        if (collateralOut > 0) LEDGER.internalTransfer(msg.sender, collateralOut);
-        emit Sold(marketId, msg.sender, outcome, sharesIn, collateralOut, fee);
-    }
-
-    /// @dev A sell burns `out` (the gross curve amount) of each side, so C falls by
-    /// `out`. The seller's net cost falls by at most what it still has in: a
-    /// profit beyond it is not a negative cost.
-    function _recordSell(bytes32 marketId, uint256 out) internal {
-        collateralOf[marketId] -= out;
-        uint256 nc = netCost[marketId][msg.sender];
-        uint256 d = out < nc ? out : nc;
-        if (d > 0) {
-            netCost[marketId][msg.sender] = nc - d;
-            totalNetCost[marketId] -= d;
-        }
-    }
-
-    /// @dev Split one trading fee: creator 30% paid now; the builder's 50% (the
-    /// rounding remainder, so no unit is stranded) paid now into the fund and
-    /// credited to the market's builder for the current epoch; the agent's 20%
-    /// escrowed for the market until it settles. Emits FeesPaid on every trade.
-    function _chargeFee(bytes32 marketId, Market storage m, uint256 fee) internal {
-        uint256 creatorFee = (fee * CREATOR_SHARE_BPS) / BPS;
-        uint256 agentFee = (fee * AGENT_SHARE_BPS) / BPS;
-        uint256 builderFee = fee - creatorFee - agentFee;
-        if (agentFee > 0) agentEscrow[marketId] += agentFee; // stays in this contract's ledger balance
-        _pay(m.creator, creatorFee);
         if (builderFee > 0) {
             _pay(address(FUND), builderFee);
-            FUND.credit(m.builderId, builderFee);
+            FUND.credit(_builderIdOf[marketId], builderFee);
         }
         emit FeesPaid(marketId, creatorFee, builderFee, agentFee);
     }
 
-    function _pay(address to, uint256 amount) internal {
-        if (amount > 0) LEDGER.internalTransfer(to, amount);
-    }
-
-    // ───────────────────────── resolve / claim ─────────────────────────
-
-    function resolve(bytes32 marketId) external nonReentrant {
-        Market storage m = _markets[marketId];
-        if (m.createdAt == 0) revert MarketMissing();
-        if (m.phase != Phase.Trading) revert AlreadyResolved();
-        if (block.timestamp < m.expiry) revert MarketNotExpired();
-
-        (Settlement state, int256 value) = _settlement(ATTESTATION, m.feedId, m.agent, m.expiry);
-        if (state != Settlement.Resolvable) revert SettlementPending();
-
-        bool yesWon = _evaluate(value, m.threshold, m.comparator);
-        m.yesWon = yesWon;
-        m.phase = Phase.Resolved;
-
-        lpPotAtResolution[marketId] = yesWon ? m.yesReserve : m.noReserve;
-        emit Resolved(marketId, yesWon, value);
-
-        uint256 escrow = agentEscrow[marketId];
-        if (escrow > 0) {
-            agentEscrow[marketId] = 0;
-            LEDGER.internalTransfer(m.agent, escrow);
-        }
-        emit AgentFeeReleased(marketId, m.agent, escrow);
-    }
-
-    /// @notice Close a market that can no longer be settled. Anyone may call it.
-    /// @dev Nothing is charged. The agent's escrow goes to the challenger that got
-    /// the agent's reading ruled Invalid in the settlement window (else to the
-    /// SeasonPool, through the fund). Traders share traderPool = min(totalNetCost, C), each pro
-    /// rata to its net cost (so each gets its net cost back unless earlier
-    /// sellers took more profit than the LP seed); the LP gets C - traderPool.
-    /// Solvent by construction: the payouts sum to at most C, which the market
-    /// holds besides the escrow.
-    function voidMarket(bytes32 marketId) external nonReentrant {
-        Market storage m = _markets[marketId];
-        if (m.createdAt == 0) revert MarketMissing();
-        if (m.phase != Phase.Trading) revert AlreadyResolved();
-        (Settlement state,) = _settlement(ATTESTATION, m.feedId, m.agent, m.expiry);
-        if (state != Settlement.Voidable) revert NotVoidable();
-
-        m.phase = Phase.Voided;
-        uint256 c = collateralOf[marketId];
-        uint256 tnc = totalNetCost[marketId];
-        uint256 traderPool = tnc < c ? tnc : c;
-        voidTraderPool[marketId] = traderPool;
-        voidNetCostTotal[marketId] = tnc;
-        lpPotAtResolution[marketId] = c - traderPool;
-        emit MarketVoided(marketId);
-
-        uint256 escrow = agentEscrow[marketId];
-        agentEscrow[marketId] = 0;
-        address challenger = _challengerOf(ATTESTATION, m.feedId, m.agent, m.expiry);
+    function _voidEscrow(bytes32 marketId, uint256 escrow, address challenger) internal override {
         if (challenger != address(0)) {
             _pay(challenger, escrow);
             emit VoidFeesPaid(marketId, 0, 0, escrow, challenger);
         } else {
-            if (escrow > 0) {
-                _pay(address(FUND), escrow);
-                FUND.creditSeason(escrow);
-            }
+            _toSeasonPool(escrow);
             emit VoidFeesPaid(marketId, 0, escrow, 0, address(0));
         }
     }
 
-    function _evaluate(int256 value, int256 threshold, Comparator c) internal pure returns (bool) {
-        if (c == Comparator.GreaterThan) return value > threshold;
-        if (c == Comparator.GreaterOrEqual) return value >= threshold;
-        if (c == Comparator.LessThan) return value < threshold;
-        return value <= threshold;
+    function _sweepDust(uint256 amount) internal override {
+        _toSeasonPool(amount);
     }
 
-    function redeem(bytes32 marketId) external nonReentrant returns (uint256 payout) {
-        Market storage m = _markets[marketId];
-        if (m.createdAt == 0) revert MarketMissing();
-        if (m.phase == Phase.Trading) revert NotResolved();
-        payout = _redeemable(marketId, m, msg.sender);
-        yesBalance[marketId][msg.sender] = 0;
-        noBalance[marketId][msg.sender] = 0;
-        netCost[marketId][msg.sender] = 0;
-        if (payout == 0) revert InsufficientShares();
-        LEDGER.internalTransfer(msg.sender, payout);
-        emit Redeemed(marketId, msg.sender, payout);
+    function _toSeasonPool(uint256 amount) internal {
+        if (amount == 0) return;
+        _pay(address(FUND), amount);
+        FUND.creditSeason(amount);
     }
 
-    function claimLP(bytes32 marketId) external nonReentrant returns (uint256 payout) {
-        Market storage m = _markets[marketId];
-        if (m.createdAt == 0) revert MarketMissing();
-        if (m.phase == Phase.Trading) revert NotResolved();
-        uint256 myShares = lpShares[marketId][msg.sender];
-        if (myShares == 0) revert NoLPShares();
-        payout = (myShares * lpPotAtResolution[marketId]) / totalLpShares[marketId];
-        lpShares[marketId][msg.sender] = 0;
-        if (payout > 0) LEDGER.internalTransfer(msg.sender, payout);
-        emit LPClaimed(marketId, msg.sender, payout);
-    }
-
-    /// @dev Resolved: 1 per winning share. Voided: net cost
-    /// * voidTraderPool / voidNetCostTotal. Trading: 0.
-    function _redeemable(bytes32 marketId, Market storage m, address who) internal view returns (uint256) {
-        if (m.phase == Phase.Resolved) {
-            return m.yesWon ? yesBalance[marketId][who] : noBalance[marketId][who];
-        }
-        if (m.phase == Phase.Voided) {
-            uint256 total = voidNetCostTotal[marketId];
-            if (total == 0) return 0;
-            return (netCost[marketId][who] * voidTraderPool[marketId]) / total;
-        }
-        return 0;
-    }
-
-    /// @dev Refuse a market whose oracle the governor has not vetted: both the
-    /// agent that attests and the resolver that adjudicates disputes on its feed.
-    /// Without this, anyone could open a market on a feed where they are agent
-    /// AND resolver and settle it however they like. Checked at creation only:
-    /// the feed's resolver cannot change afterwards, and revoking an approval
-    /// must not strand markets already open (they settle or void as before).
-    function _requireApprovedOracle(bytes32 feedId, address agent) internal view {
+    /// @dev Perennial settles only on vetted agents, on top of the resolver rules.
+    function _requireApprovedOracle(bytes32 feedId, address agent) internal view override {
         if (!approvedAgent[agent]) revert AgentNotApproved();
-        address resolver = REGISTRY.getFeed(feedId).resolver;
-        if (!approvedResolver[resolver]) revert ResolverNotApproved();
-        // Both lists are vetted separately, so one address approved on both would
-        // otherwise pass on a feed it attests AND adjudicates: the self-resolved
-        // oracle this allowlist exists to refuse. The pairing is checked here, not
-        // only in the deploy script, because approvals change after deploy.
-        if (resolver == agent) revert SelfResolvedFeed();
+        super._requireApprovedOracle(feedId, agent);
     }
 
     // ──────────────────────────── governor ────────────────────────────
@@ -520,12 +163,6 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
         if (agent == address(0)) revert ZeroAddress();
         approvedAgent[agent] = approved;
         emit AgentApprovalSet(agent, approved);
-    }
-
-    function setApprovedResolver(address resolver, bool approved) external onlyRole(GOVERNOR_ROLE) {
-        if (resolver == address(0)) revert ZeroAddress();
-        approvedResolver[resolver] = approved;
-        emit ResolverApprovalSet(resolver, approved);
     }
 
     // ───────────────────────────── views ─────────────────────────────
@@ -540,35 +177,20 @@ contract MarketsPerennial is AccessControl, ReentrancyGuard, SettlementPolicy {
     }
 
     function getMarket(bytes32 marketId) external view returns (Market memory) {
-        return _markets[marketId];
-    }
-
-    /// @notice What `redeem` would pay `who` now (0 while trading).
-    function redeemable(bytes32 marketId, address who) external view returns (uint256) {
-        return _redeemable(marketId, _markets[marketId], who);
-    }
-
-    /// @notice What `claimLP` would pay `who` now (0 while trading).
-    function claimableLP(bytes32 marketId, address who) external view returns (uint256) {
-        if (_markets[marketId].phase == Phase.Trading) return 0;
-        uint256 total = totalLpShares[marketId];
-        if (total == 0) return 0;
-        return (lpShares[marketId][who] * lpPotAtResolution[marketId]) / total;
-    }
-
-    /// @notice Where a market stands in settlement, and the settling value once
-    /// it is resolvable. The keeper's single source of truth for what to do next.
-    function settlementState(bytes32 marketId) external view returns (Settlement state, int256 value) {
-        Market storage m = _markets[marketId];
-        if (m.createdAt == 0) revert MarketMissing();
-        return _settlement(ATTESTATION, m.feedId, m.agent, m.expiry);
-    }
-
-    function priceOf(bytes32 marketId, Outcome outcome) external view returns (uint256) {
-        Market memory m = _markets[marketId];
-        uint256 total = m.yesReserve + m.noReserve;
-        if (total == 0) return 0;
-        uint256 other = outcome == Outcome.Yes ? m.noReserve : m.yesReserve;
-        return (other * 1e18) / total;
+        Core storage c = _markets[marketId];
+        return Market({
+            feedId: c.feedId,
+            agent: c.agent,
+            threshold: c.threshold,
+            comparator: c.comparator,
+            expiry: c.expiry,
+            creator: c.creator,
+            builderId: _builderIdOf[marketId],
+            yesReserve: c.yesReserve,
+            noReserve: c.noReserve,
+            phase: c.phase,
+            yesWon: c.yesWon,
+            createdAt: c.createdAt
+        });
     }
 }

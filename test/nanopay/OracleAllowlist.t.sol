@@ -9,6 +9,7 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
+import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
@@ -87,13 +88,13 @@ contract OracleAllowlistTest is Test {
     function _createP() internal returns (bytes32) {
         vm.prank(creator);
         return perennial.createMarket(
-            1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6
+            1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6
         );
     }
 
     function _createV4() internal returns (bytes32) {
         vm.prank(creator);
-        return v4.createMarket(feedId, agent, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        return v4.createMarket(feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
     }
 
     // ── create is gated ──
@@ -103,7 +104,7 @@ contract OracleAllowlistTest is Test {
         v4.setApprovedResolver(resolver, true);
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.AgentNotApproved.selector);
-        perennial.createMarket(1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        perennial.createMarket(1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
         // V4 has no agent allowlist: any active registered agent on the feed
         assertTrue(v4.getMarket(_createV4()).createdAt != 0);
     }
@@ -112,19 +113,19 @@ contract OracleAllowlistTest is Test {
     function test_v4_unregisteredAgent_reverts() public {
         v4.setApprovedResolver(resolver, true);
         vm.prank(creator);
-        vm.expectRevert(MarketsV4.AgentNotRegistered.selector);
-        v4.createMarket(feedId, stranger, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        vm.expectRevert(BinaryMarket.AgentNotRegistered.selector);
+        v4.createMarket(feedId, stranger, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
         assertFalse(v4.isApprovedFeed(feedId, stranger), "not registered on the feed");
     }
 
     function test_unapprovedResolver_reverts() public {
         perennial.setApprovedAgent(agent, true);
         vm.prank(creator);
-        vm.expectRevert(MarketsPerennial.ResolverNotApproved.selector);
-        perennial.createMarket(1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        vm.expectRevert(BinaryMarket.ResolverNotApproved.selector);
+        perennial.createMarket(1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
         vm.prank(creator);
-        vm.expectRevert(MarketsV4.ResolverNotApproved.selector);
-        v4.createMarket(feedId, agent, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        vm.expectRevert(BinaryMarket.ResolverNotApproved.selector);
+        v4.createMarket(feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
     }
 
     function test_approvedOracle_creates() public {
@@ -147,11 +148,11 @@ contract OracleAllowlistTest is Test {
         assertFalse(perennial.isApprovedFeed(selfFeed, agent));
         assertFalse(v4.isApprovedFeed(selfFeed, agent));
         vm.prank(creator);
-        vm.expectRevert(MarketsPerennial.SelfResolvedFeed.selector);
-        perennial.createMarket(1, selfFeed, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        vm.expectRevert(BinaryMarket.SelfResolvedFeed.selector);
+        perennial.createMarket(1, selfFeed, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
         vm.prank(creator);
-        vm.expectRevert(MarketsV4.SelfResolvedFeed.selector);
-        v4.createMarket(selfFeed, agent, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        vm.expectRevert(BinaryMarket.SelfResolvedFeed.selector);
+        v4.createMarket(selfFeed, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
     }
 
     // ── isApprovedFeed ──
@@ -193,14 +194,14 @@ contract OracleAllowlistTest is Test {
         vm.expectEmit(true, false, false, true, address(v4));
         emit ResolverApprovalSet(resolver, true);
         v4.setApprovedResolver(resolver, true);
-        vm.expectRevert(MarketsPerennial.ZeroAddress.selector);
+        vm.expectRevert(BinaryMarket.ZeroAddress.selector);
         perennial.setApprovedAgent(address(0), true);
-        vm.expectRevert(MarketsV4.ZeroAddress.selector);
+        vm.expectRevert(BinaryMarket.ZeroAddress.selector);
         v4.setApprovedResolver(address(0), true);
     }
 
     function test_v4_constructorRejectsZeroAdmin() public {
-        vm.expectRevert(MarketsV4.ZeroAddress.selector);
+        vm.expectRevert(BinaryMarket.ZeroAddress.selector);
         new MarketsV4(ledger, registry, attestation, address(0), address(0x7EA), WINDOW, GRACE);
     }
 
@@ -232,10 +233,10 @@ contract OracleAllowlistTest is Test {
         uint256 later = vm.getBlockTimestamp() + 2 hours;
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.AgentNotApproved.selector);
-        perennial.createMarket(1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, later, 100e6);
+        perennial.createMarket(1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, later, 100e6);
         vm.prank(creator);
-        vm.expectRevert(MarketsV4.ResolverNotApproved.selector);
-        v4.createMarket(feedId, agent, 1, MarketsV4.Comparator.GreaterOrEqual, later, 100e6);
+        vm.expectRevert(BinaryMarket.ResolverNotApproved.selector);
+        v4.createMarket(feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, later, 100e6);
     }
 
     function test_revoke_existingMarketsStillVoid() public {

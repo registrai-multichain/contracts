@@ -8,6 +8,7 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
+import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 
 /// MarketsV4 lifecycle on NanoLedger: create/buy/sell settle as internal
 /// accounting with a 1% trading fee per trade (creator 30 and treasury 50 paid
@@ -70,7 +71,7 @@ contract MarketsV4Test is Test {
 
     function _market() internal returns (bytes32 id) {
         vm.prank(creator);
-        id = markets.createMarket(feedId, oracle, int256(100_000), MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
+        id = markets.createMarket(feedId, oracle, int256(100_000), BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 1_000e6);
     }
 
     // ───────────── create ─────────────
@@ -89,8 +90,8 @@ contract MarketsV4Test is Test {
 
     function test_createMarket_agentNotActiveReverts() public {
         vm.prank(creator);
-        vm.expectRevert(MarketsV4.AgentNotRegistered.selector);
-        markets.createMarket(bytes32("nope"), oracle, 0, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 1 hours, 1_000e6);
+        vm.expectRevert(BinaryMarket.AgentNotRegistered.selector);
+        markets.createMarket(bytes32("nope"), oracle, 0, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 1 hours, 1_000e6);
     }
 
     // ───────────── buy: 1% trading fee ─────────────
@@ -100,7 +101,7 @@ contract MarketsV4Test is Test {
         uint256 takerBefore = ledger.balanceOf(taker);
 
         vm.prank(taker);
-        uint256 shares = markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, 0);
+        uint256 shares = markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max);
         assertGt(shares, 0);
         assertEq(ledger.balanceOf(taker), takerBefore - 1_000e6, "collateral debited from ledger balance");
         // fee 10: creator 3 and treasury 5 paid now, the agent's 2 escrowed
@@ -116,8 +117,8 @@ contract MarketsV4Test is Test {
     function test_buy_slippageReverts() public {
         bytes32 id = _market();
         vm.prank(taker);
-        vm.expectRevert(MarketsV4.SlippageExceeded.selector);
-        markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, type(uint256).max);
+        vm.expectRevert(BinaryMarket.SlippageExceeded.selector);
+        markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, type(uint256).max, type(uint256).max);
     }
 
     /// Creator and treasury are paid per trade, straight to ledger balances
@@ -126,7 +127,7 @@ contract MarketsV4Test is Test {
         bytes32 id = _market();
         uint256 creatorBefore = ledger.balanceOf(creator);
         vm.prank(taker);
-        markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, 0); // fee 10
+        markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max); // fee 10
         assertEq(ledger.balanceOf(creator) - creatorBefore, 3e6, "creator 30% of 10");
         assertEq(ledger.balanceOf(treasury), 5e6, "treasury 50% of 10");
         vm.warp(block.timestamp + 2 hours + 1);
@@ -144,11 +145,11 @@ contract MarketsV4Test is Test {
     function test_sell_paysToLedgerBalance() public {
         bytes32 id = _market();
         vm.prank(taker);
-        uint256 shares = markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, 0);
+        uint256 shares = markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max);
 
         uint256 takerBefore = ledger.balanceOf(taker);
         vm.prank(taker);
-        uint256 out = markets.sell(id, MarketsV4.Outcome.Yes, shares, 0);
+        uint256 out = markets.sell(id, BinaryMarket.Outcome.Yes, shares, 0, type(uint256).max);
         assertGt(out, 0);
         assertEq(ledger.balanceOf(taker), takerBefore + out, "proceeds credited to ledger balance");
         assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id) + markets.agentEscrow(id));
@@ -164,7 +165,7 @@ contract MarketsV4Test is Test {
     function test_resolve_redeem_claimLP_endToEnd() public {
         bytes32 id = _market();
         vm.prank(taker);
-        uint256 shares = markets.buy(id, MarketsV4.Outcome.Yes, 2_000e6, 0);
+        uint256 shares = markets.buy(id, BinaryMarket.Outcome.Yes, 2_000e6, 0, type(uint256).max);
 
         // trading closes at expiry; then the oracle attests a value that makes
         // YES win (>= 100_000), and the dispute window runs out
@@ -173,7 +174,7 @@ contract MarketsV4Test is Test {
         attestation.attest(feedId, int256(123_456), bytes32("ih"));
         vm.warp(block.timestamp + DW);
         markets.resolve(id);
-        assertTrue(markets.getMarket(id).phase == MarketsV4.Phase.Resolved);
+        assertTrue(markets.getMarket(id).phase == BinaryMarket.Phase.Resolved);
         assertTrue(markets.getMarket(id).yesWon);
 
         // winner redeems to ledger balance
@@ -193,9 +194,9 @@ contract MarketsV4Test is Test {
     function test_redeem_beforeResolveReverts() public {
         bytes32 id = _market();
         vm.prank(taker);
-        markets.buy(id, MarketsV4.Outcome.Yes, 1_000e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, 1_000e6, 0, type(uint256).max);
         vm.prank(taker);
-        vm.expectRevert(MarketsV4.NotResolved.selector);
+        vm.expectRevert(BinaryMarket.NotResolved.selector);
         markets.redeem(id);
     }
 
@@ -204,9 +205,9 @@ contract MarketsV4Test is Test {
     function test_solvency_afterMixedActivity() public {
         bytes32 id = _market();
         vm.prank(taker);
-        markets.buy(id, MarketsV4.Outcome.Yes, 3_000e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.Yes, 3_000e6, 0, type(uint256).max);
         vm.prank(creator);
-        markets.buy(id, MarketsV4.Outcome.No, 1_500e6, 0);
+        markets.buy(id, BinaryMarket.Outcome.No, 1_500e6, 0, type(uint256).max);
         assertEq(ledger.balanceOf(address(markets)), markets.collateralOf(id) + markets.agentEscrow(id));
         assertEq(markets.collateralOf(id), 5_455e6, "1000 + 2970 + 1485");
         assertEq(markets.totalNetCost(id), 4_455e6);

@@ -9,6 +9,7 @@ import {Attestation} from "../../src/Attestation.sol";
 import {Dispute} from "../../src/Dispute.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {MarketsPerennial} from "../../src/nanopay/MarketsPerennial.sol";
+import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
@@ -87,11 +88,11 @@ contract SellRoundingTest is Test {
         sellFrac = bound(sellFrac, 1, 1e18);
         vm.prank(trader);
         bytes32 id = perennial.createMarket(
-            1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 1 days, liq
+            1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 1 days, liq
         );
-        MarketsPerennial.Outcome o = yes ? MarketsPerennial.Outcome.Yes : MarketsPerennial.Outcome.No;
+        BinaryMarket.Outcome o = yes ? BinaryMarket.Outcome.Yes : BinaryMarket.Outcome.No;
         vm.prank(trader);
-        try perennial.buy(id, o, buyIn, 0) returns (uint256 shares) {
+        try perennial.buy(id, o, buyIn, 0, type(uint256).max) returns (uint256 shares) {
             uint256 sellShares = (shares * sellFrac) / 1e18;
             if (sellShares == 0) sellShares = 1;
             MarketsPerennial.Market memory m0 = perennial.getMarket(id);
@@ -99,7 +100,7 @@ contract SellRoundingTest is Test {
             uint256 a = m0.yesReserve + (yes ? sellShares : 0);
             uint256 b = m0.noReserve + (yes ? 0 : sellShares);
             vm.prank(trader);
-            try perennial.sell(id, o, sellShares, 0) {
+            try perennial.sell(id, o, sellShares, 0, type(uint256).max) {
                 MarketsPerennial.Market memory m1 = perennial.getMarket(id);
                 assertGe(m1.yesReserve * m1.noReserve, k, "k decreased on sell");
                 assertGt(m1.yesReserve, 0);
@@ -114,10 +115,10 @@ contract SellRoundingTest is Test {
         buyIn = bound(buyIn, 1, 1e13);
         sellFrac = bound(sellFrac, 1, 1e18);
         vm.prank(trader);
-        bytes32 id = v4.createMarket(feedId, agent, 1, MarketsV4.Comparator.GreaterOrEqual, block.timestamp + 1 days, liq);
-        MarketsV4.Outcome o = yes ? MarketsV4.Outcome.Yes : MarketsV4.Outcome.No;
+        bytes32 id = v4.createMarket(feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 1 days, liq);
+        BinaryMarket.Outcome o = yes ? BinaryMarket.Outcome.Yes : BinaryMarket.Outcome.No;
         vm.prank(trader);
-        try v4.buy(id, o, buyIn, 0) returns (uint256 shares) {
+        try v4.buy(id, o, buyIn, 0, type(uint256).max) returns (uint256 shares) {
             uint256 sellShares = (shares * sellFrac) / 1e18;
             if (sellShares == 0) sellShares = 1;
             MarketsV4.Market memory m0 = v4.getMarket(id);
@@ -125,7 +126,7 @@ contract SellRoundingTest is Test {
             uint256 a = m0.yesReserve + (yes ? sellShares : 0);
             uint256 b = m0.noReserve + (yes ? 0 : sellShares);
             vm.prank(trader);
-            try v4.sell(id, o, sellShares, 0) {
+            try v4.sell(id, o, sellShares, 0, type(uint256).max) {
                 MarketsV4.Market memory m1 = v4.getMarket(id);
                 assertGe(m1.yesReserve * m1.noReserve, k, "k decreased on sell");
                 assertGt(m1.yesReserve, 0);
@@ -139,23 +140,23 @@ contract SellRoundingTest is Test {
     function testFuzz_perennial_kMonotoneAcrossSells(uint256 seed) public {
         vm.prank(trader);
         bytes32 id = perennial.createMarket(
-            1, feedId, agent, 1, MarketsPerennial.Comparator.GreaterOrEqual, block.timestamp + 1 days, 7e6
+            1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 1 days, 7e6
         );
         for (uint256 i; i < 25; i++) {
             uint256 r = uint256(keccak256(abi.encode(seed, i)));
-            MarketsPerennial.Outcome o = r & 1 == 0 ? MarketsPerennial.Outcome.Yes : MarketsPerennial.Outcome.No;
+            BinaryMarket.Outcome o = r & 1 == 0 ? BinaryMarket.Outcome.Yes : BinaryMarket.Outcome.No;
             MarketsPerennial.Market memory m0 = perennial.getMarket(id);
             uint256 k = m0.yesReserve * m0.noReserve;
             if ((r >> 1) % 2 == 0) {
-                uint256 bal = o == MarketsPerennial.Outcome.Yes
+                uint256 bal = o == BinaryMarket.Outcome.Yes
                     ? perennial.yesBalance(id, trader)
                     : perennial.noBalance(id, trader);
                 if (bal == 0) continue;
                 vm.prank(trader);
-                try perennial.sell(id, o, bound(r >> 8, 1, bal), 0) {} catch {}
+                try perennial.sell(id, o, bound(r >> 8, 1, bal), 0, type(uint256).max) {} catch {}
             } else {
                 vm.prank(trader);
-                try perennial.buy(id, o, bound(r >> 8, 1, 50e6), 0) {} catch {}
+                try perennial.buy(id, o, bound(r >> 8, 1, 50e6), 0, type(uint256).max) {} catch {}
             }
             MarketsPerennial.Market memory m1 = perennial.getMarket(id);
             assertGe(m1.yesReserve * m1.noReserve, k, "k decreased");

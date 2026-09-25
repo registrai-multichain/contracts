@@ -7,6 +7,7 @@ import {Registry} from "../src/Registry.sol";
 import {Attestation} from "../src/Attestation.sol";
 import {NanoLedger} from "../src/nanopay/NanoLedger.sol";
 import {MarketsV4} from "../src/nanopay/MarketsV4.sol";
+import {BinaryMarket} from "../src/nanopay/BinaryMarket.sol";
 
 /// @notice Stands up one live MarketsV4 market end-to-end on the nanopay stack:
 ///         a bonded feed (deployer = agent), an attestation, a ledger deposit,
@@ -41,12 +42,12 @@ contract DemoMarket is Script {
 
         // 4. Create a market: BTC/USD >= 100000, 7-day expiry, 10 USDC liquidity.
         bytes32 marketId = mkt.createMarket(
-            feedId, me, int256(100_000), MarketsV4.Comparator.GreaterOrEqual,
+            feedId, me, int256(100_000), BinaryMarket.Comparator.GreaterOrEqual,
             block.timestamp + 7 days, 10e6
         );
 
         // 5. Demo buy (pays the 1% trading fee: creator/treasury now, agent escrowed).
-        mkt.buy(marketId, MarketsV4.Outcome.Yes, 5e6, 0);
+        mkt.buy(marketId, BinaryMarket.Outcome.Yes, 5e6, 0, type(uint256).max);
 
         vm.stopBroadcast();
 
