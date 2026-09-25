@@ -53,6 +53,7 @@ contract SellRoundingTest is Test {
         perennial.setApprovedAgent(agent, true);
         perennial.setApprovedResolver(resolver, true);
         v4.setApprovedResolver(resolver, true);
+        v4.setApprovedAgent(agent, true);
 
         usdc.mint(agent, 1_000e6);
         vm.startPrank(agent);

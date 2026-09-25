@@ -47,6 +47,7 @@ contract MarketsV4SettlementTest is Test {
         ledger = new NanoLedger(usdc, address(this));
         markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, WINDOW, GRACE);
         markets.setApprovedResolver(resolver, true);
+        markets.setApprovedAgent(oracle, true);
 
         usdc.mint(oracle, 10_000e6);
         vm.startPrank(oracle);

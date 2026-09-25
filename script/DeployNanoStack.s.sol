@@ -11,8 +11,9 @@ import {MarketsV4} from "../src/nanopay/MarketsV4.sol";
 
 /// @notice Phase 2, step 4 of the mainnet order. Deploys MarketsV4 (common markets
 ///         settled on the ledger). Fees are fixed in code (1% of every trade,
-///         30 creator / 20 agent, escrowed until settlement / 50 TREASURY); agents are permissionless, so
-///         the only oracle input is the approved dispute resolver. MarketsV4
+///         30 creator / 20 agent, escrowed until settlement / 50 TREASURY). Like
+///         MarketsPerennial it settles only on governor-approved agents (our own
+///         agent at launch; third parties later by forking it) and resolvers. MarketsV4
 ///         needs no ledger role. The deployer holds MarketsV4's admin/governor
 ///         until Handoff.s.sol.
 ///
@@ -28,6 +29,9 @@ import {MarketsV4} from "../src/nanopay/MarketsV4.sol";
 ///      RESOLUTION_GRACE        MAINNET [7d]
 ///      DISPUTE_RESOLVER        MAINNET [deployer] resolver feeds must name;
 ///                              never the deployer on mainnet
+///      APPROVED_AGENT          MAINNET [deployer] the bonded agent markets may
+///                              settle on (Registrai's own); never the deployer
+///                              or the resolver on mainnet
 contract DeployNanoStack is DeployBase {
     struct Config {
         address deployer;
@@ -39,6 +43,7 @@ contract DeployNanoStack is DeployBase {
         uint256 settlementWindow;
         uint256 resolutionGrace;
         address disputeResolver;
+        address approvedAgent;
     }
 
     function run() external returns (NanoLedger ledger, MarketsV4 markets) {
@@ -50,6 +55,7 @@ contract DeployNanoStack is DeployBase {
         console2.log("  settlementWindow:", c.settlementWindow);
         console2.log("  resolutionGrace:", c.resolutionGrace);
         console2.log("  disputeResolver:", c.disputeResolver);
+        console2.log("  approvedAgent:", c.approvedAgent);
     }
 
     function load(address deployer) public view returns (Config memory c) {
@@ -63,6 +69,7 @@ contract DeployNanoStack is DeployBase {
         c.settlementWindow = _uintReq("SETTLEMENT_WINDOW", 24 hours);
         c.resolutionGrace = _uintReq("RESOLUTION_GRACE", 7 days);
         c.disputeResolver = _addrReq("DISPUTE_RESOLVER", deployer);
+        c.approvedAgent = _addrReq("APPROVED_AGENT", deployer);
     }
 
     function deploy(Config memory c) public returns (NanoLedger ledger, MarketsV4 markets) {
@@ -70,10 +77,13 @@ contract DeployNanoStack is DeployBase {
         require(c.deployer != address(0), "deployer not set");
         require(c.registry != address(0) && c.attestation != address(0), "registry/attestation not set");
         require(c.treasury != address(0) && c.disputeResolver != address(0), "treasury/resolver not set");
+        require(c.approvedAgent != address(0), "agent not set");
         if (_isMainnet()) {
             require(c.ledger != address(0), "mainnet: NANO_LEDGER must be the shared ledger");
             require(c.treasury != c.deployer, "mainnet: TREASURY must not be the deployer");
             require(c.disputeResolver != c.deployer, "mainnet: DISPUTE_RESOLVER must not be the deployer");
+            require(c.approvedAgent != c.deployer, "mainnet: APPROVED_AGENT must not be the deployer");
+            require(c.disputeResolver != c.approvedAgent, "mainnet: agent must not resolve its own disputes");
         }
 
         vm.startBroadcast(c.deployer);
@@ -88,6 +98,7 @@ contract DeployNanoStack is DeployBase {
             c.resolutionGrace
         );
         markets.setApprovedResolver(c.disputeResolver, true);
+        markets.setApprovedAgent(c.approvedAgent, true);
         vm.stopBroadcast();
     }
 }

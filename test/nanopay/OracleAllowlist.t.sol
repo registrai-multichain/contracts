@@ -85,6 +85,7 @@ contract OracleAllowlistTest is Test {
     function _approveBoth(bool on) internal {
         perennial.setApprovedAgent(agent, on);
         perennial.setApprovedResolver(resolver, on);
+        v4.setApprovedAgent(agent, on);
         v4.setApprovedResolver(resolver, on);
     }
 
@@ -102,14 +103,22 @@ contract OracleAllowlistTest is Test {
 
     // ── create is gated ──
 
-    function test_unapprovedAgent_revertsOnPerennial_butV4IsPermissionless() public {
+    /// Both markets settle only on vetted agents. A permissionless agent could
+    /// skip its reading on a market it trades and have it void (net-cost
+    /// refunds): a free option against every other trader.
+    function test_unapprovedAgent_revertsOnBoth() public {
         perennial.setApprovedResolver(resolver, true);
         v4.setApprovedResolver(resolver, true);
         vm.prank(creator);
         vm.expectRevert(MarketsPerennial.AgentNotApproved.selector);
         perennial.createMarket(1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
-        // V4 has no agent allowlist: any active registered agent on the feed
-        assertTrue(v4.getMarket(_createV4()).createdAt != 0);
+        vm.prank(creator);
+        vm.expectRevert(MarketsV4.AgentNotApproved.selector);
+        v4.createMarket(feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        assertFalse(v4.isApprovedFeed(feedId, agent), "registered + approved resolver is not enough");
+        v4.setApprovedAgent(agent, true);
+        assertTrue(v4.isApprovedFeed(feedId, agent));
+        assertTrue(v4.getMarket(_createV4()).createdAt != 0, "the governor's approval opens it");
     }
 
     /// V4 still refuses an agent that is not registered and active on the feed.
@@ -123,6 +132,7 @@ contract OracleAllowlistTest is Test {
 
     function test_unapprovedResolver_reverts() public {
         perennial.setApprovedAgent(agent, true);
+        v4.setApprovedAgent(agent, true);
         vm.prank(creator);
         vm.expectRevert(BinaryMarket.ResolverNotApproved.selector);
         perennial.createMarket(1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
@@ -146,6 +156,7 @@ contract OracleAllowlistTest is Test {
         vm.stopPrank();
         perennial.setApprovedAgent(agent, true);
         perennial.setApprovedResolver(agent, true);
+        v4.setApprovedAgent(agent, true);
         v4.setApprovedResolver(agent, true);
 
         assertFalse(perennial.isApprovedFeed(selfFeed, agent));
@@ -164,6 +175,7 @@ contract OracleAllowlistTest is Test {
         assertFalse(perennial.isApprovedFeed(feedId, agent));
         assertFalse(v4.isApprovedFeed(feedId, agent));
         perennial.setApprovedAgent(agent, true);
+        v4.setApprovedAgent(agent, true);
         assertFalse(perennial.isApprovedFeed(feedId, agent), "resolver still unapproved");
         assertFalse(v4.isApprovedFeed(feedId, agent), "resolver still unapproved");
         perennial.setApprovedResolver(resolver, true);
@@ -187,6 +199,8 @@ contract OracleAllowlistTest is Test {
         perennial.setApprovedResolver(resolver, true);
         vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, role));
         v4.setApprovedResolver(resolver, true);
+        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, stranger, role));
+        v4.setApprovedAgent(agent, true);
         vm.stopPrank();
     }
 
@@ -197,6 +211,11 @@ contract OracleAllowlistTest is Test {
         vm.expectEmit(true, false, false, true, address(v4));
         emit ResolverApprovalSet(resolver, true);
         v4.setApprovedResolver(resolver, true);
+        vm.expectEmit(true, false, false, true, address(v4));
+        emit AgentApprovalSet(agent, true);
+        v4.setApprovedAgent(agent, true);
+        vm.expectRevert(BinaryMarket.ZeroAddress.selector);
+        v4.setApprovedAgent(address(0), true);
         vm.expectRevert(BinaryMarket.ZeroAddress.selector);
         perennial.setApprovedAgent(address(0), true);
         vm.expectRevert(BinaryMarket.ZeroAddress.selector);
@@ -208,11 +227,20 @@ contract OracleAllowlistTest is Test {
         new MarketsV4(ledger, registry, attestation, address(0), address(0x7EA), WINDOW, GRACE);
     }
 
-    function test_v4_hasNoAgentAllowlist() public {
-        (bool ok,) = address(v4).call(abi.encodeWithSignature("setApprovedAgent(address,bool)", agent, true));
-        assertFalse(ok, "setApprovedAgent removed from V4");
-        (ok,) = address(v4).call(abi.encodeWithSignature("approvedAgent(address)", agent));
-        assertFalse(ok, "approvedAgent removed from V4");
+    /// Revoking an agent blocks NEW V4 markets only: open ones still settle.
+    function test_v4_revokedAgent_blocksNewMarkets_openOnesSettle() public {
+        _approveBoth(true);
+        bytes32 id = _createV4();
+        v4.setApprovedAgent(agent, false);
+        vm.prank(creator);
+        vm.expectRevert(MarketsV4.AgentNotApproved.selector);
+        v4.createMarket(feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, block.timestamp + 2 hours, 100e6);
+        vm.warp(v4.getMarket(id).expiry + 1);
+        vm.prank(agent);
+        attestation.attest(feedId, 1, bytes32("v"));
+        vm.warp(block.timestamp + DW);
+        v4.resolve(id);
+        assertEq(uint8(v4.getMarket(id).phase), uint8(BinaryMarket.Phase.Resolved));
     }
 
     // ── revoking never strands an open market ──
@@ -238,7 +266,7 @@ contract OracleAllowlistTest is Test {
         vm.expectRevert(MarketsPerennial.AgentNotApproved.selector);
         perennial.createMarket(1, feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, later, 100e6);
         vm.prank(creator);
-        vm.expectRevert(BinaryMarket.ResolverNotApproved.selector);
+        vm.expectRevert(MarketsV4.AgentNotApproved.selector); // V4 now vets agents too; checked first
         v4.createMarket(feedId, agent, 1, BinaryMarket.Comparator.GreaterOrEqual, later, 100e6);
     }
 

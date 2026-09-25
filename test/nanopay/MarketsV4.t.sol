@@ -42,6 +42,7 @@ contract MarketsV4Test is Test {
         ledger = new NanoLedger(usdc, address(this));
         markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, 1 hours, 1 days);
         markets.setApprovedResolver(resolver, true);
+        markets.setApprovedAgent(oracle, true);
         // no ledger role: V4 creates no fee pools
 
         // bonded agent + feed (creator == agent in v2)

@@ -113,6 +113,7 @@ contract FeeModelTest is Test {
         perennial.setApprovedAgent(agent, true);
         perennial.setApprovedResolver(resolver, true);
         v4.setApprovedResolver(resolver, true);
+        v4.setApprovedAgent(agent, true); // common markets settle on vetted agents only
 
         usdc.mint(agent, 10_000e6);
         vm.startPrank(agent);
@@ -557,9 +558,11 @@ contract FeeModelTest is Test {
         assertEq(dispute.invalidatedBy(attestation.historyAt(feedId, agent, 0)), address(0), "never challenged");
     }
 
-    // ───────────────────────── V4: permissionless agents ─────────────────────────
+    // ───────────────────────── V4: vetted agents ─────────────────────────
 
-    function test_v4_userAgent_createsSettlesAndEarns() public {
+    /// A user's agent registers on its own feed (Registry stays permissionless),
+    /// but a common market settles on it only once the governor approves it.
+    function test_v4_userAgent_needsApproval_thenSettlesAndEarns() public {
         address userAgent = address(0x05E7);
         usdc.mint(userAgent, 1_000e6);
         vm.startPrank(userAgent);
@@ -567,7 +570,12 @@ contract FeeModelTest is Test {
         bytes32 f = registry.createFeed("user feed", keccak256("u"), 10e6, DW, resolver);
         registry.registerAgent(f, keccak256("u"), 100e6);
         vm.stopPrank();
-        assertTrue(v4.isApprovedFeed(f, userAgent), "any active agent on an approved-resolver feed");
+        assertFalse(v4.isApprovedFeed(f, userAgent), "registered but not approved");
+        vm.prank(creator);
+        vm.expectRevert(MarketsV4.AgentNotApproved.selector);
+        v4.createMarket(f, userAgent, 1, BinaryMarket.Comparator.GreaterOrEqual, vm.getBlockTimestamp() + LIFE, 100e6);
+        v4.setApprovedAgent(userAgent, true);
+        assertTrue(v4.isApprovedFeed(f, userAgent));
 
         vm.prank(creator);
         bytes32 id = v4.createMarket(f, userAgent, 1, BinaryMarket.Comparator.GreaterOrEqual, vm.getBlockTimestamp() + LIFE, 100e6);
@@ -594,6 +602,7 @@ contract FeeModelTest is Test {
         registry.registerAgent(f, keccak256("u"), 100e6);
         vm.stopPrank();
         v4.setApprovedResolver(userAgent, true);
+        v4.setApprovedAgent(userAgent, true);
         assertFalse(v4.isApprovedFeed(f, userAgent));
         vm.prank(creator);
         vm.expectRevert(BinaryMarket.SelfResolvedFeed.selector);
@@ -608,6 +617,7 @@ contract FeeModelTest is Test {
         bytes32 f = registry.createFeed("friendly resolver", keccak256("u"), 10e6, DW, address(0xF12E));
         registry.registerAgent(f, keccak256("u"), 100e6);
         vm.stopPrank();
+        v4.setApprovedAgent(userAgent, true);
         assertFalse(v4.isApprovedFeed(f, userAgent));
         vm.prank(creator);
         vm.expectRevert(BinaryMarket.ResolverNotApproved.selector);

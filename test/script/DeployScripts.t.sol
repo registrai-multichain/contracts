@@ -142,6 +142,7 @@ contract DeployScriptsTest is Test {
         c.settlementWindow = 24 hours;
         c.resolutionGrace = 7 days;
         c.disputeResolver = disputeResolver;
+        c.approvedAgent = agent;
     }
 
     function _stack() internal view returns (RoleTable.Stack memory s) {
@@ -212,6 +213,7 @@ contract DeployScriptsTest is Test {
         assertEq(fund.progressiveTax(60_000e6, fund.scheduleFor(0)), 11_900e6);
         assertEq(v4.TREASURY(), treasury);
         assertTrue(perennial.approvedAgent(agent));
+        assertTrue(v4.approvedAgent(agent), "V4 settles on the same vetted agent");
         assertTrue(perennial.approvedResolver(disputeResolver));
         assertTrue(v4.approvedResolver(disputeResolver));
         assertTrue(perennial.isApprovedFeed(bytes32(0), agent) == false);

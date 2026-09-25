@@ -17,10 +17,11 @@ import {BinaryMarket} from "./BinaryMarket.sol";
 ///         market settles. On void the escrow goes to the successful challenger,
 ///         else to the treasury, as does a settled market's rounding dust.
 ///
-///         Agents are permissionless: any agent registered and active on the
-///         feed may settle a market. Governance (GOVERNOR_ROLE) is limited to
-///         the allowlist of dispute resolvers a market's feed may name, and a
-///         feed whose agent is its own resolver is always refused.
+///         Oracle vetting: only governor-approved agents may settle (as on
+///         MarketsPerennial). A permissionless agent could skip its reading on a
+///         market it trades and have it void (net-cost refunds): a free option.
+///         The feed must also name a governor-approved resolver that is not the
+///         agent.
 contract MarketsV4 is BinaryMarket {
     /// @notice The treasury leg of each trading fee (the rounding remainder).
     uint256 public constant TREASURY_SHARE_BPS = 5000;
@@ -42,11 +43,17 @@ contract MarketsV4 is BinaryMarket {
         uint256 createdAt;
     }
 
+    /// @notice Governor allowlist of bonded agents a market may settle on.
+    mapping(address => bool) public approvedAgent;
+
+    event AgentApprovalSet(address indexed agent, bool approved);
     event MarketCreated(bytes32 indexed marketId, address indexed creator, bytes32 indexed feedId, address agent, int256 threshold, Comparator comparator, uint256 expiry, uint256 liquidity);
     event FeesPaid(bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 agentFee);
     event VoidFeesPaid(
         bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 challengerReward, address challenger
     );
+
+    error AgentNotApproved();
 
     constructor(
         NanoLedger ledger_,
@@ -97,15 +104,29 @@ contract MarketsV4 is BinaryMarket {
         _pay(TREASURY, amount);
     }
 
+    /// @dev Common markets settle only on vetted agents, on top of the resolver rules.
+    function _requireApprovedOracle(bytes32 feedId, address agent) internal view override {
+        if (!approvedAgent[agent]) revert AgentNotApproved();
+        super._requireApprovedOracle(feedId, agent);
+    }
+
+    // ──────────────────────────── governor ────────────────────────────
+
+    function setApprovedAgent(address agent, bool approved) external onlyRole(GOVERNOR_ROLE) {
+        if (agent == address(0)) revert ZeroAddress();
+        approvedAgent[agent] = approved;
+        emit AgentApprovalSet(agent, approved);
+    }
+
     // ───────────────────────────── views ─────────────────────────────
 
     /// @notice True when a market on `feedId` settled by `agent` passes the oracle
-    /// rules: the feed exists, the agent is registered and active on it, the
-    /// feed's resolver is approved, and the agent is not its own resolver.
+    /// rules: the feed exists, the agent is approved and active on it, the feed's
+    /// resolver is approved, and the agent is not its own resolver.
     /// (createMarket additionally needs a settleable dispute window.)
     function isApprovedFeed(bytes32 feedId, address agent) external view returns (bool) {
         Registry.Feed memory f = REGISTRY.getFeed(feedId);
-        return f.exists && REGISTRY.isActiveAgent(feedId, agent) && approvedResolver[f.resolver]
+        return f.exists && approvedAgent[agent] && REGISTRY.isActiveAgent(feedId, agent) && approvedResolver[f.resolver]
             && f.resolver != agent;
     }
 
