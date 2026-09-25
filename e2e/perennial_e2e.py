@@ -68,7 +68,8 @@ KEYS = {  # anvil's well-known dev keys — worthless anywhere but a local anvil
 }
 # more dev accounts from anvil's public test mnemonic
 EXTRA = (("builder2", 10), ("watcher", 11), ("vbuilder", 12), ("vdeployer", 13), ("stranger", 14), ("onboarder", 15),
-         ("whale", 16), ("vpayout", 17), ("vowner2", 18), ("vrecovered", 19), ("rounds", 20))
+         ("whale", 16), ("vpayout", 17), ("vowner2", 18), ("vrecovered", 19), ("rounds", 20),
+         ("session", 21))
 FEED_WINDOW = 3600          # the caretaker's default feed challenge window
 SETTLEMENT_WINDOW = 3600
 RESOLUTION_GRACE = 86400
@@ -1194,6 +1195,17 @@ def rounds_stage(c, A, S, led):
           f"before betting closes: alice buys UP, bob buys DOWN at the quotes, alice sells half her UP at "
           f"{int(q_sell)/U:.4f} = quoteSell (pre-settlement exit through the AMM)")
     c.send("bob", V4, "buy(bytes32,uint8,uint256,uint256,uint256)", r1["eth-usd"], 0, 5 * U, 0, 2**256 - 1)
+
+    # one-click betting: alice grants a session key once; it bets FOR her with no signature of hers
+    c.send("alice", V4, "setSession(address,uint128,uint64)", A["session"], 3 * U, c.now() + 86400, "--value", "0.1ether")
+    no_before, led_before = c.uint(V4, "noBalance(bytes32,address)(uint256)", mid, A["alice"]), led(A["alice"])
+    c.send("session", V4, "buyFor(address,bytes32,uint8,uint256,uint256,uint256)", A["alice"], mid, 1, 2 * U, 0, 2**256 - 1)
+    over = c.fails_with("session", V4, "buyFor(address,bytes32,uint8,uint256,uint256,uint256)", A["alice"], mid, 1, 2 * U, 0, 2**256 - 1)
+    check(c.uint(V4, "noBalance(bytes32,address)(uint256)", mid, A["alice"]) > no_before
+          and led(A["alice"]) == led_before - 2 * U and led(A["session"]) == 0
+          and reverted_with(over, "SessionSpendExceeded"),
+          "one-click session: alice signs once (setSession, gas forwarded to the key); the key buys DOWN for her "
+          "(her balance pays, her shares), holds nothing itself, and stops at the 3 USDC cap", over[-200:])
 
     # b1: betting on [b1, b2] closes as the round starts; the next round opens
     down.add("ETH-USD")                        # the ETH source goes down from here: its round cannot settle
