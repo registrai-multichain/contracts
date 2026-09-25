@@ -118,6 +118,13 @@ contract MarketsV4 is BinaryMarket {
         emit AgentApprovalSet(agent, approved);
     }
 
+    /// @notice Common markets expire on a 5-minute grid: the 5-minute price rounds
+    /// (our price agent attests every boundary within seconds) and any longer market
+    /// on a 5-minute boundary.
+    function EXPIRY_GRID() public pure override returns (uint256) {
+        return 5 minutes;
+    }
+
     // ───────────────────────────── views ─────────────────────────────
 
     /// @notice True when a market on `feedId` settled by `agent` passes the oracle

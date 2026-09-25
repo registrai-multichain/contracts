@@ -106,7 +106,7 @@ contract ProtocolTest is Test {
     function test_createFeed_revertsOnBadWindow() public {
         vm.prank(creator);
         vm.expectRevert(Registry.BadDisputeWindow.selector);
-        registry.createFeed("x", METHODOLOGY, MIN_BOND, 30 minutes, resolver);
+        registry.createFeed("x", METHODOLOGY, MIN_BOND, 9 minutes, resolver); // below the 10-minute floor
 
         vm.prank(creator);
         vm.expectRevert(Registry.BadDisputeWindow.selector);

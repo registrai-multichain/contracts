@@ -38,6 +38,7 @@ interface IM {
     function sweepDust(bytes32) external returns (uint256);
     function unpaid(bytes32) external view returns (uint256);
     function claimsLeft(bytes32) external view returns (uint256);
+    function EXPIRY_GRID() external view returns (uint256);
 }
 
 /// @notice Audit (phase 2): trading positions BEFORE settlement, on both market
@@ -237,7 +238,8 @@ contract TradingBeforeSettlementTest is Test {
         uint256 out = m.sell(id, o, shares, 0, type(uint256).max);
         vm.stopPrank();
         assertLt(out, amt, "buy then sell returns less than paid");
-        assertLe(out, (amt * 9801) / 10_000 + 1, "at most the two 1% fees' worth is lost");
+        // the two 1% fees floor in the trader's favour (< 1 unit each) and the curve rounds for the protocol
+        assertLe(out, (amt * 9801) / 10_000 + 3, "at least the two 1% fees' worth is lost (to rounding)");
     }
 
     function testFuzz_piecesNeverBeatOneSell(uint256 liq, uint256 amt, uint8 pieces, bool yes, bool onV4) public {
@@ -353,11 +355,14 @@ contract TradingBeforeSettlementTest is Test {
 
     // ─────────────── expiry grid ───────────────
 
-    /// Markets expire on the hour on both contracts (BinaryMarket.EXPIRY_GRID), so
-    /// markets on one feed that expire between two agent ticks share one expiry and
-    /// the agent's single reading is taken as of the right time for all of them.
-    function testFuzz_expiryMustBeOnTheHour(uint256 offset, bool onV4) public {
-        offset = bound(offset, 1, 3599);
+    /// Markets expire on their contract's grid (builder markets on the hour, common
+    /// markets every 5 minutes for the price rounds), so markets on one feed that
+    /// expire between two agent ticks share one expiry and the agent's single
+    /// reading is taken as of the right time for all of them.
+    function testFuzz_expiryMustBeOnTheGrid(uint256 offset, bool onV4) public {
+        uint256 grid = onV4 ? v4.EXPIRY_GRID() : perennial.EXPIRY_GRID();
+        assertEq(grid, onV4 ? 5 minutes : 1 hours);
+        offset = bound(offset, 1, grid - 1);
         uint256 hour = (block.timestamp / 1 hours + 3) * 1 hours;
         vm.startPrank(creator);
         vm.expectRevert(BinaryMarket.ExpiryOffGrid.selector);

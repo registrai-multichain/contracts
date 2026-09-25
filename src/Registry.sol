@@ -16,7 +16,9 @@ contract Registry {
     ///         decision and a required input of script/DeployOracle.s.sol.
     ///         Kept as `MIN_BOND()` so existing callers (OracleStake, UI) still work.
     uint256 public immutable MIN_BOND;
-    uint256 public constant MIN_DISPUTE_WINDOW = 1 hours;
+    /// @notice A feed's challenge window: at least 10 minutes (a 5-minute price
+    /// round then pays out about a quarter of an hour after it closes), at most 7 days.
+    uint256 public constant MIN_DISPUTE_WINDOW = 10 minutes;
     uint256 public constant MAX_DISPUTE_WINDOW = 7 days;
     uint256 public constant WITHDRAW_COOLDOWN = 7 days;
 
