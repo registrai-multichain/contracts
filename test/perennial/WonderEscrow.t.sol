@@ -182,4 +182,44 @@ contract WonderEscrowTest is Test {
         vm.expectRevert(WonderEscrow.ReleasePending.selector);
         escrow.sweep(KEY);
     }
+
+    // ── final-review minors ──
+
+    function test_releaserMayDropAStaleQueue() public {
+        _credit(10e6);
+        (, uint256 projectId) = MarketsKit.onboard(builders, badge, team, SRC);
+        vm.prank(operator);
+        escrow.queueRelease(SRC, projectId);
+        vm.prank(operator);
+        escrow.cancelRelease(KEY);
+        (,, uint64 readyAt) = escrow.pendingRelease(KEY);
+        assertEq(readyAt, 0);
+        vm.prank(squatter);
+        vm.expectRevert(WonderEscrow.NotAuthorized.selector);
+        escrow.cancelRelease(KEY);
+    }
+
+    function test_cancelWithNothingPendingSaysSo() public {
+        vm.expectRevert(WonderEscrow.NoPendingRelease.selector);
+        escrow.cancelRelease(KEY);
+    }
+
+    function test_governorUndoesAWrongRelease() public {
+        _credit(10e6);
+        (uint256 id, uint256 projectId) = MarketsKit.onboard(builders, badge, squatter, SRC);
+        vm.prank(operator);
+        escrow.queueRelease(SRC, projectId);
+        vm.warp(block.timestamp + 7 days);
+        escrow.executeRelease(KEY);
+        assertEq(escrow.releasedTo(KEY), id);
+        vm.prank(operator);
+        vm.expectRevert();
+        escrow.unrelease(KEY);
+        escrow.unrelease(KEY); // the test contract is the Safe
+        assertEq(escrow.releasedTo(KEY), 0);
+        _credit(3e6); // new fees wait in escrow again
+        assertEq(escrow.escrowOf(KEY), 3e6);
+        vm.expectRevert(WonderEscrow.NotReleased.selector);
+        escrow.unrelease(KEY);
+    }
 }

@@ -230,4 +230,52 @@ contract WonderMarketsTest is Test {
         _buy(id, 1_000e6);
         assertEq(fund.incomeOf(fund.currentEpoch(), teamId), 5e6 + 5e6);
     }
+
+    // ── final-review minors ──
+
+    function test_setFeedSubjectRefusesAMalformedSubject() public {
+        MarketsPerennial.SubjectKind B = MarketsPerennial.SubjectKind.Builder;
+        MarketsPerennial.SubjectKind Wk = MarketsPerennial.SubjectKind.Wonder;
+        MarketsPerennial.SubjectKind N = MarketsPerennial.SubjectKind.None;
+        vm.expectRevert(MarketsPerennial.BadSubject.selector);
+        markets.setFeedSubject(looseFeed, MarketsPerennial.Subject(B, builderId, KEY));
+        vm.expectRevert(MarketsPerennial.BadSubject.selector);
+        markets.setFeedSubject(looseFeed, MarketsPerennial.Subject(B, 0, bytes32(0)));
+        vm.expectRevert(MarketsPerennial.BadSubject.selector);
+        markets.setFeedSubject(looseFeed, MarketsPerennial.Subject(Wk, 1, KEY));
+        vm.expectRevert(MarketsPerennial.BadSubject.selector);
+        markets.setFeedSubject(looseFeed, MarketsPerennial.Subject(Wk, 0, bytes32(0)));
+        vm.expectRevert(MarketsPerennial.BadSubject.selector);
+        markets.setFeedSubject(looseFeed, MarketsPerennial.Subject(N, 1, bytes32(0)));
+        markets.setFeedSubject(looseFeed, MarketsPerennial.Subject(N, 0, bytes32(0))); // unbind is fine
+    }
+
+    function test_constructorRefusesAnEscrowOnAnotherBadge() public {
+        VerifiedBuilderBadge other = MarketsKit.deployBadge(builders);
+        vm.expectRevert(MarketsPerennial.FundMismatch.selector);
+        new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, 1 hours, 1 days, other, escrow);
+    }
+
+    /// The whole money path: a trade on a bound wonder market escrows the builder
+    /// leg; the team claims; the release becomes builder income; the epoch's claim
+    /// pays the builder's payout (1% protocol fee, untaxed under $1,000).
+    function test_lifecycle_escrow_release_claim() public {
+        bytes32 id = _wonder(wonderFeed);
+        _buy(id, 1_000e6);
+        _buy(id, 1_000e6);
+        assertEq(escrow.escrowOf(KEY), 10e6);
+        (uint256 teamId, uint256 projectId) = MarketsKit.onboard(builders, badge, team, SRC);
+        escrow.grantRole(escrow.RELEASER_ROLE(), address(this));
+        escrow.queueRelease(SRC, projectId);
+        vm.warp(block.timestamp + 7 days);
+        escrow.executeRelease(KEY);
+        uint256 epoch = fund.currentEpoch();
+        assertEq(fund.incomeOf(epoch, teamId), 10e6);
+        vm.warp(fund.epochEnd(epoch));
+        uint256 before = ledger.balanceOf(team);
+        uint256 net = fund.claimFor(epoch, teamId);
+        assertEq(net, 99e5, "10 USDC less the 1% protocol fee");
+        assertEq(ledger.balanceOf(team) - before, net, "paid to the builder's payout (its owner)");
+        assertEq(ledger.balanceOf(address(escrow)), 0, "nothing left behind");
+    }
 }

@@ -74,6 +74,7 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
     event ReleaseCancelled(bytes32 indexed key);
     event Released(bytes32 indexed key, uint256 indexed builderId, uint256 amount);
     event Swept(bytes32 indexed key, uint256 amount);
+    event Unreleased(bytes32 indexed key, uint256 indexed builderId);
     event VaultSet(address vault);
     event CapSet(uint256 cap);
     event MinLiquidSet(uint256 minLiquid);
@@ -101,6 +102,11 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
     error OverCap();
     error BelowMinLiquid();
     error Slippage();
+    error NotAuthorized();
+    error NoPendingRelease();
+    error NotReleased();
+    error VaultLoss();
+    error ZeroAmount();
 
     constructor(NanoLedger ledger_, BuilderFund fund_, VerifiedBuilderBadge badge_, address admin, uint256 expiry_) {
         if (
@@ -153,10 +159,25 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
         emit ReleaseQueued(key, builderId, projectId, readyAt);
     }
 
-    function cancelRelease(bytes32 key) external onlyRole(GOVERNOR_ROLE) {
-        if (pendingRelease[key].readyAt == 0) revert NotReady();
+    /// @notice Stop a queued release. The Safe (GOVERNOR) — the squatter guard — or
+    /// the operator (RELEASER), which may only withdraw a queue it no longer stands by
+    /// (a cancel delays a payout, it never moves one).
+    function cancelRelease(bytes32 key) external {
+        if (!hasRole(GOVERNOR_ROLE, msg.sender) && !hasRole(RELEASER_ROLE, msg.sender)) revert NotAuthorized();
+        if (pendingRelease[key].readyAt == 0) revert NoPendingRelease();
         delete pendingRelease[key];
         emit ReleaseCancelled(key);
+    }
+
+    /// @notice The Safe undoes a release that went to the wrong builder (a squatter
+    /// that outlived the 7-day window): later credits wait in escrow again. What was
+    /// already released is builder income in the BuilderFund (deactivating that
+    /// builder freezes it for sweepFrozen). GOVERNOR only.
+    function unrelease(bytes32 key) external onlyRole(GOVERNOR_ROLE) {
+        uint256 builderId = releasedTo[key];
+        if (builderId == 0) revert NotReleased();
+        delete releasedTo[key];
+        emit Unreleased(key, builderId);
     }
 
     /// @notice Anyone, after the delay. Re-checks the project and builder.
@@ -237,8 +258,11 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
     // ───────────────────────────── yield (keeper) ─────────────────────────────
 
     function deploy(uint256 assets) external onlyRole(YIELD_ROLE) nonReentrant {
+        if (assets == 0) revert ZeroAmount();
         if (address(vault) == address(0)) revert VaultNotSet();
         if (yieldPaused) revert YieldPausedError();
+        // Never add to a vault that already lost value (harvest pauses only when called).
+        if (LEDGER.balanceOf(address(this)) + vaultAssets() + LOSS_DUST < totalEscrow) revert VaultLoss();
         if (deployedPrincipal + assets > cap) revert OverCap();
         uint256 bal = LEDGER.balanceOf(address(this));
         if (assets > bal || bal - assets < minLiquid) revert BelowMinLiquid();

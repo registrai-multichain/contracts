@@ -284,4 +284,19 @@ contract WonderYieldTest is Test {
         vm.expectRevert();
         escrow.harvest();
     }
+
+    function test_deployRefusesAfterAVaultLoss() public {
+        vm.prank(operator);
+        escrow.deploy(50e6);
+        vault.lose(30e6);
+        vm.prank(operator);
+        vm.expectRevert(WonderEscrow.VaultLoss.selector);
+        escrow.deploy(10e6);
+    }
+
+    function test_deployZeroReverts() public {
+        vm.prank(operator);
+        vm.expectRevert(WonderEscrow.ZeroAmount.selector);
+        escrow.deploy(0);
+    }
 }

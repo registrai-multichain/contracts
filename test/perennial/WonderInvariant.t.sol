@@ -21,7 +21,12 @@ contract WonderHandler is Test {
     NanoLedger ledger;
     WonderEscrow escrow;
     MockVault vault;
+    BuilderRegistry builders;
+    VerifiedBuilderBadge badge;
     bytes32[3] keys;
+    string[3] sources = ["github:a/one", "github:b/two", "domain:c.dev"];
+    uint256 public released;
+    uint256 public forwarded;
     uint256 public credited;
     uint256 public swept;
     uint256 public harvested;
@@ -30,18 +35,48 @@ contract WonderHandler is Test {
     /// harvest (whole-share redeem) a wei.
     uint256 public roundingBound;
 
-    constructor(NanoLedger l, WonderEscrow e, MockVault v) {
-        (ledger, escrow, vault) = (l, e, v);
-        keys[0] = keccak256("github:a/one");
-        keys[1] = keccak256("github:b/two");
-        keys[2] = keccak256("domain:c.dev");
+    constructor(NanoLedger l, WonderEscrow e, MockVault v, BuilderRegistry b, VerifiedBuilderBadge bd) {
+        (ledger, escrow, vault, builders, badge) = (l, e, v, b, bd);
+        for (uint256 i; i < 3; ++i) keys[i] = keccak256(bytes(sources[i]));
+    }
+
+    function keyAt(uint256 i) external view returns (bytes32) {
+        return keys[i];
+    }
+
+    /// A team claims source k: registered, project added, badge issued, release queued.
+    function claim(uint256 k) external {
+        k %= 3;
+        bytes32 key = keys[k];
+        (,, uint64 ready) = escrow.pendingRelease(key);
+        if (escrow.releasedTo(key) != 0 || ready != 0) return;
+        address owner = address(uint160(0x7000 + k));
+        uint256 id = builders.builderIdOf(owner);
+        if (id == 0) id = builders.registerFor(owner, "");
+        uint256 pid = builders.addProjectFor(id, sources[k]);
+        if (badge.serialOf(id) == 0) badge.issue(id);
+        escrow.queueRelease(sources[k], pid);
+    }
+
+    function execute(uint256 k) external {
+        bytes32 key = keys[k % 3];
+        (,, uint64 ready) = escrow.pendingRelease(key);
+        if (ready == 0 || block.timestamp < ready) return;
+        uint256 before = escrow.escrowOf(key);
+        uint256 share = vault.convertToAssets(1) + 1; // it may recall
+        escrow.executeRelease(key);
+        released += before;
+        roundingBound += share;
     }
 
     function credit(uint256 k, uint256 amount) external {
         amount = bound(amount, 1, 1_000e6);
+        bytes32 key = keys[k % 3];
+        bool isReleased = escrow.releasedTo(key) != 0;
         ledger.internalTransfer(address(escrow), amount);
-        escrow.credit(keys[k % 3], amount);
-        credited += amount;
+        escrow.credit(key, amount);
+        if (isReleased) forwarded += amount; // straight to the builder's income
+        else credited += amount;
     }
 
     function deploy(uint256 amount) external {
@@ -103,7 +138,10 @@ contract WonderInvariantTest is Test {
         escrow.setVault(IERC4626(address(vault)));
         escrow.setCap(type(uint128).max);
         FundKit.wire(fund, address(escrow));
-        handler = new WonderHandler(ledger, escrow, vault);
+        handler = new WonderHandler(ledger, escrow, vault, builders, badge);
+        builders.grantRole(builders.REGISTRAR_ROLE(), address(handler));
+        badge.grantRole(badge.ISSUER_ROLE(), address(handler));
+        escrow.grantRole(escrow.RELEASER_ROLE(), address(handler));
         escrow.grantRole(escrow.MARKETS_ROLE(), address(handler));
         escrow.grantRole(escrow.YIELD_ROLE(), address(handler));
         usdc.mint(address(handler), 10_000_000e6);
@@ -114,9 +152,16 @@ contract WonderInvariantTest is Test {
         targetContract(address(handler));
     }
 
-    /// Everything credited is still owed or left through a sweep (no releases here).
+    /// Everything escrowed is still owed, or left through a release or a sweep.
     function invariant_accounting() public view {
-        assertEq(handler.credited(), escrow.totalEscrow() + handler.swept());
+        assertEq(handler.credited(), escrow.totalEscrow() + handler.swept() + handler.released());
+    }
+
+    /// totalEscrow is exactly the sum of the per-source escrows.
+    function invariant_totalIsTheSum() public view {
+        uint256 sum;
+        for (uint256 i; i < 3; ++i) sum += escrow.escrowOf(handler.keyAt(i));
+        assertEq(sum, escrow.totalEscrow());
     }
 
     /// Book solvency: ledger balance + deployed principal covers what is owed.

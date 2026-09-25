@@ -134,6 +134,7 @@ contract MarketsPerennial is BinaryMarket {
     error BuilderInactive();
     error AgentNotApproved();
     error FundMismatch();
+    error BadSubject();
     error BadgeNotLive();
     error NotNominated();
 
@@ -155,7 +156,10 @@ contract MarketsPerennial is BinaryMarket {
             revert FundMismatch();
         }
         if (address(badge_) == address(0) || address(escrow_) == address(0)) revert ZeroAddress();
-        if (address(badge_.BUILDERS()) != address(builders_) || address(escrow_.FUND()) != address(fund_)) {
+        if (
+            address(badge_.BUILDERS()) != address(builders_) || address(escrow_.FUND()) != address(fund_)
+                || address(escrow_.BADGE()) != address(badge_)
+        ) {
             revert FundMismatch();
         }
         BUILDERS = builders_;
@@ -281,6 +285,14 @@ contract MarketsPerennial is BinaryMarket {
     /// @notice Bind `feedId` to a subject (kind None unbinds). Applies to markets
     /// created afterwards; existing markets keep what they were created with.
     function setFeedSubject(bytes32 feedId, Subject calldata s) external onlyRole(FEED_ROLE) {
+        // A subject is exactly one of: nothing, a builder id, a source key. A mixed
+        // one would never match a market's subject, silently paying the season pool.
+        bool ok = s.kind == SubjectKind.None
+            ? s.builderId == 0 && s.sourceKey == bytes32(0)
+            : s.kind == SubjectKind.Builder
+                ? s.builderId != 0 && s.sourceKey == bytes32(0)
+                : s.builderId == 0 && s.sourceKey != bytes32(0);
+        if (!ok) revert BadSubject();
         _feedSubject[feedId] = s;
         emit FeedSubjectSet(feedId, s.kind, s.builderId, s.sourceKey);
     }
@@ -300,7 +312,9 @@ contract MarketsPerennial is BinaryMarket {
     /// @notice True when a market on `feedId` settled by `agent` passes the oracle
     /// allowlist: the feed exists, the agent is approved, and the feed's resolver
     /// is approved. (createMarket additionally needs the agent registered and
-    /// active on the feed, a settleable dispute window, and an active builder.)
+    /// active on the feed, a settleable dispute window, an on-the-hour expiry, and
+    /// an active builder holding a live badge — or, for createWonderMarket, a
+    /// nominated source.)
     function isApprovedFeed(bytes32 feedId, address agent) external view returns (bool) {
         Registry.Feed memory f = REGISTRY.getFeed(feedId);
         return f.exists && approvedAgent[agent] && approvedResolver[f.resolver] && f.resolver != agent;
