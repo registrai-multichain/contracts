@@ -62,16 +62,20 @@
     "MarketsPerennial_v3": "0x6a25D79D7664c284c0D130B0a385b9cAdf3481c7",
     "ProgressArbiter_v3": "0x8Cb2FAD547cFc42081CA04f4c3c03588E27E0e98",
     "NanoLedger": "0x02D278930B67A290fEfE93Ac049a086A9b5e0FB5",
-    "MarketsV4": "0xCcf185a2200B24624c404fF373BbEf1423aE09c6",
+    "MarketsV4": "0xff3dcbB85ED027395C915e1EeF7353453A84a594",
     "BuilderRegistry": "0xB52FC2AB9b2457D8c56d3b4A624543aD61c70D9C",
     "CaretakerRegistry": "0x7adDA1fe8c6F3A5D405dc1F1aF68B42f2F6CAa78",
-    "MarketsPerennial": "0xF12F3427d9b47f4019809E7B753494A32C3e3a3B",
-    "BuilderFund": "0x7e83096F8Ef50024e7bE106E47F1BD8ce2e882D1",
-    "SeasonPool": "0x56b3Ffc1c5DA4F867C3Fd56Be5dA731d457E32aA",
+    "MarketsPerennial": "0xFA2034ea39Fb6e04137239e1dfb0beC995938E9e",
+    "BuilderFund": "0x06ef72DE4Cb130e7F3EC2807eC34066053c86C8d",
+    "SeasonPool": "0x96c7C8E5E2805334c30C23C94930542E91D19567",
     "VerifiedBuilderBadge": "0xBF7FF680e0Ee7472E244cf2550EE016939cb6335",
     "Registry_v4": "0x770d0feedcDa264c9d5C835D56fA7903cbC5719c",
     "Attestation_v4": "0xeA2804dE57Ac57D17E77fC7ad5F55726636E74B7",
-    "Dispute_v4": "0x9c0C81C11Fe510EB89adE831c13C066Cc5Dad411"
+    "Dispute_v4": "0x9c0C81C11Fe510EB89adE831c13C066Cc5Dad411",
+    "MarketsPerennial_v4": "0xF12F3427d9b47f4019809E7B753494A32C3e3a3B",
+    "MarketsV4_v4": "0xCcf185a2200B24624c404fF373BbEf1423aE09c6",
+    "BuilderFund_v4": "0x7e83096F8Ef50024e7bE106E47F1BD8ce2e882D1",
+    "SeasonPool_v4": "0x56b3Ffc1c5DA4F867C3Fd56Be5dA731d457E32aA"
   },
   "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
   "feeds": [
@@ -412,10 +416,19 @@
       }
     },
     "builderFund": {
-      "address": "0x7e83096F8Ef50024e7bE106E47F1BD8ce2e882D1"
+      "address": "0x06ef72DE4Cb130e7F3EC2807eC34066053c86C8d"
     },
     "seasonPool": {
-      "address": "0x56b3Ffc1c5DA4F867C3Fd56Be5dA731d457E32aA"
+      "address": "0x96c7C8E5E2805334c30C23C94930542E91D19567"
+    },
+    "v5": {
+      "deployedAt": "2026-09-25",
+      "deployBlock": 63917265,
+      "note": "Market layer redeployed on the shared BinaryMarket engine (buy/sell deadline, quoteBuy/quoteSell, no zero-payout sells, claimsLeft + sweepDust). Reuses the v4 oracle, NanoLedger and phase-1 registries; v4 market/fund/pool kept as *_v4 (all empty at switch).",
+      "marketsPerennial": "0xFA2034ea39Fb6e04137239e1dfb0beC995938E9e",
+      "marketsV4": "0xff3dcbB85ED027395C915e1EeF7353453A84a594",
+      "builderFund": "0x06ef72DE4Cb130e7F3EC2807eC34066053c86C8d",
+      "seasonPool": "0x96c7C8E5E2805334c30C23C94930542E91D19567"
     }
   }
 }

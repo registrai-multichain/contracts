@@ -1,0 +1,34 @@
+{
+  "network": "arc-testnet",
+  "chainId": 5042002,
+  "stack": "v5: market layer on the shared BinaryMarket engine (over the v4 oracle, ledger and phase-1 registries)",
+  "deployedAt": "2026-09-25",
+  "deployBlock": 63917265,
+  "order": "DeployPerennial (reuses phase-1 registries, v4 oracle + ledger) -> DeployNanoStack -> Handoff -> VerifyRoles (OK)",
+  "epochLength": 86400,
+  "settlementWindow": 86400,
+  "resolutionGrace": 604800,
+  "reused": {
+    "Registry": "0x770d0feedcDa264c9d5C835D56fA7903cbC5719c",
+    "Attestation": "0xeA2804dE57Ac57D17E77fC7ad5F55726636E74B7",
+    "Dispute": "0x9c0C81C11Fe510EB89adE831c13C066Cc5Dad411",
+    "NanoLedger": "0x02D278930B67A290fEfE93Ac049a086A9b5e0FB5",
+    "BuilderRegistry": "0xB52FC2AB9b2457D8c56d3b4A624543aD61c70D9C",
+    "CaretakerRegistry": "0x7adDA1fe8c6F3A5D405dc1F1aF68B42f2F6CAa78",
+    "VerifiedBuilderBadge": "0xBF7FF680e0Ee7472E244cf2550EE016939cb6335"
+  },
+  "contracts": {
+    "MarketsPerennial": "0xFA2034ea39Fb6e04137239e1dfb0beC995938E9e",
+    "MarketsV4": "0xff3dcbB85ED027395C915e1EeF7353453A84a594",
+    "BuilderFund": "0x06ef72DE4Cb130e7F3EC2807eC34066053c86C8d",
+    "SeasonPool": "0x96c7C8E5E2805334c30C23C94930542E91D19567"
+  },
+  "roles": {
+    "admin_all": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+    "approved_agent_operator": "0xf26db19bc8DC33c9A72399128CF5cfB5dDC76263",
+    "dispute_resolver": "0x580a7791DBF10578ce1DBF7A7A438B16Ee9CAAfd",
+    "protocol_treasury": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+    "v4_treasury": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+    "deployer_holds_nothing": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e"
+  }
+}
