@@ -14,6 +14,9 @@ import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {FundKit} from "../perennial/FundKit.sol";
+import {VerifiedBuilderBadge} from "../../src/perennial/VerifiedBuilderBadge.sol";
+import {WonderEscrow} from "../../src/perennial/WonderEscrow.sol";
+import {MarketsKit} from "../perennial/MarketsKit.sol";
 
 contract MarketsPerennialTest is Test {
     MockUSDC usdc;
@@ -35,6 +38,7 @@ contract MarketsPerennialTest is Test {
     address creator = address(0xC0FFEE);
     address taker = address(0x7A4E);
     bytes32 feedId;
+    bytes32 feedId2;
     uint256 constant DW = 1 hours;
 
     uint256 constant EPOCH = 1 hours; // shorter than a market's life
@@ -62,7 +66,7 @@ contract MarketsPerennialTest is Test {
         builders.registerFor(builder2, "github.com/example/other");
         caretakers = new CaretakerRegistry(builders, address(this));
         (pool, fund) = FundKit.deploy(ledger, builders, caretakers, address(0x7EA5), EPOCH);
-        markets = new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, 1 hours, 1 days);
+        markets = MarketsKit.perennial(ledger, registry, attestation, builders, address(this), fund, 1 hours, 1 days);
         FundKit.wire(fund, address(markets));
         markets.setApprovedAgent(oracle, true);
         markets.setApprovedResolver(resolver, true);
@@ -72,10 +76,16 @@ contract MarketsPerennialTest is Test {
         usdc.approve(address(registry), type(uint256).max);
         feedId = registry.createFeed("BTC", keccak256("m"), 10e6, DW, resolver);
         registry.registerAgent(feedId, keccak256("m"), 10e6);
+        feedId2 = registry.createFeed("BTC b2", keccak256("m"), 10e6, DW, resolver);
+        registry.registerAgent(feedId2, keccak256("m"), 10e6);
         vm.stopPrank();
 
         _fund(creator);
         _fund(taker);
+        MarketsKit.certify(markets, 1);
+        MarketsKit.certify(markets, 2);
+        MarketsKit.bindBuilder(markets, feedId, 1);
+        MarketsKit.bindBuilder(markets, feedId2, 2); // only a bound feed pays its builder
     }
 
     function _fund(address a) internal {
@@ -99,7 +109,7 @@ contract MarketsPerennialTest is Test {
         vm.prank(creator);
         id = markets.createMarket(
             builderId,
-            feedId,
+            builderId == 2 ? feedId2 : feedId,
             oracle,
             int256(100_000),
             BinaryMarket.Comparator.GreaterOrEqual,
@@ -242,15 +252,17 @@ contract MarketsPerennialTest is Test {
     }
 
     function test_constructor_refusesAForeignFund() public {
+        VerifiedBuilderBadge badge_ = markets.BADGE();
+        WonderEscrow escrow_ = markets.ESCROW();
         BuilderRegistry otherBuilders = new BuilderRegistry(address(this));
         CaretakerRegistry otherCare = new CaretakerRegistry(otherBuilders, address(this));
         (, BuilderFund foreign) = FundKit.deploy(ledger, otherBuilders, otherCare, address(0x7EA5), EPOCH);
         vm.expectRevert(MarketsPerennial.FundMismatch.selector);
-        new MarketsPerennial(ledger, registry, attestation, builders, address(this), foreign, 1 hours, 1 days);
+        new MarketsPerennial(ledger, registry, attestation, builders, address(this), foreign, 1 hours, 1 days, badge_, escrow_);
         NanoLedger otherLedger = new NanoLedger(usdc, address(this));
         (, BuilderFund foreign2) = FundKit.deploy(otherLedger, builders, caretakers, address(0x7EA5), EPOCH);
         vm.expectRevert(MarketsPerennial.FundMismatch.selector);
-        new MarketsPerennial(ledger, registry, attestation, builders, address(this), foreign2, 1 hours, 1 days);
+        new MarketsPerennial(ledger, registry, attestation, builders, address(this), foreign2, 1 hours, 1 days, badge_, escrow_);
     }
 
     /// Without MARKETS_ROLE on the fund a market cannot take a trade (the

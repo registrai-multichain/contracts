@@ -13,6 +13,9 @@ import {SettlementPolicy} from "../../src/nanopay/SettlementPolicy.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {FundKit} from "./FundKit.sol";
+import {VerifiedBuilderBadge} from "../../src/perennial/VerifiedBuilderBadge.sol";
+import {WonderEscrow} from "../../src/perennial/WonderEscrow.sol";
+import {MarketsKit} from "./MarketsKit.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
@@ -58,7 +61,7 @@ contract SettlementLivenessTest is Test {
         CaretakerRegistry caretakers = new CaretakerRegistry(builders, address(this));
         builders.registerFor(address(0xB111), "github.com/example/builder");
         (pool, fund) = FundKit.deploy(ledger, builders, caretakers, address(0x7EA5), 1 days);
-        markets = new MarketsPerennial(
+        markets = MarketsKit.perennial(
             ledger, registry, attestation, builders, address(this), fund, WINDOW, GRACE
         );
         FundKit.wire(fund, address(markets));
@@ -77,6 +80,8 @@ contract SettlementLivenessTest is Test {
         _fund(noTaker);
         _fund(sniper);
         usdc.mint(challenger, 10_000e6);
+        MarketsKit.certify(markets, 1);
+        MarketsKit.bindBuilder(markets, feedId, 1);
     }
 
     function _fund(address a) internal {
@@ -426,10 +431,12 @@ contract SettlementLivenessTest is Test {
     }
 
     function test_constructorRejectsOutOfBoundsParams() public {
+        VerifiedBuilderBadge badge_ = markets.BADGE();
+        WonderEscrow escrow_ = markets.ESCROW();
         vm.expectRevert(SettlementPolicy.BadSettlementParams.selector);
-        new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, 1 minutes, GRACE);
+        new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, 1 minutes, GRACE, badge_, escrow_);
         vm.expectRevert(SettlementPolicy.BadSettlementParams.selector);
-        new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, WINDOW, 365 days);
+        new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, WINDOW, 365 days, badge_, escrow_);
     }
 
     // ───────────────────────────── solvency under fuzz ─────────────────────────────

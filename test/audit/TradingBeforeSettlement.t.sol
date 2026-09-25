@@ -13,6 +13,7 @@ import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {FundKit} from "../perennial/FundKit.sol";
+import {MarketsKit} from "../perennial/MarketsKit.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
@@ -89,7 +90,7 @@ contract TradingBeforeSettlementTest is Test {
         caretakers = new CaretakerRegistry(builders, address(this));
         builders.registerFor(builder, "b1");
         (pool, fund) = FundKit.deploy(ledger, builders, caretakers, address(0x7EA5), 1 days);
-        perennial = new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, WINDOW, GRACE);
+        perennial = MarketsKit.perennial(ledger, registry, attestation, builders, address(this), fund, WINDOW, GRACE);
         FundKit.wire(fund, address(perennial));
         v4 = new MarketsV4(ledger, registry, attestation, address(this), treasury, WINDOW, GRACE);
         perennial.setApprovedAgent(agent, true);
@@ -105,6 +106,8 @@ contract TradingBeforeSettlementTest is Test {
 
         _fund(creator);
         for (uint256 i; i < 4; i++) _fund(traders[i]);
+        MarketsKit.certify(perennial, 1);
+        MarketsKit.bindBuilder(perennial, feedId, 1);
     }
 
     function _fund(address a) internal {

@@ -30,6 +30,7 @@ import {LaunchSchedule} from "../../script/lib/LaunchSchedule.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 import {VerifiedBuilderBadge, IERC5192} from "../../src/perennial/VerifiedBuilderBadge.sol";
+import {WonderEscrow} from "../../src/perennial/WonderEscrow.sol";
 import {RoleTable} from "../../script/lib/RoleTable.sol";
 import {DeployOracle} from "../../script/DeployOracle.s.sol";
 import {DeployNanoLedger} from "../../script/DeployNanoLedger.s.sol";
@@ -855,6 +856,9 @@ contract BuilderSideAuditDeployTest is Test {
         c.protocolTreasury = protocolTreasury;
         c.approvedAgent = agent;
         c.disputeResolver = disputeResolver;
+        c.operator = operator;
+        c.onboarder = onboarder;
+        c.wonderExpiry = 180 days;
     }
 
     function _v4Cfg() internal view returns (DeployNanoStack.Config memory c) {
@@ -886,7 +890,7 @@ contract BuilderSideAuditDeployTest is Test {
     function test_FIXED_mainnet_perennialRequiresPhase1Registries() public {
         vm.chainId(5042);
         vm.etch(0x3600000000000000000000000000000000000000, address(usdc).code);
-        (BuilderRegistry b1, CaretakerRegistry c1,) = new DeployBuilders().deploy(_buildersCfg());
+        (BuilderRegistry b1, CaretakerRegistry c1, VerifiedBuilderBadge v1) = new DeployBuilders().deploy(_buildersCfg());
         _oracleAndLedger();
         DeployPerennial p = new DeployPerennial();
         DeployPerennial.Config memory pc = _perennialCfg();
@@ -903,6 +907,9 @@ contract BuilderSideAuditDeployTest is Test {
 
         pc.builders = address(b1);
         pc.caretakers = address(c1);
+        vm.expectRevert(bytes("mainnet: VERIFIED_BADGE (phase 1) is required"));
+        p.deploy(pc);
+        pc.badge = address(v1);
         DeployPerennial.Deployed memory d = p.deploy(pc);
         assertEq(address(d.builders), address(b1));
         assertEq(address(d.fund.CARETAKERS()), address(c1));
@@ -922,8 +929,12 @@ contract BuilderSideAuditDeployTest is Test {
         vm.startPrank(deployer);
         pool = new SeasonPool(ledger, builders, rogue, deployer);
         fund = new BuilderFund(ledger, builders, rogue, pool, protocolTreasury, deployer, 30 days, LaunchSchedule.brackets());
-        perennial = new MarketsPerennial(ledger, registry, attestation, builders, deployer, fund, 24 hours, 7 days);
+        WonderEscrow escrow = new WonderEscrow(ledger, fund, badge, deployer, 180 days);
+        perennial =
+            new MarketsPerennial(ledger, registry, attestation, builders, deployer, fund, 24 hours, 7 days, badge, escrow);
+        escrow.grantRole(escrow.MARKETS_ROLE(), address(perennial));
         fund.grantRole(fund.MARKETS_ROLE(), address(perennial));
+        fund.grantRole(fund.MARKETS_ROLE(), address(escrow));
         pool.grantRole(pool.FUNDER_ROLE(), address(fund));
         vm.stopPrank();
         Handoff h = new Handoff();

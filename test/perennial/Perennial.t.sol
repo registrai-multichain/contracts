@@ -14,6 +14,7 @@ import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {FundKit} from "./FundKit.sol";
+import {MarketsKit} from "./MarketsKit.sol";
 import {MerkleKit} from "./MerkleKit.sol";
 
 /// Full Perennial loop: the builder leg of a market's trading fees is credited
@@ -43,6 +44,7 @@ contract PerennialTest is Test {
     uint256 constant B_ID = 2; // builderB's id
     address protocolTreasury = address(0x7EA5);
     bytes32 feedId;
+    bytes32 feedId2;
     uint256 constant DW = 1 hours;
     uint256 constant EPOCH = 7 days;
 
@@ -59,7 +61,7 @@ contract PerennialTest is Test {
         builderReg.registerFor(builderA, "ipfs://a");
         builderReg.registerFor(builderB, "ipfs://b");
         (pool, fund) = FundKit.deploy(ledger, builderReg, caretakers, protocolTreasury, EPOCH);
-        markets = new MarketsPerennial(ledger, registry, attestation, builderReg, address(this), fund, 1 hours, 1 days);
+        markets = MarketsKit.perennial(ledger, registry, attestation, builderReg, address(this), fund, 1 hours, 1 days);
         FundKit.wire(fund, address(markets));
         markets.setApprovedAgent(oracle, true);
         markets.setApprovedResolver(resolver, true);
@@ -69,10 +71,16 @@ contract PerennialTest is Test {
         usdc.approve(address(registry), type(uint256).max);
         feedId = registry.createFeed("BTC", keccak256("m"), 10e6, DW, resolver);
         registry.registerAgent(feedId, keccak256("m"), 10e6);
+        feedId2 = registry.createFeed("BTC b2", keccak256("m"), 10e6, DW, resolver);
+        registry.registerAgent(feedId2, keccak256("m"), 10e6);
         vm.stopPrank();
 
         _fund(creator);
         _fund(taker);
+        MarketsKit.certify(markets, 1);
+        MarketsKit.certify(markets, 2);
+        MarketsKit.bindBuilder(markets, feedId, 1);
+        MarketsKit.bindBuilder(markets, feedId2, 2); // only a bound feed pays its builder
     }
 
     function _fund(address a) internal {
@@ -94,7 +102,7 @@ contract PerennialTest is Test {
         vm.prank(creator);
         id = markets.createMarket(
             builderId,
-            feedId,
+            builderId == 2 ? feedId2 : feedId,
             oracle,
             int256(100_000),
             BinaryMarket.Comparator.GreaterOrEqual,

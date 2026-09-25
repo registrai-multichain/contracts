@@ -12,6 +12,7 @@ import {BinaryMarket} from "../../src/nanopay/BinaryMarket.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {FundKit} from "./FundKit.sol";
+import {MarketsKit} from "./MarketsKit.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
@@ -50,7 +51,7 @@ contract MilestoneMarketTest is Test {
         caretakers = new CaretakerRegistry(builders, address(this));
         builders.registerFor(builder, "github.com/example/builder");
         (pool, fund) = FundKit.deploy(ledger, builders, caretakers, address(0x7EA5), 1 days);
-        markets = new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, 1 hours, 1 days);
+        markets = MarketsKit.perennial(ledger, registry, attestation, builders, address(this), fund, 1 hours, 1 days);
         FundKit.wire(fund, address(markets));
         markets.setApprovedAgent(agent, true);
         markets.setApprovedResolver(resolver, true);
@@ -64,6 +65,8 @@ contract MilestoneMarketTest is Test {
 
         _fund(creator);
         _fund(taker);
+        MarketsKit.certify(markets, 1);
+        MarketsKit.bindBuilder(markets, feedId, 1);
     }
 
     function _fund(address a) internal {

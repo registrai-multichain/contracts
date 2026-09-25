@@ -13,6 +13,7 @@ import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {FundKit} from "../perennial/FundKit.sol";
+import {MarketsKit} from "../perennial/MarketsKit.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
@@ -55,7 +56,7 @@ contract ResolveLifecycleTest is Test {
         builders.registerFor(address(0xB111), "b1");
         (pool, fund) = FundKit.deploy(ledger, builders, caretakers, address(0x7EA5), 1 days);
         perennial =
-            new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, 24 hours, 7 days);
+            MarketsKit.perennial(ledger, registry, attestation, builders, address(this), fund, 24 hours, 7 days);
         FundKit.wire(fund, address(perennial));
         v4 = new MarketsV4(ledger, registry, attestation, address(this), treasury, 24 hours, 7 days);
         perennial.setApprovedAgent(agent, true);
@@ -73,6 +74,8 @@ contract ResolveLifecycleTest is Test {
         for (uint256 i; i < traders.length; i++) {
             _fund(traders[i]);
         }
+        MarketsKit.certify(perennial, 1);
+        MarketsKit.bindBuilder(perennial, feedId, 1);
     }
 
     function _fund(address a) internal {

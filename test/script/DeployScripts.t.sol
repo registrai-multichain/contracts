@@ -21,6 +21,7 @@ import {DeployNanoLedger} from "../../script/DeployNanoLedger.s.sol";
 import {DeployPerennial} from "../../script/DeployPerennial.s.sol";
 import {DeployBuilders} from "../../script/DeployBuilders.s.sol";
 import {VerifiedBuilderBadge} from "../../src/perennial/VerifiedBuilderBadge.sol";
+import {WonderEscrow} from "../../src/perennial/WonderEscrow.sol";
 import {LaunchSchedule} from "../../script/lib/LaunchSchedule.sol";
 import {DeployNanoStack} from "../../script/DeployNanoStack.s.sol";
 import {Handoff} from "../../script/Handoff.s.sol";
@@ -99,8 +100,9 @@ contract DeployScriptsTest is Test {
         DeployPerennial.Config memory pc = _perennialCfg();
         if (block.chainid == 5042) {
             // mainnet: the builder side is phase 1; markets must reuse it
-            (BuilderRegistry b1, CaretakerRegistry c1,) = new DeployBuilders().deploy(_buildersCfg());
-            (pc.builders, pc.caretakers) = (address(b1), address(c1));
+            (BuilderRegistry b1, CaretakerRegistry c1, VerifiedBuilderBadge v1) =
+                new DeployBuilders().deploy(_buildersCfg());
+            (pc.builders, pc.caretakers, pc.badge) = (address(b1), address(c1), address(v1));
         }
         _take(new DeployPerennial().deploy(pc));
         (, v4) = new DeployNanoStack().deploy(_v4Cfg());
@@ -121,6 +123,9 @@ contract DeployScriptsTest is Test {
         c.protocolTreasury = protocolTreasury;
         c.approvedAgent = agent;
         c.disputeResolver = disputeResolver;
+        c.operator = operator;
+        c.onboarder = onboarder;
+        c.wonderExpiry = 180 days;
     }
 
     function _v4Cfg() internal view returns (DeployNanoStack.Config memory c) {
@@ -256,6 +261,7 @@ contract DeployScriptsTest is Test {
         DeployPerennial.Config memory pc = _perennialCfg();
         pc.builders = address(builders);
         pc.caretakers = address(caretakers);
+        pc.badge = address(badge);
         DeployPerennial.Deployed memory d = new DeployPerennial().deploy(pc);
         (pool, fund, perennial) = (d.seasonPool, d.fund, d.markets);
         assertEq(address(d.builders), address(builders), "registry reused");
@@ -622,8 +628,13 @@ contract DeployScriptsTest is Test {
         vm.startPrank(deployer);
         pool = new SeasonPool(ledger, builders, caretakers, deployer);
         fund = new BuilderFund(ledger, builders, caretakers, pool, deployer, deployer, 30 days, LaunchSchedule.brackets());
-        perennial = new MarketsPerennial(ledger, registry, attestation, builders, deployer, fund, 24 hours, 7 days);
+        VerifiedBuilderBadge bdg = new VerifiedBuilderBadge(builders, deployer, deployer, "t", "", "");
+        WonderEscrow escrow = new WonderEscrow(ledger, fund, bdg, deployer, 180 days);
+        perennial =
+            new MarketsPerennial(ledger, registry, attestation, builders, deployer, fund, 24 hours, 7 days, bdg, escrow);
+        escrow.grantRole(escrow.MARKETS_ROLE(), address(perennial));
         fund.grantRole(MARKETS, address(perennial));
+        fund.grantRole(MARKETS, address(escrow));
         pool.grantRole(FUNDER, address(fund));
         vm.stopPrank();
         Handoff h = new Handoff();

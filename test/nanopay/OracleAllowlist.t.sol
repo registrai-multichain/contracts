@@ -14,6 +14,7 @@ import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {FundKit} from "../perennial/FundKit.sol";
+import {MarketsKit} from "../perennial/MarketsKit.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
@@ -59,7 +60,7 @@ contract OracleAllowlistTest is Test {
         builders.registerFor(address(0xB111), "b1");
         (pool, fund) = FundKit.deploy(ledger, builders, caretakers, address(0x7EA5), 1 days);
         perennial =
-            new MarketsPerennial(ledger, registry, attestation, builders, address(this), fund, WINDOW, GRACE);
+            MarketsKit.perennial(ledger, registry, attestation, builders, address(this), fund, WINDOW, GRACE);
         FundKit.wire(fund, address(perennial));
         v4 = new MarketsV4(ledger, registry, attestation, address(this), address(0x7EA), WINDOW, GRACE);
 
@@ -77,6 +78,8 @@ contract OracleAllowlistTest is Test {
         ledger.approveSpender(address(perennial), type(uint256).max);
         ledger.approveSpender(address(v4), type(uint256).max);
         vm.stopPrank();
+        MarketsKit.certify(perennial, 1);
+        MarketsKit.bindBuilder(perennial, feedId, 1);
     }
 
     function _approveBoth(bool on) internal {

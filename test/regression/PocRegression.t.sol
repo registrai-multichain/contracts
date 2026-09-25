@@ -13,6 +13,7 @@ import {SettlementPolicy} from "../../src/nanopay/SettlementPolicy.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {FundKit} from "../perennial/FundKit.sol";
+import {MarketsKit} from "../perennial/MarketsKit.sol";
 import {BuilderRegistry} from "../../src/perennial/BuilderRegistry.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
 
@@ -59,7 +60,7 @@ contract PocRegressionTest is Test {
         caretakers = new CaretakerRegistry(builders, deployer);
         builders.registerFor(address(0xB111), "b1");
         (pool, fund) = FundKit.deploy(ledger, builders, caretakers, address(0x7EA5), 1 days);
-        markets = new MarketsPerennial(ledger, registry, attestation, builders, deployer, fund, WINDOW, GRACE);
+        markets = MarketsKit.perennial(ledger, registry, attestation, builders, deployer, fund, WINDOW, GRACE);
         FundKit.wire(fund, address(markets));
         markets.setApprovedAgent(agent, true);
         markets.setApprovedResolver(resolver, true);
@@ -78,6 +79,8 @@ contract PocRegressionTest is Test {
         usdc.mint(challenger, 10_000e6);
         vm.prank(challenger);
         usdc.approve(address(dispute), type(uint256).max);
+        MarketsKit.certify(markets, 1);
+        MarketsKit.bindBuilder(markets, feedId, 1);
     }
 
     function _fund(address a) internal {

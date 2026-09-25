@@ -7,6 +7,8 @@ import {Registry} from "../src/Registry.sol";
 import {Attestation} from "../src/Attestation.sol";
 import {Dispute} from "../src/Dispute.sol";
 import {NanoLedger} from "../src/nanopay/NanoLedger.sol";
+import {VerifiedBuilderBadge} from "../src/perennial/VerifiedBuilderBadge.sol";
+import {WonderEscrow} from "../src/perennial/WonderEscrow.sol";
 import {MarketsPerennial} from "../src/nanopay/MarketsPerennial.sol";
 import {BinaryMarket} from "../src/nanopay/BinaryMarket.sol";
 import {BuilderFund} from "../src/perennial/BuilderFund.sol";
@@ -46,14 +48,23 @@ contract RehearseSettlement is Script {
         BuilderRegistry builders = new BuilderRegistry(deployer);
         CaretakerRegistry caretakers = new CaretakerRegistry(builders, deployer);
         builders.registerFor(address(0xB111), "github.com/example/builder");
+        builders.addProjectFor(1, "github:example/builder");
         // protocol treasury: a fixed address no rehearsal key controls
         SeasonPool pool = new SeasonPool(ledger, builders, caretakers, deployer);
         BuilderFund fund = new BuilderFund(
             ledger, builders, caretakers, pool, address(0x7EA5), deployer, 1 days, LaunchSchedule.brackets()
         );
-        MarketsPerennial markets =
-            new MarketsPerennial(ledger, registry, attestation, builders, deployer, fund, 1 hours, 1 days);
+        // builder markets need a live badge; the rehearsal does not bind feeds, so
+        // the builder leg goes to the season pool (settlement is what it rehearses)
+        VerifiedBuilderBadge badge = new VerifiedBuilderBadge(builders, deployer, deployer, "Anvil", "", "");
+        badge.issue(1);
+        WonderEscrow escrow = new WonderEscrow(ledger, fund, badge, deployer, 180 days);
+        MarketsPerennial markets = new MarketsPerennial(
+            ledger, registry, attestation, builders, deployer, fund, 1 hours, 1 days, badge, escrow
+        );
+        escrow.grantRole(escrow.MARKETS_ROLE(), address(markets));
         fund.grantRole(fund.MARKETS_ROLE(), address(markets));
+        fund.grantRole(fund.MARKETS_ROLE(), address(escrow));
         pool.grantRole(pool.FUNDER_ROLE(), address(fund));
         // oracle allowlist: our agent, the foreign agent (so its market exists to
         // be ignored), and the deployer as every feed's dispute resolver
