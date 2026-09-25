@@ -343,10 +343,12 @@ class Test:
                 "VERIFIED_BADGE": BADGE, "OPERATOR": OPERATOR, "CHAIN_ID": str(CFG["chain_id"]),
                 "BUILDERS_DATA_DIR": str(self.kdir), **self.proof_env}
 
-    def tick(self, key=None):
+    def tick(self, key=None, expect_rc=0):
+        """One keeper tick. expect_rc=3: a tick whose operator sends fail must
+        exit 3 (after 'tick done'), so run-keeper.sh reports it as failed."""
         r = run(["python3", "keeper/builders_keeper.py"], env=self.keeper_env(key or self.K["status"]), cwd=ARC, ok=False)
         out = r.stdout + r.stderr
-        if r.returncode != 0 or "tick done" not in out:
+        if r.returncode != expect_rc or "tick done" not in out:
             raise RuntimeError(f"keeper tick failed (rc {r.returncode}):\n{out[-3000:]}")
         return out
 
@@ -816,9 +818,9 @@ class Test:
               and c.call(BADGE, "ownerOf(uint256)(address)", sA).lower() == self.A["alice"].lower(),
               "tokenURI reads Lapsed (lapsed art); the badge stays with alice")
         self.publish(self.GH_A, self.fa); self.publish(self.DOM_A, self.fb)
-        out = self.tick(self.K["nostatus"])
-        check(f"badge setLapsed(False) failed" in out and c.call(BADGE, "lapsed(uint256)(bool)", sA) == "true",
-              "a keeper key WITHOUT STATUS_ROLE cannot touch the badge (the send reverts, the keeper ALERTs)", out[-600:])
+        out = self.tick(self.K["nostatus"], expect_rc=3)
+        check(f"badge setLapsed(False) failed" in out and "ALERT builders-keeper:" in out and c.call(BADGE, "lapsed(uint256)(bool)", sA) == "true",
+              "a keeper key WITHOUT STATUS_ROLE cannot touch the badge (the send reverts, the keeper ALERTs and exits 3)", out[-600:])
         out = self.tick()
         ks, g, _ = self.agree("proofs restored", self.ids)
         check(f"badge No. {sA:03d} marked verified again" in out and c.call(BADGE, "lapsed(uint256)(bool)", sA) == "false"
