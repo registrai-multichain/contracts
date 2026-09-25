@@ -1,0 +1,24 @@
+{
+  "network": "arc-mainnet",
+  "chainId": 5042,
+  "phase": "1 \u2014 builders before markets (DeployBuilders.s.sol)",
+  "deployedAt": "2026-09-25",
+  "deployBlock": 22642042,
+  "contracts": {
+    "BuilderRegistry": "0xBB6F4B18776Fd20Bb53a1205375273373DD1E5bA",
+    "CaretakerRegistry": "0x64725935d90F0aa6f3c8642Bb9cACF44CAA46224",
+    "VerifiedBuilderBadge": "0xF229d2Ed13Cc35d46fa7676a579495E5C80CFEB2"
+  },
+  "roles": {
+    "admin_safe_2of3": "0xFeE926e8Be2D1C6192213cf20f31D94Dad1e80Fb",
+    "operator_keeper_badgeStatus": "0xe528487069a24DA29c0360e61378db07ECAE88c9",
+    "onboarder_issuer_governor": "0x80e81588175558D565FFC1f63Fe0513a61316405",
+    "deployer_holds_nothing": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e"
+  },
+  "badge": {
+    "chainLabel": "Arc Mainnet",
+    "imageBase": "https://builder.registrai.cc/badge/arc/",
+    "externalBase": "https://builder.registrai.cc/builders/?builder="
+  },
+  "verifiedRoles": "checked independently on-chain after deploy (hasRole matrix) 2026-09-25"
+}
