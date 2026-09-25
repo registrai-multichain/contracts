@@ -82,6 +82,10 @@ contract DeployScriptsTest is Test {
     bytes32 constant REGISTRAR = keccak256("REGISTRAR_ROLE");
     bytes32 constant MARKETS = keccak256("MARKETS_ROLE");
     bytes32 constant FUNDER = keccak256("FUNDER_ROLE");
+    bytes32 constant NOMINATOR = keccak256("NOMINATOR_ROLE");
+    bytes32 constant FEED = keccak256("FEED_ROLE");
+    bytes32 constant RELEASER = keccak256("RELEASER_ROLE");
+    bytes32 constant YIELD = keccak256("YIELD_ROLE");
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -150,18 +154,20 @@ contract DeployScriptsTest is Test {
         s.seasonPool = address(pool);
         s.perennial = address(perennial);
         s.v4 = address(v4);
+        s.escrow = address(perennial) == address(0) ? address(0) : address(perennial.ESCROW());
     }
 
     /// Every (contract, role) that exists anywhere in the stack.
     function _allRoles() internal view returns (address[] memory w, bytes32[] memory r) {
-        w = new address[](16);
-        r = new bytes32[](16);
-        address[7] memory acs = [
+        w = new address[](23);
+        r = new bytes32[](23);
+        address escrow = address(perennial.ESCROW());
+        address[8] memory acs = [
             address(ledger), address(builders), address(caretakers), address(fund), address(pool), address(perennial),
-            address(v4)
+            address(v4), escrow
         ];
         uint256 n;
-        for (uint256 i; i < 7; i++) {
+        for (uint256 i; i < 8; i++) {
             w[n] = acs[i];
             r[n++] = DEFAULT_ADMIN;
         }
@@ -174,7 +180,13 @@ contract DeployScriptsTest is Test {
         (w[n], r[n++]) = (address(pool), FUNDER);
         (w[n], r[n++]) = (address(perennial), GOVERNOR);
         (w[n], r[n++]) = (address(v4), GOVERNOR);
-        assertEq(n, 16);
+        (w[n], r[n++]) = (address(perennial), NOMINATOR);
+        (w[n], r[n++]) = (address(perennial), FEED);
+        (w[n], r[n++]) = (escrow, GOVERNOR);
+        (w[n], r[n++]) = (escrow, MARKETS);
+        (w[n], r[n++]) = (escrow, RELEASER);
+        (w[n], r[n++]) = (escrow, YIELD);
+        assertEq(n, 23);
     }
 
     function _assertDeployerHoldsNothing() internal view {
@@ -284,6 +296,29 @@ contract DeployScriptsTest is Test {
         assertEq(builders.builderIdOf(alice), id);
         assertTrue(caretakers.isCaretaker(id, operator));
         assertEq(badge.ownerOf(serial), alice);
+    }
+
+    /// Phase 2 deploys the WonderEscrow and wires it: the markets credit it, it
+    /// credits the fund, the operator binds feeds and runs releases and yield,
+    /// the onboarder nominates; the deployer keeps none of the operator roles
+    /// through Handoff, and the Safe ends with NOMINATOR, FEED and the escrow's
+    /// GOVERNOR.
+    function test_deployPerennial_wiresWonderEscrow() public {
+        _deployAll();
+        WonderEscrow escrow = perennial.ESCROW();
+        assertEq(address(escrow.FUND()), address(fund));
+        assertEq(address(escrow.BADGE()), address(perennial.BADGE()));
+        assertEq(escrow.EXPIRY(), 180 days);
+        assertTrue(escrow.hasRole(MARKETS, address(perennial)));
+        assertTrue(fund.hasRole(MARKETS, address(escrow)));
+        assertTrue(escrow.hasRole(RELEASER, operator) && escrow.hasRole(YIELD, operator));
+        assertTrue(perennial.hasRole(FEED, operator));
+        assertTrue(perennial.hasRole(NOMINATOR, onboarder));
+        new Handoff().handoff(_stack(), admin, deployer);
+        _assertDeployerHoldsNothing();
+        assertTrue(perennial.hasRole(NOMINATOR, admin) && perennial.hasRole(FEED, admin));
+        assertTrue(escrow.hasRole(GOVERNOR, admin) && escrow.hasRole(DEFAULT_ADMIN, admin));
+        assertTrue(perennial.hasRole(FEED, operator), "operator keeps FEED");
     }
 
     function test_phase1Builders_thenMarketsReuseRegistries() public {
@@ -450,8 +485,9 @@ contract DeployScriptsTest is Test {
     function test_verifyRoles_failsBeforeHandoff() public {
         _deployAll();
         VerifyRoles v = new VerifyRoles();
+        RoleTable.Stack memory st = _stack();
         vm.expectRevert();
-        v.verify(_stack(), admin, deployer);
+        v.verify(st, admin, deployer);
     }
 
     // ───────────── Handoff refuses bad admins ─────────────
@@ -603,6 +639,7 @@ contract DeployScriptsTest is Test {
             new BuilderFund(ledger, builders, caretakers, pool, protocolTreasury, admin, 30 days, LaunchSchedule.brackets());
         vm.startPrank(admin);
         otherFund.grantRole(MARKETS, address(perennial));
+        otherFund.grantRole(MARKETS, address(perennial.ESCROW()));
         pool.grantRole(FUNDER, address(otherFund));
         vm.stopPrank();
         bad = _stack();

@@ -21,7 +21,7 @@ import {RoleTable} from "./lib/RoleTable.sol";
 ///
 /// @dev env: ADMIN, REGISTRY, ATTESTATION, NANO_LEDGER, BUILDER_REGISTRY,
 ///      CARETAKER_REGISTRY, BUILDER_FUND, SEASON_POOL, MARKETS_PERENNIAL,
-///      MARKETS_V4 — all required on every chain.
+///      MARKETS_V4, WONDER_ESCROW — all required on every chain.
 contract Handoff is RoleTable {
     function run() external {
         _guardChain();

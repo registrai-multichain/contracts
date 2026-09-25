@@ -883,6 +883,7 @@ contract BuilderSideAuditDeployTest is Test {
         s.seasonPool = address(pool);
         s.perennial = address(perennial);
         s.v4 = address(v4);
+        s.escrow = address(perennial) == address(0) ? address(0) : address(perennial.ESCROW());
     }
 
     /// FIXED (was L-1): on mainnet DeployPerennial requires the phase-1
@@ -938,8 +939,9 @@ contract BuilderSideAuditDeployTest is Test {
         pool.grantRole(pool.FUNDER_ROLE(), address(fund));
         vm.stopPrank();
         Handoff h = new Handoff();
+        RoleTable.Stack memory st = _stack();
         vm.expectRevert(bytes("fund caretakers"));
-        h.handoff(_stack(), admin, deployer);
+        h.handoff(st, admin, deployer);
     }
 
     function test_OK_deployBuilders_roleLayout() public {

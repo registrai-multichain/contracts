@@ -12,11 +12,14 @@ import {MarketsV4} from "../../src/nanopay/MarketsV4.sol";
 import {BuilderFund} from "../../src/perennial/BuilderFund.sol";
 import {SeasonPool} from "../../src/perennial/SeasonPool.sol";
 import {CaretakerRegistry} from "../../src/perennial/CaretakerRegistry.sol";
+import {WonderEscrow} from "../../src/perennial/WonderEscrow.sol";
 
 /// @notice The role table of a deployed mainnet stack, and the assertions that
 /// define "handed off": ADMIN holds every admin/governor/registrar role, the
-/// deployer holds none, only MarketsPerennial credits builder income (fund
-/// MARKETS_ROLE) and only the fund funds the season pool (FUNDER_ROLE), and
+/// deployer holds none, only MarketsPerennial and the WonderEscrow credit builder
+/// income (fund MARKETS_ROLE), only MarketsPerennial credits the escrow, only the
+/// fund funds the season pool (FUNDER_ROLE), the deployer keeps no operator
+/// role (FEED, RELEASER, YIELD), and
 /// the oracle stack's one-shot deployer powers (wire, setPoints) are consumed.
 abstract contract RoleTable is DeployBase {
     struct Stack {
@@ -29,6 +32,7 @@ abstract contract RoleTable is DeployBase {
         address seasonPool;
         address perennial;
         address v4;
+        address escrow;
     }
 
     bytes32 internal constant DEFAULT_ADMIN = 0x00;
@@ -36,6 +40,10 @@ abstract contract RoleTable is DeployBase {
     bytes32 internal constant REGISTRAR = keccak256("REGISTRAR_ROLE");
     bytes32 internal constant MARKETS = keccak256("MARKETS_ROLE");
     bytes32 internal constant FUNDER = keccak256("FUNDER_ROLE");
+    bytes32 internal constant NOMINATOR = keccak256("NOMINATOR_ROLE");
+    bytes32 internal constant FEED = keccak256("FEED_ROLE");
+    bytes32 internal constant RELEASER = keccak256("RELEASER_ROLE");
+    bytes32 internal constant YIELD = keccak256("YIELD_ROLE");
 
     function _loadStack() internal view returns (Stack memory s) {
         s.registry = vm.envAddress("REGISTRY");
@@ -47,6 +55,7 @@ abstract contract RoleTable is DeployBase {
         s.seasonPool = vm.envAddress("SEASON_POOL");
         s.perennial = vm.envAddress("MARKETS_PERENNIAL");
         s.v4 = vm.envAddress("MARKETS_V4");
+        s.escrow = vm.envAddress("WONDER_ESCROW");
     }
 
     /// @dev The admin-type roles of every AccessControl contract in the stack:
@@ -57,9 +66,9 @@ abstract contract RoleTable is DeployBase {
         pure
         returns (address[] memory where, bytes32[] memory roles, string[] memory names)
     {
-        where = new address[](14);
-        roles = new bytes32[](14);
-        names = new string[](14);
+        where = new address[](18);
+        roles = new bytes32[](18);
+        names = new string[](18);
         uint256 i;
         (where[i], roles[i], names[i]) = (s.ledger, GOVERNOR, "NanoLedger GOVERNOR");
         i++;
@@ -83,7 +92,16 @@ abstract contract RoleTable is DeployBase {
         i++;
         (where[i], roles[i], names[i]) = (s.perennial, GOVERNOR, "MarketsPerennial GOVERNOR");
         i++;
+        // The Safe nominates too (with the onboarder) and may bind a feed itself.
+        (where[i], roles[i], names[i]) = (s.perennial, NOMINATOR, "MarketsPerennial NOMINATOR");
+        i++;
+        (where[i], roles[i], names[i]) = (s.perennial, FEED, "MarketsPerennial FEED");
+        i++;
         (where[i], roles[i], names[i]) = (s.perennial, DEFAULT_ADMIN, "MarketsPerennial DEFAULT_ADMIN");
+        i++;
+        (where[i], roles[i], names[i]) = (s.escrow, GOVERNOR, "WonderEscrow GOVERNOR");
+        i++;
+        (where[i], roles[i], names[i]) = (s.escrow, DEFAULT_ADMIN, "WonderEscrow DEFAULT_ADMIN");
         i++;
         (where[i], roles[i], names[i]) = (s.v4, GOVERNOR, "MarketsV4 GOVERNOR");
         i++;
@@ -123,6 +141,21 @@ abstract contract RoleTable is DeployBase {
         require(mMkt, "markets lack BuilderFund MARKETS");
         require(!mDep, "deployer holds BuilderFund MARKETS");
         require(!mAdm, "ADMIN holds BuilderFund MARKETS (income is credited by the markets only)");
+        bool mEsc = _has(s.fund, MARKETS, s.escrow);
+        bool eMkt = _has(s.escrow, MARKETS, s.perennial);
+        bool eDep = _has(s.escrow, MARKETS, deployer);
+        bool eAdm = _has(s.escrow, MARKETS, admin);
+        if (print) {
+            console2.log(string.concat("BuilderFund MARKETS  escrow=", _b(mEsc)));
+            console2.log(string.concat("WonderEscrow MARKETS  markets=", _b(eMkt), "  admin=", _b(eAdm), "  deployer=", _b(eDep)));
+        }
+        require(mEsc, "escrow lacks BuilderFund MARKETS");
+        require(eMkt, "markets lack WonderEscrow MARKETS");
+        require(!eDep, "deployer holds WonderEscrow MARKETS");
+        require(!eAdm, "ADMIN holds WonderEscrow MARKETS (the escrow is credited by the markets only)");
+        // Operator roles: never the deployer's key.
+        require(!_has(s.escrow, RELEASER, deployer), "deployer holds WonderEscrow RELEASER");
+        require(!_has(s.escrow, YIELD, deployer), "deployer holds WonderEscrow YIELD");
         require(fFund, "fund lacks SeasonPool FUNDER");
         require(!fDep, "deployer holds SeasonPool FUNDER");
         require(!fAdm, "ADMIN holds SeasonPool FUNDER (the pool is funded by the fund only)");
@@ -159,6 +192,12 @@ abstract contract RoleTable is DeployBase {
         require(address(pool.CARETAKERS()) == s.caretakers, "season pool caretakers");
         require(address(CaretakerRegistry(s.caretakers).BUILDERS()) == s.builders, "caretakers builders");
         require(address(MarketsPerennial(s.perennial).BUILDERS()) == s.builders, "perennial builders");
+        WonderEscrow escrow = WonderEscrow(s.escrow);
+        require(address(MarketsPerennial(s.perennial).ESCROW()) == s.escrow, "perennial escrow");
+        require(address(escrow.FUND()) == s.fund, "escrow fund");
+        require(address(escrow.LEDGER()) == s.ledger, "escrow ledger");
+        require(address(escrow.BADGE()) == address(MarketsPerennial(s.perennial).BADGE()), "escrow badge");
+        require(address(MarketsPerennial(s.perennial).BADGE().BUILDERS()) == s.builders, "perennial badge builders");
 
         if (_isMainnet()) {
             // Allowlist entries are not roles, but the deployer must not be a vetted oracle.
@@ -194,10 +233,18 @@ abstract contract RoleTable is DeployBase {
                 if (print) console2.log(string.concat("ONBOARDER CaretakerRegistry GOVERNOR (setCaretaker, off-chain status only) = ", _b(h)));
                 continue;
             }
+            if (where[i] == s.perennial && roles[i] == NOMINATOR) {
+                if (print) console2.log(string.concat("ONBOARDER MarketsPerennial NOMINATOR (wonder-market sources) = ", _b(h)));
+                continue;
+            }
             require(!h, string.concat("ONBOARDER holds ", names[i]));
         }
         require(!_has(s.fund, MARKETS, onboarder), "ONBOARDER holds BuilderFund MARKETS");
         require(!_has(s.seasonPool, FUNDER, onboarder), "ONBOARDER holds SeasonPool FUNDER");
+        require(!_has(s.escrow, MARKETS, onboarder), "ONBOARDER holds WonderEscrow MARKETS");
+        require(!_has(s.escrow, RELEASER, onboarder), "ONBOARDER holds WonderEscrow RELEASER");
+        require(!_has(s.escrow, YIELD, onboarder), "ONBOARDER holds WonderEscrow YIELD");
+        require(!_has(s.perennial, FEED, onboarder), "ONBOARDER holds MarketsPerennial FEED");
         if (print) console2.log("OK: onboarder holds no market/admin role");
     }
 
