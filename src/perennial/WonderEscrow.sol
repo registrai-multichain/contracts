@@ -203,11 +203,18 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
 
     // ───────────────────────────── yield (GOVERNOR) ─────────────────────────────
 
-    /// @notice Point at an ERC-4626 vault over the ledger's USDC (or none), only
-    /// while this contract holds no shares of the current one.
+    /// @notice Point at an ERC-4626 vault over the ledger's USDC (or none), once
+    /// nothing of value is left in the current one (share dust worth 0 is
+    /// abandoned; the keeper's recallAll takes everything else). Principal the
+    /// old vault lost leaves the book here, so the ledger must already cover
+    /// the escrow: after a loss the Safe tops up first.
     function setVault(IERC4626 vault_) external onlyRole(GOVERNOR_ROLE) {
-        if (address(vault) != address(0) && vault.balanceOf(address(this)) != 0) revert VaultInUse();
+        if (address(vault) != address(0) && vaultAssets() != 0) revert VaultInUse();
         if (address(vault_) != address(0) && vault_.asset() != address(LEDGER.USDC())) revert WrongAsset();
+        if (deployedPrincipal != 0) {
+            if (LEDGER.balanceOf(address(this)) < totalEscrow) revert Unfunded();
+            deployedPrincipal = 0;
+        }
         vault = vault_;
         emit VaultSet(address(vault_));
     }
@@ -250,7 +257,27 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
         _recall(assets);
     }
 
-    /// @notice Anyone. Yield (vault value above principal) is redeemed in whole
+    /// @notice Leave the vault entirely: redeem every share, dust included (an
+    /// 18-decimal-share vault leaves dust behind exact-asset recalls). Principal
+    /// the vault no longer holds stays on the book until the Safe tops up and
+    /// switches vault (setVault).
+    function recallAll() external onlyRole(YIELD_ROLE) nonReentrant {
+        if (address(vault) == address(0)) revert VaultNotSet();
+        uint256 shares = vault.balanceOf(address(this));
+        if (shares == 0) return;
+        uint256 got = vault.redeem(shares, address(this), address(this));
+        if (got > 0) {
+            IERC20 usdc = LEDGER.USDC();
+            usdc.forceApprove(address(LEDGER), got);
+            LEDGER.deposit(got);
+        }
+        deployedPrincipal = got >= deployedPrincipal ? 0 : deployedPrincipal - got;
+        emit Recalled(got);
+    }
+
+    /// @notice The keeper (YIELD_ROLE): not anyone, because a Safe top-up that
+    /// bridges an illiquid vault until a release runs would read as surplus.
+    /// Yield (vault value above principal) is redeemed in whole
     /// shares into the ledger account, and whatever the account holds above what
     /// the escrow owes goes to the season pool. It pays from the ledger only and
     /// never below book principal, so `ledger + deployedPrincipal >= totalEscrow`
@@ -261,7 +288,7 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
     /// Solvency: the book invariant holds on every path (credit checks it;
     /// deploy/recall move value 1:1 between ledger and principal; release and
     /// sweep lower totalEscrow by what leaves; harvest pays only book surplus).
-    function harvest() external nonReentrant returns (uint256 toSeason) {
+    function harvest() external onlyRole(YIELD_ROLE) nonReentrant returns (uint256 toSeason) {
         uint256 assets = vaultAssets();
         uint256 bal = LEDGER.balanceOf(address(this));
         if (bal + assets + LOSS_DUST < totalEscrow) {
@@ -272,7 +299,8 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
         if (assets > deployedPrincipal) {
             // Shares round down, so what stays is worth at least principal.
             uint256 shares = vault.convertToShares(assets - deployedPrincipal);
-            if (shares > 0) {
+            // 18-decimal shares: a wei of gain can be shares that redeem to 0.
+            if (shares > 0 && vault.previewRedeem(shares) > 0) {
                 uint256 got = vault.redeem(shares, address(this), address(this));
                 IERC20 usdc = LEDGER.USDC();
                 usdc.forceApprove(address(LEDGER), got);

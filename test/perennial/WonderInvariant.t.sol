@@ -13,7 +13,7 @@ import {VerifiedBuilderBadge} from "../../src/perennial/VerifiedBuilderBadge.sol
 import {WonderEscrow} from "../../src/perennial/WonderEscrow.sol";
 import {FundKit} from "./FundKit.sol";
 import {MarketsKit} from "./MarketsKit.sol";
-import {MockVault} from "./MockVault.sol";
+import {MockVault, OffsetMockVault} from "./MockVault.sol";
 
 /// Drives the escrow as the markets (credit) and the keeper (deploy, recall,
 /// harvest), with vault yield, time and permissionless sweeps in between.
@@ -99,7 +99,7 @@ contract WonderInvariantTest is Test {
         (, BuilderFund fund) = FundKit.deploy(ledger, builders, caretakers, address(0x7EA5), 1 days);
         VerifiedBuilderBadge badge = MarketsKit.deployBadge(builders);
         escrow = new WonderEscrow(ledger, fund, badge, address(this), 90 days);
-        vault = new MockVault(usdc);
+        vault = new OffsetMockVault(usdc); // 18-decimal shares, like Morpho
         escrow.setVault(IERC4626(address(vault)));
         escrow.setCap(type(uint128).max);
         FundKit.wire(fund, address(escrow));

@@ -153,9 +153,6 @@ abstract contract RoleTable is DeployBase {
         require(eMkt, "markets lack WonderEscrow MARKETS");
         require(!eDep, "deployer holds WonderEscrow MARKETS");
         require(!eAdm, "ADMIN holds WonderEscrow MARKETS (the escrow is credited by the markets only)");
-        // Operator roles: never the deployer's key.
-        require(!_has(s.escrow, RELEASER, deployer), "deployer holds WonderEscrow RELEASER");
-        require(!_has(s.escrow, YIELD, deployer), "deployer holds WonderEscrow YIELD");
         require(fFund, "fund lacks SeasonPool FUNDER");
         require(!fDep, "deployer holds SeasonPool FUNDER");
         require(!fAdm, "ADMIN holds SeasonPool FUNDER (the pool is funded by the fund only)");
@@ -208,6 +205,11 @@ abstract contract RoleTable is DeployBase {
             // Fee recipients are immutable: they must not be the deployer's key.
             require(MarketsV4(s.v4).TREASURY() != deployer, "deployer is the V4 treasury");
             require(fund.PROTOCOL_TREASURY() != deployer, "deployer is the protocol treasury");
+            // Operator roles: never the deployer's key (off mainnet the deployer
+            // may be the operator, as DeployPerennial defaults it).
+            require(!_has(s.escrow, RELEASER, deployer), "deployer holds WonderEscrow RELEASER");
+            require(!_has(s.escrow, YIELD, deployer), "deployer holds WonderEscrow YIELD");
+            require(!_has(s.perennial, FEED, deployer), "deployer holds MarketsPerennial FEED");
         }
     }
 

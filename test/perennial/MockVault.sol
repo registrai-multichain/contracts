@@ -47,3 +47,13 @@ contract MockVault is ERC4626 {
         super._withdraw(caller, receiver, owner, assets, shares);
     }
 }
+
+/// Like a Morpho / MetaMorpho USDC vault: 18-decimal shares over 6-decimal
+/// USDC (decimals offset 12), so exact-asset withdrawals leave share dust.
+contract OffsetMockVault is MockVault {
+    constructor(IERC20 usdc) MockVault(usdc) {}
+
+    function _decimalsOffset() internal pure override returns (uint8) {
+        return 12;
+    }
+}

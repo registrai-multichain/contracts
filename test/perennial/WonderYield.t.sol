@@ -13,7 +13,7 @@ import {VerifiedBuilderBadge} from "../../src/perennial/VerifiedBuilderBadge.sol
 import {WonderEscrow} from "../../src/perennial/WonderEscrow.sol";
 import {FundKit} from "./FundKit.sol";
 import {MarketsKit} from "./MarketsKit.sol";
-import {MockVault} from "./MockVault.sol";
+import {MockVault, OffsetMockVault} from "./MockVault.sol";
 
 contract WonderYieldTest is Test {
     MockUSDC usdc;
@@ -42,6 +42,7 @@ contract WonderYieldTest is Test {
         escrow.grantRole(escrow.MARKETS_ROLE(), markets);
         escrow.grantRole(escrow.RELEASER_ROLE(), operator);
         escrow.grantRole(escrow.YIELD_ROLE(), operator);
+        escrow.grantRole(escrow.YIELD_ROLE(), address(this)); // the tests harvest as the keeper too
         FundKit.wire(fund, address(escrow));
         vault = new MockVault(usdc);
         escrow.setVault(IERC4626(address(vault)));
@@ -207,5 +208,80 @@ contract WonderYieldTest is Test {
         assertGe(
             ledger.balanceOf(address(escrow)) + escrow.deployedPrincipal(), escrow.totalEscrow(), "book solvent"
         );
+    }
+
+    // ── share dust, total loss and who may harvest (final review I1-I3) ──
+
+    function _offsetVault() internal returns (OffsetMockVault v) {
+        v = new OffsetMockVault(usdc);
+        escrow.setVault(IERC4626(address(v)));
+    }
+
+    /// Exact-asset recalls leave 18-decimal share dust worth 0: a full exit
+    /// (recallAll) and a vault switch must still work.
+    function test_setVaultAfterFullExitWithShareDust() public {
+        OffsetMockVault v = _offsetVault();
+        vm.prank(operator);
+        escrow.deploy(90e6);
+        v.accrue(7_777_777);
+        vm.prank(operator);
+        escrow.harvest();
+        uint256 all = escrow.vaultAssets();
+        vm.prank(operator);
+        escrow.recall(all);
+        assertEq(escrow.vaultAssets(), 0);
+        assertGt(v.balanceOf(address(escrow)), 0, "share dust left behind");
+        escrow.setVault(IERC4626(address(new OffsetMockVault(usdc))));
+        assertEq(escrow.deployedPrincipal(), 0);
+    }
+
+    function test_recallAllRedeemsEveryShare() public {
+        OffsetMockVault v = _offsetVault();
+        vm.prank(operator);
+        escrow.deploy(90e6);
+        v.accrue(1);
+        vm.prank(operator);
+        escrow.recallAll();
+        assertEq(v.balanceOf(address(escrow)), 0);
+        assertEq(escrow.deployedPrincipal(), 0);
+        assertGe(ledger.balanceOf(address(escrow)), 100e6);
+    }
+
+    /// After a total loss the Safe tops the escrow up, then leaves the vault;
+    /// the lost principal leaves the book only once the ledger covers the escrow.
+    function test_setVaultAfterTotalLossNeedsTopUp() public {
+        OffsetMockVault v = _offsetVault();
+        vm.prank(operator);
+        escrow.deploy(90e6);
+        v.lose(90e6);
+        vm.expectRevert(WonderEscrow.Unfunded.selector);
+        escrow.setVault(IERC4626(address(0)));
+        vm.prank(markets);
+        ledger.internalTransfer(address(escrow), 90e6); // the Safe's top-up
+        escrow.setVault(IERC4626(address(0)));
+        assertEq(escrow.deployedPrincipal(), 0);
+        // trading still credits
+        vm.startPrank(markets);
+        ledger.internalTransfer(address(escrow), 1e6);
+        escrow.credit(KEY, 1e6);
+        vm.stopPrank();
+    }
+
+    function test_harvestWhenGainIsOneWei() public {
+        OffsetMockVault v = _offsetVault();
+        vm.prank(operator);
+        escrow.deploy(90e6);
+        v.accrue(2); // the virtual share takes a wei: 1 wei of gain
+        assertEq(escrow.vaultAssets() - escrow.deployedPrincipal(), 1);
+        vm.prank(operator);
+        assertEq(escrow.harvest(), 0);
+    }
+
+    /// A Safe top-up that bridges an illiquid vault is not surplus for anyone
+    /// to sweep into the season pool: harvest is the keeper's (YIELD_ROLE).
+    function test_harvestOnlyYieldRole() public {
+        vm.prank(markets);
+        vm.expectRevert();
+        escrow.harvest();
     }
 }

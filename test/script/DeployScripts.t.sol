@@ -518,6 +518,22 @@ contract DeployScriptsTest is Test {
         _assertDeployerHoldsNothing();
     }
 
+    /// Off mainnet OPERATOR and ONBOARDER default to the deployer: the handoff
+    /// must still go through (the deployer keeps its operator roles there).
+    function test_handoff_testnet_operatorIsTheDeployer() public {
+        (registry, attestation, dispute) = new DeployOracle().deploy(
+            DeployOracle.Config({deployer: deployer, usdc: _usdcAddr(), minBond: 10e6, points: address(0)})
+        );
+        ledger = new DeployNanoLedger().deploy(DeployNanoLedger.Config({deployer: deployer, usdc: _usdcAddr()}));
+        DeployPerennial.Config memory pc = _perennialCfg();
+        (pc.operator, pc.onboarder) = (deployer, deployer);
+        _take(new DeployPerennial().deploy(pc));
+        (, v4) = new DeployNanoStack().deploy(_v4Cfg());
+        new Handoff().handoff(_stack(), admin, deployer);
+        assertTrue(perennial.hasRole(FEED, admin) && perennial.hasRole(NOMINATOR, admin));
+        assertFalse(perennial.hasRole(DEFAULT_ADMIN, deployer) || perennial.ESCROW().hasRole(GOVERNOR, deployer));
+    }
+
     // ───────────── regression ports (PoC) ─────────────
 
     /// PoC test_deployerAdminDrainsCommons, ported to the fund: the deployer
