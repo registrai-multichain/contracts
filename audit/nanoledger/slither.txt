@@ -1,0 +1,37 @@
+'forge clean' running (wd: /Users/tobiasd/Desktop/arc/contracts)
+'forge config --json' running
+'forge build --build-info src/nanopay/NanoLedger.sol' running (wd: /Users/tobiasd/Desktop/arc/contracts)
+INFO:Detectors:
+Detector: incorrect-equality
+NanoLedger.settleStream(uint256) (src/nanopay/NanoLedger.sol#238-253) uses a dangerous strict equality:
+	- streamed == s.cap (src/nanopay/NanoLedger.sol#249)
+NanoLedger.skimSurplus(address) (src/nanopay/NanoLedger.sol#345-351) uses a dangerous strict equality:
+	- surplus == 0 (src/nanopay/NanoLedger.sol#349)
+NanoLedger.streamedSoFar(uint256) (src/nanopay/NanoLedger.sol#215-227) uses a dangerous strict equality:
+	- elapsed == 0 (src/nanopay/NanoLedger.sol#219)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
+INFO:Detectors:
+Detector: timestamp
+NanoLedger._move(address,address,uint256) (src/nanopay/NanoLedger.sol#157-164) uses timestamp for comparisons
+	Dangerous comparisons:
+	- amount > bal (src/nanopay/NanoLedger.sol#161)
+NanoLedger.openStream(address,uint256,uint256) (src/nanopay/NanoLedger.sol#191-205) uses timestamp for comparisons
+	Dangerous comparisons:
+	- cap > bal (src/nanopay/NanoLedger.sol#197)
+NanoLedger.streamedSoFar(uint256) (src/nanopay/NanoLedger.sol#215-227) uses timestamp for comparisons
+	Dangerous comparisons:
+	- elapsed == 0 (src/nanopay/NanoLedger.sol#219)
+	- rate > cap / elapsed (src/nanopay/NanoLedger.sol#225)
+NanoLedger.settleStream(uint256) (src/nanopay/NanoLedger.sol#238-253) uses timestamp for comparisons
+	Dangerous comparisons:
+	- amount > 0 (src/nanopay/NanoLedger.sol#244)
+	- streamed == s.cap (src/nanopay/NanoLedger.sol#249)
+NanoLedger.accrue(bytes32,uint256) (src/nanopay/NanoLedger.sol#305-316) uses timestamp for comparisons
+	Dangerous comparisons:
+	- amount > bal (src/nanopay/NanoLedger.sol#312)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#block-timestamp
+INFO:Detectors:
+Detector: naming-convention
+Variable NanoLedger.USDC (src/nanopay/NanoLedger.sol#39) is not in mixedCase
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#conformance-to-solidity-naming-conventions
+INFO:Slither:src/nanopay/NanoLedger.sol analyzed (11 contracts with 101 detectors), 9 result(s) found

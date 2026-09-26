@@ -1,0 +1,18 @@
+('N1 withdraw keeps totalOwed', 'CAUGHT by 14 test(s)')
+('N2 withdraw skips the balance check', 'CAUGHT by 14 test(s)')
+("N3 transfer doesn't debit the sender", 'CAUGHT by 20 test(s)')
+('N4 allowance not reduced', 'CAUGHT by 4 test(s)')
+('N5 allowance not checked', 'CAUGHT by 4 test(s)')
+('N6 stream not reserved', 'CAUGHT by 10 test(s)')
+("N7 settle doesn't record settled", 'CAUGHT by 12 test(s)')
+('N8 cancel refunds the whole cap', 'CAUGHT by 8 test(s)')
+('N9 stream not capped', 'CAUGHT by 14 test(s)')
+("N10 accrue doesn't debit the source", 'CAUGHT by 8 test(s)')
+("N11 claim doesn't advance (double claim)", 'CAUGHT by 10 test(s)')
+('N12 setShares drops pending instead of paying it', 'CAUGHT by 2 test(s)')
+('N13 skim takes everything', 'CAUGHT by 10 test(s)')
+('N14 anyone can register a source', 'CAUGHT by 4 test(s)')
+('N15 anyone can create a pool', 'CAUGHT by 4 test(s)')
+('N16 anyone can cancel a stream', 'CAUGHT by 4 test(s)')
+
+summary: 16 of 16 caught

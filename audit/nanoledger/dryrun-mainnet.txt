@@ -1,0 +1,32 @@
+No files changed, compilation skipped
+Script ran successfully.
+
+== Return ==
+ledger: contract NanoLedger 0x82CC64bc010Bc244E63654817202B5330f1Ac112
+
+== Logs ==
+  NanoLedger: 0x82CC64bc010Bc244E63654817202B5330f1Ac112
+    USDC: 0x3600000000000000000000000000000000000000
+    DEFAULT_ADMIN + GOVERNOR: 0xFeE926e8Be2D1C6192213cf20f31D94Dad1e80Fb
+    deployer holds a role: false
+
+## Setting up 1 EVM.
+
+==========================
+
+Chain 5042
+
+Estimated gas price: 40.000000001 gwei
+
+Estimated total gas used for script: 2060392
+
+Estimated amount required: 0.082415680002060392 ETH
+
+==========================
+
+SIMULATION COMPLETE. To broadcast these transactions, add --broadcast and wallet configuration(s) to the previous command. See forge script --help for more.
+
+Transactions saved to: /Users/tobiasd/Desktop/arc/contracts/broadcast/DeployNanoLedger.s.sol/5042/dry-run/run-latest.json
+
+Sensitive values saved to: /Users/tobiasd/Desktop/arc/contracts/cache/DeployNanoLedger.s.sol/5042/dry-run/run-latest.json
+
