@@ -1,0 +1,22 @@
+{
+  "network": "arc-testnet",
+  "chainId": 5042002,
+  "deployedAt": "2026-09-26",
+  "purpose": "Rehearsal of the REGI buyback on Arc testnet: the real Uniswap v4 PoolManager and Arc's real native-USDC transfer (the path a local fork can't run), with a stand-in token and a generated copy of RegiBuyback at rehearsal scale ($2 trigger, $0.50 chunks, 1-minute cooldown; test/buyback/rehearsal/make-rehearsal.sh). NOT the mainnet contracts.",
+  "script": "script/testnet/BuybackRehearsal.s.sol",
+  "poolManager": "0x8366a39CC670B4001A1121B8F6A443A643e40951",
+  "nanoLedger": "0x02D278930B67A290fEfE93Ac049a086A9b5e0FB5",
+  "tREGI": "0x82E901fFD77785FB7B2329471c04805e9BF75140",
+  "pool": { "fee": 10000, "tickSpacing": 200, "hooks": "0x0000000000000000000000000000000000000000", "initTick": 369200, "range": [329200, 369200] },
+  "RegiBuybackRehearsal": "0xE255913600112390d0784541d23E7Ea497a62715",
+  "RegiFeeSplitter": "0xf1D6F1aDCBA1aAf662eD1203DE3beee6f28a3d05",
+  "splitterSafe": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e (the testnet deployer stands in for the Safe)",
+  "result": {
+    "ledgerIncomeToSplitter": "5 USDC via NanoLedger.internalTransfer (how MarketsV4 pays)",
+    "keeperDistribute": "2 USDC to the buyback, 3 USDC to the Safe stand-in",
+    "keeperPress": { "tx": "0xe788eebaa8c08649209137e73670a2bc7ab053e8b2d8ab00f83c1095cf42e4d6", "usdcIn": "0.5", "tREGIBurned": "5345" },
+    "visitorPress": { "tx": "0xbb3e8defd1ab452f59e618d0fc5ef4920a117106f9d8decd2382ed6d1579448b", "usdcIn": "0.5", "tREGIBurned": "5345", "from": "0xA9Fa24e1147E8337C3D25b084890121BE10a132B" },
+    "dashboardRead": "chunk 3/4, 50%, $1 spent, 10,690 burned, both burns listed, inflow '$2 from the splitter', no repoint",
+    "notCovered": "the Argus hook (mainnet only): covered by the mainnet-fork test"
+  }
+}
