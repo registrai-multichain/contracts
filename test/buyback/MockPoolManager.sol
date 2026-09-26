@@ -27,6 +27,8 @@ contract MockPoolManager {
     uint256 public constant HOOK_CUT_BPS = 100;
     bool public revertSwap;
     bool public reenter;
+    uint256 public overcharge; // extra USDC the pool claims beyond the request (a hostile hook)
+    bool public settleReportsLess;
     bool public reentryBlocked;
 
     SwapParams internal _last;
@@ -45,6 +47,8 @@ contract MockPoolManager {
     function setFillBps(uint256 b) external { fillBps = b; }
     function setRevertSwap(bool r) external { revertSwap = r; }
     function setReenter(bool r) external { reenter = r; }
+    function setOvercharge(uint256 x) external { overcharge = x; }
+    function setSettleReportsLess(bool x) external { settleReportsLess = x; }
     function setRegiPerUsdc(uint256 r) external { regiPerUsdc = r; }
     function lastParams() external view returns (SwapParams memory) { return _last; }
 
@@ -66,7 +70,7 @@ contract MockPoolManager {
         lastPoolId = V4Lib.poolId(key);
         _last = params;
         require(params.zeroForOne && params.amountSpecified < 0, "mock: exact-in zeroForOne only");
-        uint256 inAmt = uint256(-params.amountSpecified) * fillBps / 10_000;
+        uint256 inAmt = uint256(-params.amountSpecified) * fillBps / 10_000 + overcharge;
         uint256 out = inAmt * regiPerUsdc;
         out -= out * HOOK_CUT_BPS / 10_000;
         owed0 += inAmt;
@@ -82,6 +86,7 @@ contract MockPoolManager {
     function settle() external payable returns (uint256 paid) {
         paid = usdc.balanceOf(address(this)) - synced;
         owed0 -= paid;
+        if (settleReportsLess && paid > 0) paid -= 1;
     }
 
     function take(address currency, address to, uint256 amount) external {

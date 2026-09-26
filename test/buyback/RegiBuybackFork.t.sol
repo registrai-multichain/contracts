@@ -127,4 +127,34 @@ contract RegiBuybackForkTest is Test {
         assertEq(abi.decode(b, (uint256)), 100, "buy tax 1%");
         assertEq(abi.decode(s, (uint256)), 300, "sell tax 3%");
     }
+
+    /// Audit: random rounds on the REAL pool + hook. Every chunk: REGI lands at dead, none
+    /// rests in the buyback, spend <= 50 USDC, and the effective price is never better than
+    /// the pool's spot and no worse than spot minus fees (1% LP + 1% hook) and the 2% cap.
+    function testFork_fuzzRandomRoundsOnTheRealPool(uint256 seed) public {
+        RegiBuyback bb = new RegiBuyback(PM, USDC, REGI, HOOKS, 10_000, 200, INanoLedgerMinimal(address(0xBEEF)));
+        uint256 t = block.timestamp;
+        for (uint256 i; i < 6; i++) {
+            seed = uint256(keccak256(abi.encode(seed, i)));
+            if (seed % 3 == 0) vm.deal(address(bb), address(bb).balance + (200 + (seed >> 8) % 400) * 1 ether);
+            t += 10 minutes + (seed >> 16) % 2 hours;
+            vm.warp(t);
+            uint256 p = V4Lib.sqrtPriceX96(PM, POOL_ID);
+            // spot REGI (raw) per USDC (raw), scaled by 1e18 to keep precision: (p / 2^96)^2
+            uint256 spot = (p * p / 2 ** 96) * 1e18 / 2 ** 96;
+            uint256 dead0 = IERC20(REGI).balanceOf(DEAD);
+            try bb.burnChunk() returns (uint256 inAmt, uint256 burned) {
+                assertLe(inAmt, 50e6);
+                assertEq(IERC20(REGI).balanceOf(DEAD) - dead0, burned, "dead got the burn");
+                assertEq(IERC20(REGI).balanceOf(address(bb)), 0, "nothing rests in the buyback");
+                uint256 atSpot = inAmt * spot / 1e18;
+                assertLe(burned, atSpot, "never better than spot");
+                assertGe(burned * 10_000, atSpot * 9_650, "no worse than spot - fees - 2% cap (+0.5% slack)");
+            } catch {
+                // Only the round rules may refuse a press: not ready or cooling down.
+                (, , , bool ready,,,) = bb.status();
+                assertFalse(ready, "a ready chunk failed on the real pool");
+            }
+        }
+    }
 }

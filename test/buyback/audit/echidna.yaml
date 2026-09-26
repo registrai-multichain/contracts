@@ -1,0 +1,7 @@
+testMode: property
+testLimit: 500000
+seqLen: 150
+shrinkLimit: 2000
+workers: 8
+corpusDir: audit/echidna-corpus
+cryticArgs: ["--foundry-compile-all"]

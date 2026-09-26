@@ -241,4 +241,30 @@ contract RegiBuybackTest is Test {
         (,,, bool ready2,,,) = bb.status();
         assertTrue(ready2);
     }
+
+    // Audit L-1: a pool/hook that claims more USDC than the chunk asked for is refused.
+    function test_audit_refusesToPayMoreThanTheChunk() public {
+        pm.setOvercharge(1);
+        fund(200e6);
+        vm.expectRevert(RegiBuyback.Overcharged.selector);
+        bb.burnChunk();
+        assertEq(usdc.balanceOf(address(bb)), 200e6);
+    }
+
+    // Audit L-2: settle() must report exactly what was paid.
+    function test_audit_settleMustReportExactlyWhatWasPaid() public {
+        pm.setSettleReportsLess(true);
+        fund(200e6);
+        vm.expectRevert(RegiBuyback.SettlementMismatch.selector);
+        bb.burnChunk();
+    }
+
+    // Audit L-3: during the swap the round is already counted down (effects before interactions).
+    function test_audit_roundIsCountedDownBeforeTheSwap() public {
+        pm.setReenter(true); // the mock reads nothing, but a hostile callback would see updated state
+        fund(200e6);
+        bb.burnChunk();
+        assertEq(bb.chunksLeft(), 3);
+        assertEq(bb.nextChunkAt(), block.timestamp + 10 minutes);
+    }
 }

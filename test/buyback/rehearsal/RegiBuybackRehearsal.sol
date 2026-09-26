@@ -57,6 +57,8 @@ contract RegiBuybackRehearsal is IUnlockCallback, ReentrancyGuard {
     error BadPair();
     error ZeroAddress();
     error NothingBought();
+    error Overcharged();
+    error SettlementMismatch();
 
     constructor(
         IPoolManagerMinimal pm,
@@ -127,18 +129,27 @@ contract RegiBuybackRehearsal is IUnlockCallback, ReentrancyGuard {
         uint256 amount = bal < CHUNK ? bal : CHUNK;
         if (amount == 0) revert NotReady();
 
+        // Effects before the swap (checks-effects-interactions); a revert below undoes them.
+        uint256 chunk = CHUNKS_PER_ROUND - chunksLeft + 1;
+        chunksLeft -= 1;
+        nextChunkAt = block.timestamp + COOLDOWN;
+
         _swapping = true;
         (usdcIn, regiBurned) = abi.decode(POOL_MANAGER.unlock(abi.encode(amount)), (uint256, uint256));
         _swapping = false;
         if (regiBurned == 0) revert NothingBought();
 
-        uint256 chunk = CHUNKS_PER_ROUND - chunksLeft + 1;
-        chunksLeft -= 1;
-        nextChunkAt = block.timestamp + COOLDOWN;
         totalUsdcSpent += usdcIn;
         totalRegiBurned += regiBurned;
         totalChunks += 1;
         emit Burned(round, chunk, usdcIn, regiBurned, msg.sender);
+    }
+
+    /// @dev The swap's price limit: at most MAX_IMPACT_BPS below the current price, never
+    ///      at or below v4's MIN_SQRT_PRICE (a zeroForOne swap needs limit > MIN_SQRT_PRICE).
+    function _priceLimit(uint160 current) internal pure returns (uint160 limit) {
+        limit = uint160(uint256(current) * SQRT_LIMIT_NUM / SQRT_LIMIT_DEN);
+        if (limit <= MIN_SQRT_PRICE) limit = MIN_SQRT_PRICE + 1;
     }
 
     /// @dev The PoolManager calls back inside burnChunk's unlock.
@@ -147,9 +158,7 @@ contract RegiBuybackRehearsal is IUnlockCallback, ReentrancyGuard {
         if (!_swapping) revert UnexpectedCallback();
         uint256 amount = abi.decode(data, (uint256));
         PoolKey memory k = key();
-        uint160 current = V4Lib.sqrtPriceX96(POOL_MANAGER, V4Lib.poolId(k));
-        uint160 limit = uint160(uint256(current) * SQRT_LIMIT_NUM / SQRT_LIMIT_DEN);
-        if (limit <= MIN_SQRT_PRICE) limit = MIN_SQRT_PRICE + 1;
+        uint160 limit = _priceLimit(V4Lib.sqrtPriceX96(POOL_MANAGER, V4Lib.poolId(k)));
         int256 delta = POOL_MANAGER.swap(k, SwapParams(true, -int256(amount), limit), "");
         int128 a0 = V4Lib.amount0(delta);
         int128 a1 = V4Lib.amount1(delta);
@@ -157,10 +166,13 @@ contract RegiBuybackRehearsal is IUnlockCallback, ReentrancyGuard {
         // positive. At the limit the swap fills part of the chunk; pay only that.
         uint256 usdcIn = a0 < 0 ? uint256(uint128(-a0)) : 0;
         uint256 regiOut = a1 > 0 ? uint256(uint128(a1)) : 0;
+        // Exact-in never owes more than asked; only a hook with beforeSwapReturnsDelta could,
+        // and this pool's hook has none. Refuse rather than rely on that.
+        if (usdcIn > amount) revert Overcharged();
         if (usdcIn > 0) {
             POOL_MANAGER.sync(address(USDC));
             USDC.safeTransfer(address(POOL_MANAGER), usdcIn);
-            POOL_MANAGER.settle();
+            if (POOL_MANAGER.settle() != usdcIn) revert SettlementMismatch();
         }
         if (regiOut > 0) POOL_MANAGER.take(REGI, DEAD, regiOut);
         return abi.encode(usdcIn, regiOut);
