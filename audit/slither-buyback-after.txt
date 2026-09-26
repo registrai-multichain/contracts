@@ -1,0 +1,66 @@
+'forge clean' running (wd: /Users/tobiasd/Desktop/arc/contracts)
+'forge config --json' running
+'forge build --build-info src/buyback/RegiBuyback.sol' running (wd: /Users/tobiasd/Desktop/arc/contracts)
+INFO:Detectors:
+Detector: reentrancy-balance
+Reentrancy in RegiBuyback.burnChunk() (src/buyback/RegiBuyback.sol#120-146):
+	External call allowing reentrancy:
+	- (usdcIn,regiBurned) = abi.decode(POOL_MANAGER.unlock(abi.encode(amount)),(uint256,uint256)) (src/buyback/RegiBuyback.sol#138)
+	Balance read before the call:
+	- bal = USDC.balanceOf(address(this)) (src/buyback/RegiBuyback.sol#121)
+	Possible stale balance used after the call in a condition:
+	- regiBurned == 0 (src/buyback/RegiBuyback.sol#140)
+		- stale variable `regiBurned`
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities
+INFO:Detectors:
+Detector: incorrect-equality
+RegiBuyback.burnChunk() (src/buyback/RegiBuyback.sol#120-146) uses a dangerous strict equality:
+	- amount == 0 (src/buyback/RegiBuyback.sol#130)
+RegiBuyback.burnChunk() (src/buyback/RegiBuyback.sol#120-146) uses a dangerous strict equality:
+	- regiBurned == 0 (src/buyback/RegiBuyback.sol#140)
+RegiBuyback.sweepLedger() (src/buyback/RegiBuyback.sol#112-117) uses a dangerous strict equality:
+	- amount == 0 (src/buyback/RegiBuyback.sol#114)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
+INFO:Detectors:
+Detector: locked-ether
+Contract locking ether found:
+	Contract RegiBuyback (src/buyback/RegiBuyback.sol#17-180) has payable functions:
+	 - RegiBuyback.receive() (src/buyback/RegiBuyback.sol#87)
+	But does not have a function to withdraw the ether
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#contracts-that-lock-ether
+INFO:Detectors:
+Detector: missing-zero-check
+RegiBuyback.constructor(IPoolManagerMinimal,IERC20,address,address,uint24,int24,INanoLedgerMinimal).hooks (src/buyback/RegiBuyback.sol#67) lacks a zero-check on :
+		- HOOKS = hooks (src/buyback/RegiBuyback.sol#80)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#missing-zero-address-validation
+INFO:Detectors:
+Detector: reentrancy-benign
+Reentrancy in RegiBuyback.burnChunk() (src/buyback/RegiBuyback.sol#120-146):
+	External calls:
+	- (usdcIn,regiBurned) = abi.decode(POOL_MANAGER.unlock(abi.encode(amount)),(uint256,uint256)) (src/buyback/RegiBuyback.sol#138)
+	State variables written after the call(s):
+	- _swapping = false (src/buyback/RegiBuyback.sol#139)
+	- totalChunks += 1 (src/buyback/RegiBuyback.sol#144)
+	- totalRegiBurned += regiBurned (src/buyback/RegiBuyback.sol#143)
+	- totalUsdcSpent += usdcIn (src/buyback/RegiBuyback.sol#142)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-3
+INFO:Detectors:
+Detector: timestamp
+RegiBuyback.status() (src/buyback/RegiBuyback.sol#93-109) uses timestamp for comparisons
+	Dangerous comparisons:
+	- ready = block.timestamp >= nextChunkAt && balance > 0 && (chunksLeft > 0 || balance >= TRIGGER) (src/buyback/RegiBuyback.sol#107)
+RegiBuyback.burnChunk() (src/buyback/RegiBuyback.sol#120-146) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < nextChunkAt (src/buyback/RegiBuyback.sol#128)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#block-timestamp
+INFO:Detectors:
+Detector: naming-convention
+Variable RegiBuyback.POOL_MANAGER (src/buyback/RegiBuyback.sol#32) is not in mixedCase
+Variable RegiBuyback.USDC (src/buyback/RegiBuyback.sol#33) is not in mixedCase
+Variable RegiBuyback.REGI (src/buyback/RegiBuyback.sol#34) is not in mixedCase
+Variable RegiBuyback.HOOKS (src/buyback/RegiBuyback.sol#35) is not in mixedCase
+Variable RegiBuyback.FEE (src/buyback/RegiBuyback.sol#36) is not in mixedCase
+Variable RegiBuyback.TICK_SPACING (src/buyback/RegiBuyback.sol#37) is not in mixedCase
+Variable RegiBuyback.LEDGER (src/buyback/RegiBuyback.sol#38) is not in mixedCase
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#conformance-to-solidity-naming-conventions
+INFO:Slither:src/buyback/RegiBuyback.sol analyzed (11 contracts with 101 detectors), 16 result(s) found
