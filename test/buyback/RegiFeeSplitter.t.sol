@@ -115,4 +115,47 @@ contract RegiFeeSplitterTest is Test {
         (bool ok,) = address(sp).call{value: 1 ether}("");
         assertTrue(ok);
     }
+
+    // I1: while a repoint is pending, the buyback's 40% waits in the splitter instead of
+    // flowing to the buyback being replaced (which may be unable to swap).
+    function test_pendingRepointHoldsTheBuybackShare() public {
+        vm.prank(safe);
+        sp.proposeBuyback(next);
+        ledgerPay(100e6);
+        (uint256 b, uint256 s) = sp.distribute();
+        assertEq(b, 40e6);
+        assertEq(s, 60e6);
+        assertEq(usdc.balanceOf(buyback), 0, "old buyback must not receive during a pending repoint");
+        assertEq(usdc.balanceOf(safe), 60e6);
+        assertEq(sp.heldForBuyback(), 40e6);
+        assertEq(usdc.balanceOf(address(sp)), 40e6);
+        ledgerPay(50e6); // a second distribute splits only the new money, never the held share
+        sp.distribute();
+        assertEq(sp.heldForBuyback(), 60e6);
+        assertEq(usdc.balanceOf(safe), 90e6);
+    }
+
+    function test_acceptReleasesTheHeldShareToTheNewBuyback() public {
+        vm.prank(safe);
+        sp.proposeBuyback(next);
+        ledgerPay(100e6);
+        sp.distribute();
+        vm.warp(1_800_000_000 + 7 days);
+        vm.prank(safe);
+        sp.acceptBuyback();
+        assertEq(usdc.balanceOf(next), 40e6);
+        assertEq(sp.heldForBuyback(), 0);
+        assertEq(usdc.balanceOf(address(sp)), 0);
+    }
+
+    function test_cancelReleasesTheHeldShareToTheCurrentBuyback() public {
+        vm.prank(safe);
+        sp.proposeBuyback(next);
+        ledgerPay(100e6);
+        sp.distribute();
+        vm.prank(safe);
+        sp.cancelBuyback();
+        assertEq(usdc.balanceOf(buyback), 40e6);
+        assertEq(sp.heldForBuyback(), 0);
+    }
 }

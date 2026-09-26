@@ -20,13 +20,24 @@ contract DeployBuyback is Script {
     address constant REGI = 0x93D5b8c53ee763C2c4522bF0d958ce51Af4360ae;
     address constant HOOKS = 0x779A7F22480db20eD3Ed2BB7950B207Ce71Ae044;
     bytes32 constant POOL_ID = 0x0530f18eb32d732cc8b067bbd0b2ba7e5d807d4f5cf4f7d74429f2a78d3120c8;
+    /// The Admin Safe (deployments/arc-mainnet.json builders.roles.adminSafe): the splitter's
+    /// permanent 60% recipient and the only address that can repoint the 40%.
+    address constant ADMIN_SAFE = 0xFeE926e8Be2D1C6192213cf20f31D94Dad1e80Fb;
 
     function run() external returns (RegiBuyback bb, RegiFeeSplitter sp) {
+        return deploy(vm.envAddress("SAFE"), vm.envAddress("NANO_LEDGER"));
+    }
+
+    /// @dev The same deploy with explicit inputs (tests call this: env vars are process-wide
+    ///      and forge runs tests in parallel).
+    function deploy(address safe, address ledger) public returns (RegiBuyback bb, RegiFeeSplitter sp) {
         require(block.chainid == 5042, "DeployBuyback: Arc mainnet only");
-        address safe = vm.envAddress("SAFE");
-        address ledger = vm.envAddress("NANO_LEDGER");
-        require(safe.code.length > 0, "SAFE must be the Admin Safe (a contract)");
+        require(safe == ADMIN_SAFE, "SAFE must be the Admin Safe 0xFeE9...80Fb");
         require(ledger.code.length > 0, "NANO_LEDGER must be the shared ledger");
+        // MarketsV4 pays the splitter on its ledger; a ledger on another token (or a
+        // different ledger than DeployNanoStack uses) strands 100% of treasury income.
+        (bool ok, bytes memory ret) = ledger.staticcall(abi.encodeWithSignature("USDC()"));
+        require(ok && ret.length == 32 && abi.decode(ret, (address)) == USDC, "NANO_LEDGER must hold Arc USDC (0x3600...)");
         require(V4Lib.poolId(PoolKey(USDC, REGI, 10_000, 200, HOOKS)) == POOL_ID, "pool key");
         require(V4Lib.sqrtPriceX96(PM, POOL_ID) > 0, "pool not initialized");
 
@@ -35,8 +46,15 @@ contract DeployBuyback is Script {
         sp = new RegiFeeSplitter(INanoLedgerMinimal(ledger), IERC20(USDC), safe, address(bb));
         vm.stopBroadcast();
 
+        require(V4Lib.poolId(bb.key()) == POOL_ID, "deployed buyback: pool key");
+        require(sp.buyback() == address(bb), "deployed splitter: buyback");
+        require(address(bb.LEDGER()) == ledger && address(sp.LEDGER()) == ledger, "deployed pair: one ledger");
+        require(sp.SAFE() == ADMIN_SAFE, "deployed splitter: Safe");
+
         console.log("RegiBuyback     ", address(bb));
         console.log("RegiFeeSplitter ", address(sp));
-        console.log("next: DeployNanoStack with TREASURY =", address(sp));
+        console.log("next: CANARY GATE before any TREASURY points at the splitter:");
+        console.log("  send 200 USDC to the buyback and press burnChunk() 4 times, 10 min apart;");
+        console.log("  every press must burn REGI to 0x...dEaD. Only then DeployNanoStack with TREASURY =", address(sp));
     }
 }

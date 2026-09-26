@@ -11,7 +11,9 @@ import {INanoLedgerMinimal} from "./INanoLedgerMinimal.sol";
 ///         balance). distribute() withdraws that balance and splits ALL the USDC this
 ///         contract holds: BUYBACK_BPS (40%, immutable) to the buyback, the rest to the
 ///         Safe. Anyone may call it. The one mutable thing is where the 40% goes: the
-///         Safe may repoint it, public for REPOINT_DELAY before it lands.
+///         Safe may repoint it, public for REPOINT_DELAY before it lands. While a
+///         repoint is pending the 40% waits here (heldForBuyback), released to the new
+///         buyback on accept or back to the current one on cancel.
 contract RegiFeeSplitter is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -25,11 +27,17 @@ contract RegiFeeSplitter is ReentrancyGuard {
     address public buyback;
     address public pendingBuyback;
     uint256 public pendingSince;
+    /// @notice The buyback's share held back while a repoint is pending, so it can't
+    ///         flow to the buyback being replaced. Released on accept (to the new one)
+    ///         or cancel (to the current one).
+    uint256 public heldForBuyback;
 
     event Distributed(uint256 toBuyback, uint256 toSafe);
     event BuybackProposed(address indexed next, uint256 activeAt);
     event BuybackChanged(address indexed previous, address indexed next);
     event BuybackProposalCancelled(address indexed next);
+    event HeldForRepoint(uint256 amount, uint256 totalHeld);
+    event HeldReleased(address indexed to, uint256 amount);
 
     error NotSafe();
     error ZeroAddress();
@@ -56,11 +64,17 @@ contract RegiFeeSplitter is ReentrancyGuard {
     function distribute() external nonReentrant returns (uint256 toBuyback, uint256 toSafe) {
         uint256 onLedger = LEDGER.balanceOf(address(this));
         if (onLedger > 0) LEDGER.withdraw(onLedger);
-        uint256 bal = USDC.balanceOf(address(this));
+        // Only new money is split; a share held for a pending repoint is not re-split.
+        uint256 bal = USDC.balanceOf(address(this)) - heldForBuyback;
         if (bal == 0) return (0, 0);
         toBuyback = bal * BUYBACK_BPS / 10_000;
         toSafe = bal - toBuyback;
-        if (toBuyback > 0) USDC.safeTransfer(buyback, toBuyback);
+        if (pendingBuyback != address(0)) {
+            heldForBuyback += toBuyback;
+            emit HeldForRepoint(toBuyback, heldForBuyback);
+        } else if (toBuyback > 0) {
+            USDC.safeTransfer(buyback, toBuyback);
+        }
         USDC.safeTransfer(SAFE, toSafe);
         emit Distributed(toBuyback, toSafe);
     }
@@ -72,7 +86,7 @@ contract RegiFeeSplitter is ReentrancyGuard {
         emit BuybackProposed(next, block.timestamp + REPOINT_DELAY);
     }
 
-    function acceptBuyback() external onlySafe {
+    function acceptBuyback() external onlySafe nonReentrant {
         address next = pendingBuyback;
         if (next == address(0)) revert NoPending();
         uint256 at = pendingSince + REPOINT_DELAY;
@@ -81,13 +95,23 @@ contract RegiFeeSplitter is ReentrancyGuard {
         buyback = next;
         pendingBuyback = address(0);
         pendingSince = 0;
+        _releaseHeld();
     }
 
-    function cancelBuyback() external onlySafe {
+    function cancelBuyback() external onlySafe nonReentrant {
         address next = pendingBuyback;
         if (next == address(0)) revert NoPending();
         pendingBuyback = address(0);
         pendingSince = 0;
         emit BuybackProposalCancelled(next);
+        _releaseHeld();
+    }
+
+    function _releaseHeld() internal {
+        uint256 amount = heldForBuyback;
+        if (amount == 0) return;
+        heldForBuyback = 0;
+        USDC.safeTransfer(buyback, amount);
+        emit HeldReleased(buyback, amount);
     }
 }

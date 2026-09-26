@@ -7,6 +7,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {PoolKey, IPoolManagerMinimal, V4Lib} from "../../src/buyback/UniswapV4Minimal.sol";
 import {RegiBuyback} from "../../src/buyback/RegiBuyback.sol";
 import {INanoLedgerMinimal} from "../../src/buyback/INanoLedgerMinimal.sol";
+import {RegiFeeSplitter} from "../../src/buyback/RegiFeeSplitter.sol";
+import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
+import {MockUSDC} from "../MockUSDC.sol";
+import {DeployBuyback} from "../../script/DeployBuyback.s.sol";
 
 /// Arc moves native USDC (which the ERC-20 at 0x3600 mirrors) through a chain
 /// precompile at 0x1800…: `transfer(from, to, amount18)`. A local fork cannot run it
@@ -86,5 +90,41 @@ contract RegiBuybackForkTest is Test {
         assertEq(IERC20(REGI).balanceOf(address(bb)), 0, "no REGI rests in the buyback");
         emit log_named_uint("USDC in", inAmt);
         emit log_named_uint("REGI burned", burned);
+    }
+
+    address constant SAFE = 0xFeE926e8Be2D1C6192213cf20f31D94Dad1e80Fb;
+
+    // I2: the deploy must refuse a ledger that doesn't hold Arc USDC (MarketsV4 would pay
+    // the splitter on a ledger it can never withdraw from) and a wrong Safe.
+    function testFork_deployRefusesALedgerThatIsNotOnArcUsdc() public {
+        NanoLedger wrong = new NanoLedger(IERC20(address(new MockUSDC())), address(this));
+        DeployBuyback d = new DeployBuyback();
+        vm.expectRevert(bytes("NANO_LEDGER must hold Arc USDC (0x3600...)"));
+        d.deploy(SAFE, address(wrong));
+    }
+
+    function testFork_deployRefusesAnyOtherSafe() public {
+        NanoLedger ledger = new NanoLedger(USDC, address(this));
+        DeployBuyback d = new DeployBuyback();
+        vm.expectRevert(bytes("SAFE must be the Admin Safe 0xFeE9...80Fb"));
+        d.deploy(address(ledger), address(ledger)); // SAFE: a contract, but not the Admin Safe
+    }
+
+    function testFork_deployWiresTheBuybackAndSplitterToOneLedger() public {
+        NanoLedger ledger = new NanoLedger(USDC, address(this));
+        (RegiBuyback bb, RegiFeeSplitter sp) = new DeployBuyback().deploy(SAFE, address(ledger));
+        assertEq(sp.buyback(), address(bb));
+        assertEq(address(bb.LEDGER()), address(sp.LEDGER()));
+        assertEq(address(sp.LEDGER()), address(ledger));
+        assertEq(V4Lib.poolId(bb.key()), POOL_ID);
+    }
+
+    // I3/M1: the sandwich argument rests on the Argus hook's taxes; pin them.
+    function testFork_argusHookTaxesAreTheImmutableOnesTheDesignAssumes() public view {
+        (bool okB, bytes memory b) = HOOKS.staticcall(abi.encodeWithSignature("buyTaxBps()"));
+        (bool okS, bytes memory s) = HOOKS.staticcall(abi.encodeWithSignature("sellTaxBps()"));
+        assertTrue(okB && okS, "hook tax getters");
+        assertEq(abi.decode(b, (uint256)), 100, "buy tax 1%");
+        assertEq(abi.decode(s, (uint256)), 300, "sell tax 3%");
     }
 }
