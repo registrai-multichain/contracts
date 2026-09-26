@@ -62,12 +62,12 @@
     "MarketsPerennial_v3": "0x6a25D79D7664c284c0D130B0a385b9cAdf3481c7",
     "ProgressArbiter_v3": "0x8Cb2FAD547cFc42081CA04f4c3c03588E27E0e98",
     "NanoLedger": "0x02D278930B67A290fEfE93Ac049a086A9b5e0FB5",
-    "MarketsV4": "0xff3dcbB85ED027395C915e1EeF7353453A84a594",
+    "MarketsV4": "0xf98Be8dA6AB0262B6dA5Dc0D090aAB331A961cB9",
     "BuilderRegistry": "0xB52FC2AB9b2457D8c56d3b4A624543aD61c70D9C",
     "CaretakerRegistry": "0x7adDA1fe8c6F3A5D405dc1F1aF68B42f2F6CAa78",
-    "MarketsPerennial": "0xFA2034ea39Fb6e04137239e1dfb0beC995938E9e",
-    "BuilderFund": "0x06ef72DE4Cb130e7F3EC2807eC34066053c86C8d",
-    "SeasonPool": "0x96c7C8E5E2805334c30C23C94930542E91D19567",
+    "MarketsPerennial": "0x243Ad74b2CE035f00E23288F8F016E9D11172d3a",
+    "BuilderFund": "0xA210565Aa9ABc61808a1Ff3a9cE562105074EA67",
+    "SeasonPool": "0xffeDbd5967a1a5b46cf26554B6D62687faB801be",
     "VerifiedBuilderBadge": "0xBF7FF680e0Ee7472E244cf2550EE016939cb6335",
     "Registry_v4": "0x770d0feedcDa264c9d5C835D56fA7903cbC5719c",
     "Attestation_v4": "0xeA2804dE57Ac57D17E77fC7ad5F55726636E74B7",
@@ -75,7 +75,17 @@
     "MarketsPerennial_v4": "0xF12F3427d9b47f4019809E7B753494A32C3e3a3B",
     "MarketsV4_v4": "0xCcf185a2200B24624c404fF373BbEf1423aE09c6",
     "BuilderFund_v4": "0x7e83096F8Ef50024e7bE106E47F1BD8ce2e882D1",
-    "SeasonPool_v4": "0x56b3Ffc1c5DA4F867C3Fd56Be5dA731d457E32aA"
+    "SeasonPool_v4": "0x56b3Ffc1c5DA4F867C3Fd56Be5dA731d457E32aA",
+    "MarketsPerennial_v5": "0xFA2034ea39Fb6e04137239e1dfb0beC995938E9e",
+    "MarketsV4_v5": "0xff3dcbB85ED027395C915e1EeF7353453A84a594",
+    "BuilderFund_v5": "0x06ef72DE4Cb130e7F3EC2807eC34066053c86C8d",
+    "SeasonPool_v5": "0x96c7C8E5E2805334c30C23C94930542E91D19567",
+    "WonderEscrow": "0x78813F2FDBe804F3073632e7D8c4adDaEcdF9c2A",
+    "Registry_v6": "0xa3205b555e48e80A49b8464706b1263CdCe67a50",
+    "Attestation_v6": "0xC526Ad338A3562ACd045ECdc317b129876D4cE9c",
+    "Dispute_v6": "0x47634A84a5BD97eE0281B56Af28406BF3bF706B0",
+    "MarketsV4_v6": "0xC27F9779e7Fb01C64Bb1634191C9E219dA251F4c",
+    "MarketsV4_sessions_v1": "0xd77fa5a7A88E2797F281c54CB1DaAfF73E558DF9"
   },
   "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
   "feeds": [
@@ -365,7 +375,7 @@
         "The caretaker MUST run as operator_addr \u2014 propose needs PROPOSER_ROLE + registered caretaker. Running as the deployer degrades silently to 'propose FAILED' every tick; the runner now preflights the role and exits 1 rather than half-working."
       ]
     },
-    "deployBlock": 63826822,
+    "deployBlock": 63992119,
     "blockTimeSeconds": 0.555,
     "builders": {
       "note": "Builder #1 (the deployer, registered during testing) was setActive(false) on 2026-09-21 so the atlas starts empty for a real registration. Builder #2 was the junk 0x...c2 the caretaker onboarded from demo builders.json, also inactive. There is no delete in BuilderRegistry, so ids 1 and 2 stay occupied and the next real registration is #3.",
@@ -416,10 +426,10 @@
       }
     },
     "builderFund": {
-      "address": "0x06ef72DE4Cb130e7F3EC2807eC34066053c86C8d"
+      "address": "0xA210565Aa9ABc61808a1Ff3a9cE562105074EA67"
     },
     "seasonPool": {
-      "address": "0x96c7C8E5E2805334c30C23C94930542E91D19567"
+      "address": "0xffeDbd5967a1a5b46cf26554B6D62687faB801be"
     },
     "v5": {
       "deployedAt": "2026-09-25",
@@ -429,6 +439,17 @@
       "marketsV4": "0xff3dcbB85ED027395C915e1EeF7353453A84a594",
       "builderFund": "0x06ef72DE4Cb130e7F3EC2807eC34066053c86C8d",
       "seasonPool": "0x96c7C8E5E2805334c30C23C94930542E91D19567"
+    },
+    "v6": {
+      "deployedAt": "2026-09-25",
+      "deployBlock": 63992119,
+      "record": "deployments/arc-testnet-v6.json",
+      "note": "Switched 2026-09-26 after the owner's v5 live test closed (arc-78 confirmed all v5 check-ins done, nothing open on v5). Contract keys now point at v6: oracle v6 (Registry_v6/Attestation_v6/Dispute_v6; the top-level Registry/Attestation/Dispute stay the v1 stack), MarketsPerennial + WonderEscrow + BuilderFund + SeasonPool v6, MarketsV4 = the live session V4 v2 0xf98B\u20261cB9 (deployBlock 64119042, record deployments/arc-testnet-v6-rounds.json); the v6 V4 0xC27F\u2026 (MarketsV4_v6) and session v1 0xd77f\u2026 (MarketsV4_sessions_v1) are retired, settle-only through the rounds agent. v5 kept as *_v5.",
+      "marketsPerennial": "0x243Ad74b2CE035f00E23288F8F016E9D11172d3a",
+      "wonderEscrow": "0x78813F2FDBe804F3073632e7D8c4adDaEcdF9c2A",
+      "builderFund": "0xA210565Aa9ABc61808a1Ff3a9cE562105074EA67",
+      "seasonPool": "0xffeDbd5967a1a5b46cf26554B6D62687faB801be",
+      "marketsV4": "0xf98Be8dA6AB0262B6dA5Dc0D090aAB331A961cB9"
     }
   }
 }
