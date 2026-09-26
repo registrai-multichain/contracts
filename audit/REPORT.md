@@ -12,7 +12,7 @@
 | Critical | 0 | |
 | High | 0 | |
 | Medium | 0 | |
-| Low | 3 fixed + 3 open (design decisions) | L-1, L-2 and L-3 fixed with tests. L-4, L-5 and L-6 are yours to decide. |
+| Low | 4 fixed + 2 accepted | L-1, L-2, L-3 and L-5 fixed with tests. L-4 (leftover waits for income) and L-6 (press timing) accepted by the owner. |
 | Informational | 7 | |
 
 No path was found for USDC to leave `RegiBuyback` except as swap spend into the PoolManager. No path was found for REGI to rest anywhere but `0x…dEaD`, or for the 40/60 split, the 7-day delay or the round rules to be bypassed. Each claim below is backed by a tool result.
@@ -25,7 +25,7 @@ No path was found for USDC to leave `RegiBuyback` except as swap spend into the 
 | Static analysis | Aderyn 0.6.8 | 3 "High" and 5 "Low" labels. All false positives or style on review (triage below). |
 | Stateful invariant fuzzing | Foundry | 7 invariants × 2,000 sequences × 300 calls = **600,000 calls each**, run on the code before and after the fixes. All hold. |
 | Reach check | Foundry replay | Over 6,000 random actions: 683 burns, 172 rounds, 204 partial fills, 122 held distributes, 24 accepted and 219 cancelled redirects. The campaign really exercises the risky states. |
-| Mutation testing | 14 planted bugs (audit/mutate.py) | **14 of 14 caught** by the unit and audit suites (details below). |
+| Mutation testing | 16 planted bugs (audit/mutate.py) | **16 of 16 caught** by the unit and audit suites (details below). |
 | Coverage-guided fuzzing | Echidna 2.3.3 | 7 properties (same handler) over **500,804 calls**: all pass. A first run falsified one property; that was a harness artifact (the handler's private clock missed Echidna's own time jumps: a redirect accepted after 7.04 real days was wrongly flagged). The handler now reads real block time. |
 | Symbolic execution | Halmos 0.3.3 (z3, bitwuzla 0.9.1) | **Proven for every input:** the price limit is always above v4's minimum, the limit is below any real pool price (so the swap direction is always valid), 0.98995² ≥ 0.98 (so the cap is at most 2%), `BalanceDelta` decoding round-trips for all value pairs, and owed USDC equals the delta's magnitude. **Out of solver reach** (timeouts, no counterexample): the exact-floor identity and the 40/60 split, which are 256-bit multiply-then-divide. Both are covered by 100,000-run fuzz twins and exercised 600,000 times in the invariant campaign. |
 | Fork fuzzing | Foundry on an Arc mainnet fork (real PoolManager, Argus hook, REGI) | 40 runs × 6 random steps. Every chunk lands REGI at dead, is never better than spot, and is no worse than spot minus fees and the 2% cap. The L-2 settle check passes against the real PoolManager. |
@@ -72,15 +72,19 @@ The PoolManager already enforces full settlement, but the contract didn't check 
 ### L-3 (fixed): round state was written after the external swap
 `chunksLeft` and `nextChunkAt` were updated after `unlock`. The re-entry guard already blocked exploitation, but checks-effects-interactions is safer against future edits. **Fix:** both are now written before the swap; only the totals, which depend on the swap's result, come after. Test: `test_audit_roundIsCountedDownBeforeTheSwap`.
 
-### L-4 (open, design): a leftover below $200 waits for more income
+### L-4 (accepted by the owner 2026-09-27): a leftover below $200 waits for more income
 Rounds open only at $200 or more. After partial fills, or if income stops for good, a leftover under $200 stays in the buyback until more arrives. Anyone can top it up to $200 to unlock it, and it can never be taken out, so nothing is lost; it is only delayed. **Option:** after, say, 30 days without a round, allow a round to open with any balance of at least one chunk.
 
-### L-5 (open, design): USDC blocklist and pause
-Arc's USDC is Circle's, and Circle can pause it or blocklist addresses.
-- **Buyback blocklisted:** it can't pay the pool, so its USDC stays locked. The Safe can redirect the splitter's future 40% elsewhere.
-- **Safe blocklisted:** `distribute()` reverts, because `SAFE` is immutable, and all splitter income waits.
+### L-5 (fixed 2026-09-27): a blocklisted Safe could stop the buyback
+Arc's USDC is Circle's, and Circle can pause it or blocklist addresses. `distribute()` used to push 60% to the Safe in the same transaction as the buyback's 40%, so a blocklisted Safe would have reverted every split and stopped the buyback too.
 
-**Option:** pay the Safe's leg by pull instead of push, or let the Safe redirect its own leg with the same 7-day delay. The likelihood is low, but the impact while it lasts is total.
+**Fix (owner's decision):** the Safe now pulls.
+- `distribute()` pays the 40% and records the 60% in `owedToSafe`, which is never split again.
+- `collectSafe()` pays the Safe; anyone can call it, but it only ever pays `SAFE`.
+
+A blocklisted Safe now blocks only its own collection. Test: `test_aBlocklistedSafeDoesNotStopTheBuyback`, with a blocklist-capable USDC. Invariants now account for `owedToSafe`; mutants S6 and S7 are caught.
+
+**Remaining:** if the *buyback* itself were blocklisted, its USDC stays locked, and the Safe can redirect the splitter's future 40% with 7 days' notice. A global USDC pause stops everything until lifted.
 
 ### L-6 (open, design): press timing is the presser's choice
 Anyone can press whenever a chunk is ready, so they choose the moment within each cooldown window. A trader could press right after pushing the price up. The 2% cap and the hook's 1% + 3% taxes make pumping to exploit a $50 chunk unprofitable (see the M1 note in the spec); what remains is mild timing noise. No change recommended while the hook taxes stay as they are.

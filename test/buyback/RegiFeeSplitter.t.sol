@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MockUSDC} from "../MockUSDC.sol";
+import {BlocklistUSDC} from "./BlocklistUSDC.sol";
 import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
 import {RegiFeeSplitter} from "../../src/buyback/RegiFeeSplitter.sol";
 import {INanoLedgerMinimal} from "../../src/buyback/INanoLedgerMinimal.sol";
@@ -35,7 +36,8 @@ contract RegiFeeSplitterTest is Test {
         assertEq(b, 40e6);
         assertEq(s, 60e6);
         assertEq(usdc.balanceOf(buyback), 40e6);
-        assertEq(usdc.balanceOf(safe), 60e6);
+        assertEq(sp.owedToSafe(), 60e6);
+        assertEq(usdc.balanceOf(safe), 0, "the Safe's leg is recorded, not pushed");
         assertEq(ledger.balanceOf(address(sp)), 0);
     }
 
@@ -44,7 +46,7 @@ contract RegiFeeSplitterTest is Test {
         ledgerPay(15e6);
         sp.distribute();
         assertEq(usdc.balanceOf(buyback), 10e6);
-        assertEq(usdc.balanceOf(safe), 15e6);
+        assertEq(sp.owedToSafe(), 15e6);
     }
 
     function test_roundingGoesToTheSafe() public {
@@ -126,13 +128,13 @@ contract RegiFeeSplitterTest is Test {
         assertEq(b, 40e6);
         assertEq(s, 60e6);
         assertEq(usdc.balanceOf(buyback), 0, "old buyback must not receive during a pending repoint");
-        assertEq(usdc.balanceOf(safe), 60e6);
+        assertEq(sp.owedToSafe(), 60e6);
         assertEq(sp.heldForBuyback(), 40e6);
-        assertEq(usdc.balanceOf(address(sp)), 40e6);
+        assertEq(usdc.balanceOf(address(sp)), 100e6); // 40 held for the repoint + 60 owed to the Safe
         ledgerPay(50e6); // a second distribute splits only the new money, never the held share
         sp.distribute();
         assertEq(sp.heldForBuyback(), 60e6);
-        assertEq(usdc.balanceOf(safe), 90e6);
+        assertEq(sp.owedToSafe(), 90e6);
     }
 
     function test_acceptReleasesTheHeldShareToTheNewBuyback() public {
@@ -145,7 +147,7 @@ contract RegiFeeSplitterTest is Test {
         sp.acceptBuyback();
         assertEq(usdc.balanceOf(next), 40e6);
         assertEq(sp.heldForBuyback(), 0);
-        assertEq(usdc.balanceOf(address(sp)), 0);
+        assertEq(usdc.balanceOf(address(sp)), 60e6); // only the Safe's uncollected leg remains
     }
 
     function test_cancelReleasesTheHeldShareToTheCurrentBuyback() public {
@@ -157,5 +159,58 @@ contract RegiFeeSplitterTest is Test {
         sp.cancelBuyback();
         assertEq(usdc.balanceOf(buyback), 40e6);
         assertEq(sp.heldForBuyback(), 0);
+    }
+
+    // ---- audit L-5: the Safe collects its 60%; a blocklisted Safe can't stop the buyback ----
+
+    function test_collectSafePaysTheSafeAndZeroes() public {
+        ledgerPay(100e6);
+        sp.distribute();
+        assertEq(sp.collectSafe(), 60e6);
+        assertEq(usdc.balanceOf(safe), 60e6);
+        assertEq(sp.owedToSafe(), 0);
+        assertEq(usdc.balanceOf(address(sp)), 0);
+    }
+
+    function test_collectWithNothingOwedIsANoOp() public {
+        assertEq(sp.collectSafe(), 0);
+    }
+
+    function test_anyoneCanCollectButOnlyTheSafeIsPaid() public {
+        ledgerPay(100e6);
+        sp.distribute();
+        vm.prank(makeAddr("stranger"));
+        sp.collectSafe();
+        assertEq(usdc.balanceOf(safe), 60e6);
+        assertEq(usdc.balanceOf(makeAddr("stranger")), 0);
+    }
+
+    function test_owedToSafeIsNeverResplit() public {
+        ledgerPay(100e6);
+        sp.distribute(); // 40 to the buyback, 60 owed to the Safe
+        ledgerPay(10e6);
+        (uint256 b, uint256 s) = sp.distribute(); // only the new 10 is split
+        assertEq(b, 4e6);
+        assertEq(s, 6e6);
+        assertEq(sp.owedToSafe(), 66e6);
+        assertEq(usdc.balanceOf(buyback), 44e6);
+    }
+
+    function test_aBlocklistedSafeDoesNotStopTheBuyback() public {
+        BlocklistUSDC bu = new BlocklistUSDC();
+        NanoLedger bl = new NanoLedger(IERC20(address(bu)), address(this));
+        RegiFeeSplitter s2 = new RegiFeeSplitter(INanoLedgerMinimal(address(bl)), IERC20(address(bu)), safe, buyback);
+        bu.setBlocked(safe, true); // Circle blocklists the Safe
+        bu.mint(address(this), 100e6);
+        bu.approve(address(bl), 100e6);
+        bl.depositTo(address(s2), 100e6);
+        s2.distribute(); // must not revert
+        assertEq(bu.balanceOf(buyback), 40e6, "the buyback still gets its 40%");
+        assertEq(s2.owedToSafe(), 60e6);
+        vm.expectRevert(bytes("blocklisted"));
+        s2.collectSafe(); // only the Safe's own collection fails
+        bu.setBlocked(safe, false);
+        s2.collectSafe();
+        assertEq(bu.balanceOf(safe), 60e6);
     }
 }

@@ -36,7 +36,9 @@ contract BuybackFlowTest is Test {
         ledger.depositTo(address(sp), 500e6);
         sp.distribute();
         assertEq(usdc.balanceOf(address(bb)), 200e6); // 40%
-        assertEq(usdc.balanceOf(safe), 300e6); // 60%
+        assertEq(sp.owedToSafe(), 300e6); // 60%, recorded
+        sp.collectSafe();
+        assertEq(usdc.balanceOf(safe), 300e6);
 
         uint256 t = 1_800_000_000; // local clock (via_ir reuses block.timestamp reads)
         for (uint256 i; i < 4; i++) {

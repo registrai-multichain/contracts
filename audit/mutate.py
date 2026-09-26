@@ -17,7 +17,9 @@ MUTANTS = [
   ("S1 41% instead of 40%", S, "    uint256 public constant BUYBACK_BPS = 4000;", "    uint256 public constant BUYBACK_BPS = 4100;"),
   ("S2 pay the old buyback during a pending repoint", S, "        if (pendingBuyback != address(0)) {", "        if (false) {"),
   ("S3 accept doesn't release the held share", S, "        pendingSince = 0;\n        _releaseHeld();\n    }\n\n    function cancelBuyback", "        pendingSince = 0;\n    }\n\n    function cancelBuyback"),
-  ("S4 re-split the held share", S, "        uint256 bal = USDC.balanceOf(address(this)) - heldForBuyback;", "        uint256 bal = USDC.balanceOf(address(this));"),
+  ("S4 re-split the held share", S, "        uint256 bal = USDC.balanceOf(address(this)) - heldForBuyback - owedToSafe;", "        uint256 bal = USDC.balanceOf(address(this)) - owedToSafe;"),
+  ("S6 re-split the Safe's owed money (L-5)", S, "        uint256 bal = USDC.balanceOf(address(this)) - heldForBuyback - owedToSafe;", "        uint256 bal = USDC.balanceOf(address(this)) - heldForBuyback;"),
+  ("S7 collectSafe doesn't zero the debt (L-5)", S, "        owedToSafe = 0;\n        USDC.safeTransfer(SAFE, amount);", "        USDC.safeTransfer(SAFE, amount);"),
   ("S5 no repoint delay", S, "        if (block.timestamp < at) revert TooEarly(at);", ""),
 ]
 def run(cmd):

@@ -99,15 +99,15 @@ contract BuybackHandler is Test {
     function distribute() external {
         (uint256 a0, uint256 b0) = _snapshot();
         uint256 held0 = sp.heldForBuyback();
-        uint256 newMoney = _bal(address(sp)) + ledger.balanceOf(address(sp)) - held0;
-        uint256 safe0 = _bal(safe);
+        uint256 newMoney = _bal(address(sp)) + ledger.balanceOf(address(sp)) - held0 - sp.owedToSafe();
+        uint256 owed0 = sp.owedToSafe();
         address target = sp.buyback();
         uint256 target0 = _bal(target);
         bool pending = sp.pendingBuyback() != address(0);
         (uint256 toB, uint256 toS) = sp.distribute();
         if (toB + toS != newMoney) _flag("distribute did not split exactly the new money");
         if (toB != newMoney * 4000 / 10_000) _flag("buyback leg is not floor(40%)");
-        if (_bal(safe) - safe0 != toS) _flag("Safe did not receive its leg");
+        if (sp.owedToSafe() - owed0 != toS) _flag("Safe's leg not recorded");
         if (pending) {
             if (toB > 0) heldDistributes++;
             if (sp.heldForBuyback() != held0 + toB) _flag("pending repoint: 40% not held");
@@ -118,6 +118,13 @@ contract BuybackHandler is Test {
         ghostSplitTotal += toB + toS;
         ghostBuybackShare += toB;
         _checkNoLeak(a0, b0);
+    }
+
+    function collectSafe() external {
+        uint256 owed = sp.owedToSafe();
+        uint256 safe0 = _bal(safe);
+        uint256 got = sp.collectSafe();
+        if (got != owed || _bal(safe) - safe0 != owed || sp.owedToSafe() != 0) _flag("collectSafe paid other than what was owed");
     }
 
     // ---- the buyback ----
@@ -280,11 +287,11 @@ contract BuybackInvariantTest is Test {
 
     function invariant_heldOnlyDuringAPendingRepointAndAlwaysBacked() public view {
         if (sp.pendingBuyback() == address(0)) assertEq(sp.heldForBuyback(), 0);
-        assertLe(sp.heldForBuyback(), usdc.balanceOf(address(sp)));
+        assertLe(sp.heldForBuyback() + sp.owedToSafe(), usdc.balanceOf(address(sp)));
     }
 
     function invariant_theSafeGetsExactlyThe60PercentLegs() public view {
-        assertEq(usdc.balanceOf(safe), h.ghostSplitTotal() - h.ghostBuybackShare());
+        assertEq(usdc.balanceOf(safe) + sp.owedToSafe(), h.ghostSplitTotal() - h.ghostBuybackShare());
     }
 
     /// Reach, not correctness: logged after the campaign so a green run can be shown to have

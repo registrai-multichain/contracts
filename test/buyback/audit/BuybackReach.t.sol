@@ -17,7 +17,7 @@ contract BuybackReachTest is BuybackInvariantTest {
             uint256 x = seed >> 8;
             if (a == 0) h.fundDirect(x, x & 1 == 1);
             else if (a == 1) h.payTreasury(x, x & 1 == 1);
-            else if (a == 2) h.distribute();
+            else if (a == 2) { h.distribute(); if (x % 4 == 0) h.collectSafe(); }
             else if (a == 3 || a == 4) h.burn(x & 1 == 1);
             else if (a == 5 || a == 6) h.warp(x);
             else if (a == 7) h.setFill(x % 3 == 0 ? x : 10_000);

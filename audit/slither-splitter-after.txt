@@ -1,0 +1,39 @@
+'forge clean' running (wd: /Users/tobiasd/Desktop/arc/contracts)
+'forge config --json' running
+'forge build --build-info src/buyback/RegiFeeSplitter.sol' running (wd: /Users/tobiasd/Desktop/arc/contracts)
+INFO:Detectors:
+Detector: incorrect-equality
+RegiFeeSplitter._releaseHeld() (src/buyback/RegiFeeSplitter.sol#125-131) uses a dangerous strict equality:
+	- amount == 0 (src/buyback/RegiFeeSplitter.sol#127)
+RegiFeeSplitter.distribute() (src/buyback/RegiFeeSplitter.sol#69-86) uses a dangerous strict equality:
+	- bal == 0 (src/buyback/RegiFeeSplitter.sol#75)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
+INFO:Detectors:
+Detector: locked-ether
+Contract locking ether found:
+	Contract RegiFeeSplitter (src/buyback/RegiFeeSplitter.sol#17-132) has payable functions:
+	 - RegiFeeSplitter.receive() (src/buyback/RegiFeeSplitter.sol#62)
+	But does not have a function to withdraw the ether
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#contracts-that-lock-ether
+INFO:Detectors:
+Detector: reentrancy-benign
+Reentrancy in RegiFeeSplitter.distribute() (src/buyback/RegiFeeSplitter.sol#69-86):
+	External calls:
+	- LEDGER.withdraw(onLedger) (src/buyback/RegiFeeSplitter.sol#71)
+	State variables written after the call(s):
+	- heldForBuyback += toBuyback (src/buyback/RegiFeeSplitter.sol#79)
+	- owedToSafe += toSafe (src/buyback/RegiFeeSplitter.sol#84)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-3
+INFO:Detectors:
+Detector: timestamp
+RegiFeeSplitter.acceptBuyback() (src/buyback/RegiFeeSplitter.sol#104-114) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < at (src/buyback/RegiFeeSplitter.sol#108)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#block-timestamp
+INFO:Detectors:
+Detector: naming-convention
+Variable RegiFeeSplitter.LEDGER (src/buyback/RegiFeeSplitter.sol#23) is not in mixedCase
+Variable RegiFeeSplitter.USDC (src/buyback/RegiFeeSplitter.sol#24) is not in mixedCase
+Variable RegiFeeSplitter.SAFE (src/buyback/RegiFeeSplitter.sol#25) is not in mixedCase
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#conformance-to-solidity-naming-conventions
+INFO:Slither:src/buyback/RegiFeeSplitter.sol analyzed (8 contracts with 101 detectors), 8 result(s) found

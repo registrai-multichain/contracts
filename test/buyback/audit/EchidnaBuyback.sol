@@ -56,6 +56,7 @@ contract EchidnaBuyback {
     function accept() external { h.accept(); }
     function cancel() external { h.cancel(); }
     function attack(uint256 w) external { h.attack(w); }
+    function collectSafe() external { h.collectSafe(); }
 
     // ---- properties ----
     function echidna_no_violation() external view returns (bool) {
@@ -75,11 +76,11 @@ contract EchidnaBuyback {
     }
 
     function echidna_held_only_while_pending() external view returns (bool) {
-        return (sp.pendingBuyback() != address(0) || sp.heldForBuyback() == 0) && sp.heldForBuyback() <= usdc.balanceOf(address(sp));
+        return (sp.pendingBuyback() != address(0) || sp.heldForBuyback() == 0) && sp.heldForBuyback() + sp.owedToSafe() <= usdc.balanceOf(address(sp));
     }
 
     function echidna_safe_gets_exactly_60() external view returns (bool) {
-        return usdc.balanceOf(safe) == h.ghostSplitTotal() - h.ghostBuybackShare();
+        return usdc.balanceOf(safe) + sp.owedToSafe() == h.ghostSplitTotal() - h.ghostBuybackShare();
     }
 
     function echidna_rounds_sane() external view returns (bool) {
