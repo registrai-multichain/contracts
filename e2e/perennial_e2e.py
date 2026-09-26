@@ -1119,8 +1119,11 @@ def rounds_stage(c, A, S, led):
         for prod, fn in (("BTC-USD", btc), ("ETH-USD", eth)):
             f = root / f"products/{prod}/candles"; f.parent.mkdir(parents=True, exist_ok=True)
             start = (now // 60) * 60
-            # closed minutes only, as on Coinbase: a round's end price does not exist before it ends
+            # as on Coinbase: every closed minute AND the minute still trading, whose
+            # provisional close differs from its final one (the agent must never read it)
             rows = [] if prod in down else [[t, fn(t), fn(t), fn(t), fn(t), 1.0] for t in range(start - 60, start - 7200, -60)]
+            if prod not in down:
+                rows.insert(0, [start, 0, 0, 0, fn(start) + 777, 1.0])
             f.write_text(json.dumps(rows))
     close = lambda fn, b: int(round(fn(b - 60) * 100))          # the close of the minute ending at boundary b
     c.send("admin", V4, "setApprovedAgent(address,bool)", AG, "true")
@@ -1131,8 +1134,11 @@ def rounds_stage(c, A, S, led):
            "ledger_addr": S["NanoLedger"], "usdc_addr": USDC, "agent_addr": AG, "feed_resolver": A["resolver"],
            "dispute_window": 600, "seed": 5 * U, "round_secs": 300, "settlement_window": SETTLEMENT_WINDOW,
            "markets_v4_deploy_block": c.block(),
-           "assets": [{"key": "btc-usd", "kind": "coinbase-spot", "product": "BTC-USD", "decimals": 2, "apiBase": base},
-                      {"key": "eth-usd", "kind": "coinbase-spot", "product": "ETH-USD", "decimals": 2, "apiBase": base}],
+           # the providers' quiet-book fallback runs on CHAIN time here (anvil is warped)
+           "assets": [{"key": "btc-usd", "kind": "coinbase-spot", "product": "BTC-USD", "decimals": 2, "apiBase": base,
+                       "_clock": c.now},
+                      {"key": "eth-usd", "kind": "coinbase-spot", "product": "ETH-USD", "decimals": 2, "apiBase": base,
+                       "_clock": c.now}],
            "events": [{"key": "arc-token-tradable", "kind": "curated", "value": 1, "since": None, "evidence": "",
                        "expiry": ev_expiry, "threshold": 1, "seed": 10 * U, "publishEvery": 3600, "disputeWindow": 600}]}
     chain = R.CastRoundsChain(cfg, KEYS["rounds"])

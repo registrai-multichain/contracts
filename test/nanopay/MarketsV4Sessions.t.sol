@@ -177,6 +177,24 @@ contract MarketsV4SessionsTest is Test {
         assertEq(markets.yesBalance(id, owner), 0);
     }
 
+    function test_aDelegateSellsOnlyWhereItBoughtForTheOwner() public {
+        // the owner's own position, bought with the wallet: out of the delegate's reach
+        vm.prank(owner);
+        uint256 own = markets.buy(id, BinaryMarket.Outcome.Yes, 10e6, 0, block.timestamp);
+        _session(20e6);
+        vm.prank(delegate);
+        vm.expectRevert(MarketsV4.SessionMarketNotAllowed.selector);
+        markets.sellFor(owner, id, BinaryMarket.Outcome.Yes, own, 0, block.timestamp);
+        // once the delegate bought into this market for the owner, it may sell there
+        vm.prank(delegate);
+        markets.buyFor(owner, id, BinaryMarket.Outcome.No, 1e6, 0, block.timestamp);
+        assertTrue(markets.sessionMarket(owner, delegate, id));
+        uint256 bought = markets.noBalance(id, owner); // read before the prank (a call would consume it)
+        vm.prank(delegate);
+        markets.sellFor(owner, id, BinaryMarket.Outcome.No, bought, 0, block.timestamp);
+        assertEq(markets.noBalance(id, owner), 0);
+    }
+
     function test_aDelegateCannotTouchSomeoneElse() public {
         _fund(stranger);
         vm.prank(stranger);

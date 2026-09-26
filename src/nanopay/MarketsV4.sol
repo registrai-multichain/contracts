@@ -21,10 +21,12 @@ import {BinaryMarket} from "./BinaryMarket.sol";
 ///         a key the app keeps in the browser, trade for it until an expiry and
 ///         within a spend cap: buyFor / sellFor / redeemFor move the OWNER's
 ///         ledger balance and positions, never the delegate's. Positions,
-///         proceeds and payouts stay the owner's; a leaked delegate key can at
+///         proceeds and payouts stay the owner's. A delegate sells only in
+///         markets it bought into for that owner, so a leaked delegate key can at
 ///         worst trade the capped amount badly until the session expires or is
-///         revoked. The owner still approves this contract on the ledger (the
-///         ledger allowance caps the delegate as well).
+///         revoked; the owner's other positions are out of its reach. The owner
+///         still approves this contract on the ledger (the ledger allowance caps
+///         the delegate as well).
 ///
 ///         Oracle vetting: only governor-approved agents may settle (as on
 ///         MarketsPerennial). A permissionless agent could skip its reading on a
@@ -68,6 +70,10 @@ contract MarketsV4 is BinaryMarket {
     /// @notice owner => delegate => session.
     mapping(address => mapping(address => Session)) public sessions;
 
+    /// @notice owner => delegate => market => the delegate bought into it for the
+    /// owner (only there may it sell for the owner).
+    mapping(address => mapping(address => mapping(bytes32 => bool))) public sessionMarket;
+
     event AgentApprovalSet(address indexed agent, bool approved);
     event MarketCreated(bytes32 indexed marketId, address indexed creator, bytes32 indexed feedId, address agent, int256 threshold, Comparator comparator, uint256 expiry, uint256 liquidity);
     event FeesPaid(bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 agentFee);
@@ -80,6 +86,7 @@ contract MarketsV4 is BinaryMarket {
     error AgentNotApproved();
     error SessionInvalid();
     error SessionSpendExceeded();
+    error SessionMarketNotAllowed();
     error GasForwardFailed();
 
     constructor(
@@ -143,11 +150,13 @@ contract MarketsV4 is BinaryMarket {
         Session storage s = _session(owner);
         if (collateralIn > s.spendLeft) revert SessionSpendExceeded();
         s.spendLeft -= uint128(collateralIn);
+        sessionMarket[owner][msg.sender][marketId] = true;
         return _buy(owner, marketId, outcome, collateralIn, minSharesOut, deadline);
     }
 
-    /// @notice `sell` for `owner`, as its session delegate: the owner's shares go
-    /// in, the proceeds go to the owner's ledger balance.
+    /// @notice `sell` for `owner`, as its session delegate, in a market the
+    /// delegate bought into for the owner: the owner's shares go in, the proceeds
+    /// go to the owner's ledger balance.
     function sellFor(
         address owner,
         bytes32 marketId,
@@ -157,6 +166,7 @@ contract MarketsV4 is BinaryMarket {
         uint256 deadline
     ) external nonReentrant returns (uint256) {
         _session(owner);
+        if (!sessionMarket[owner][msg.sender][marketId]) revert SessionMarketNotAllowed();
         return _sell(owner, marketId, outcome, sharesIn, minCollateralOut, deadline);
     }
 
