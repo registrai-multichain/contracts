@@ -204,4 +204,41 @@ contract RegiBuybackTest is Test {
         bb.burnChunk();
         assertEq(pm.lastParams().sqrtPriceLimitX96, uint160(4295128739 + 1)); // clamped to MIN_SQRT_PRICE + 1
     }
+
+    // Review M10: edge cases.
+    function test_nothingBoughtRevertsTheWholeChunk() public {
+        pm.setRegiPerUsdc(0);
+        fund(200e6);
+        vm.expectRevert(RegiBuyback.NothingBought.selector);
+        bb.burnChunk();
+        assertEq(bb.round(), 0);
+        assertEq(usdc.balanceOf(address(bb)), 200e6);
+    }
+
+    function test_reentryFromInsideTheSwapIsBlocked() public {
+        pm.setReenter(true);
+        fund(200e6);
+        bb.burnChunk();
+        assertTrue(pm.reentryBlocked(), "burnChunk re-entered mid-swap");
+        assertEq(bb.totalChunks(), 1);
+    }
+
+    function test_notReadyDuringCooldownEvenWithANewRoundFunded() public {
+        fund(200e6);
+        uint256 t = 1_800_000_000;
+        for (uint256 i; i < 4; i++) {
+            bb.burnChunk();
+            t += 10 minutes;
+            if (i < 3) vm.warp(t);
+        }
+        fund(200e6); // a new round's worth arrives right after the last chunk
+        (, uint256 left, uint256 next, bool ready,,,) = bb.status();
+        assertEq(left, 0);
+        assertFalse(ready, "cooldown still applies to the next round");
+        vm.expectRevert(abi.encodeWithSelector(RegiBuyback.Cooldown.selector, next));
+        bb.burnChunk();
+        vm.warp(next);
+        (,,, bool ready2,,,) = bb.status();
+        assertTrue(ready2);
+    }
 }

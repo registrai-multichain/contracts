@@ -26,6 +26,8 @@ contract MockPoolManager {
     uint256 public regiPerUsdc = 8_000e12; // REGI (18 dp) per 1 USDC unit (6 dp): 8,000 REGI per USDC
     uint256 public constant HOOK_CUT_BPS = 100;
     bool public revertSwap;
+    bool public reenter;
+    bool public reentryBlocked;
 
     SwapParams internal _last;
     bytes32 public lastPoolId;
@@ -42,6 +44,7 @@ contract MockPoolManager {
     function setSqrtPrice(uint160 p) external { sqrtPrice = p; }
     function setFillBps(uint256 b) external { fillBps = b; }
     function setRevertSwap(bool r) external { revertSwap = r; }
+    function setReenter(bool r) external { reenter = r; }
     function setRegiPerUsdc(uint256 r) external { regiPerUsdc = r; }
     function lastParams() external view returns (SwapParams memory) { return _last; }
 
@@ -55,6 +58,11 @@ contract MockPoolManager {
     function swap(PoolKey memory key, SwapParams memory params, bytes calldata) external returns (int256) {
         require(unlocked, "ManagerLocked");
         if (revertSwap) revert("pool: swap failed");
+        if (reenter) {
+            // A hostile pool/hook calling back into the buyback mid-swap.
+            (bool ok,) = msg.sender.call(abi.encodeWithSignature("burnChunk()"));
+            reentryBlocked = !ok;
+        }
         lastPoolId = V4Lib.poolId(key);
         _last = params;
         require(params.zeroForOne && params.amountSpecified < 0, "mock: exact-in zeroForOne only");
