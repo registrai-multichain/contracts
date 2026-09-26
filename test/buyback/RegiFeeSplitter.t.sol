@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {Test} from "forge-std/Test.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {MockUSDC} from "../MockUSDC.sol";
+import {NanoLedger} from "../../src/nanopay/NanoLedger.sol";
+import {RegiFeeSplitter} from "../../src/buyback/RegiFeeSplitter.sol";
+import {INanoLedgerMinimal} from "../../src/buyback/INanoLedgerMinimal.sol";
+
+contract RegiFeeSplitterTest is Test {
+    MockUSDC usdc;
+    NanoLedger ledger;
+    RegiFeeSplitter sp;
+    address safe = makeAddr("safe");
+    address buyback = makeAddr("buyback");
+    address next = makeAddr("next");
+
+    function setUp() public {
+        usdc = new MockUSDC();
+        ledger = new NanoLedger(IERC20(address(usdc)), address(this));
+        sp = new RegiFeeSplitter(INanoLedgerMinimal(address(ledger)), IERC20(address(usdc)), safe, buyback);
+        vm.warp(1_800_000_000);
+    }
+
+    function ledgerPay(uint256 amount) internal {
+        usdc.mint(address(this), amount);
+        usdc.approve(address(ledger), amount);
+        ledger.depositTo(address(sp), amount); // how MarketsV4 pays: an internal ledger balance
+    }
+
+    function test_splitsLedgerIncome40To60() public {
+        ledgerPay(100e6);
+        (uint256 b, uint256 s) = sp.distribute();
+        assertEq(b, 40e6);
+        assertEq(s, 60e6);
+        assertEq(usdc.balanceOf(buyback), 40e6);
+        assertEq(usdc.balanceOf(safe), 60e6);
+        assertEq(ledger.balanceOf(address(sp)), 0);
+    }
+
+    function test_splitsUsdcSentDirectlyToo() public {
+        usdc.mint(address(sp), 10e6);
+        ledgerPay(15e6);
+        sp.distribute();
+        assertEq(usdc.balanceOf(buyback), 10e6);
+        assertEq(usdc.balanceOf(safe), 15e6);
+    }
+
+    function test_roundingGoesToTheSafe() public {
+        usdc.mint(address(sp), 3); // 3 * 0.4 = 1.2 -> 1 to the buyback, 2 to the Safe
+        (uint256 b, uint256 s) = sp.distribute();
+        assertEq(b, 1);
+        assertEq(s, 2);
+    }
+
+    function test_emptyIsANoOp() public {
+        (uint256 b, uint256 s) = sp.distribute();
+        assertEq(b + s, 0);
+    }
+
+    function test_onlyTheSafeRepoints() public {
+        vm.expectRevert(RegiFeeSplitter.NotSafe.selector);
+        sp.proposeBuyback(next);
+        vm.prank(safe);
+        vm.expectRevert(RegiFeeSplitter.ZeroAddress.selector);
+        sp.proposeBuyback(address(0));
+    }
+
+    function test_repointTakesExactlySevenDays() public {
+        vm.prank(safe);
+        sp.proposeBuyback(next);
+        uint256 at = block.timestamp + 7 days;
+        vm.warp(at - 1);
+        vm.prank(safe);
+        vm.expectRevert(abi.encodeWithSelector(RegiFeeSplitter.TooEarly.selector, at));
+        sp.acceptBuyback();
+        vm.warp(at);
+        vm.prank(safe);
+        sp.acceptBuyback();
+        assertEq(sp.buyback(), next);
+        assertEq(sp.pendingBuyback(), address(0));
+    }
+
+    function test_aNewProposalRestartsTheClockAndCancelClears() public {
+        uint256 t = 1_800_000_000; // local clock (via_ir reuses block.timestamp reads)
+        vm.startPrank(safe);
+        sp.proposeBuyback(next);
+        t += 6 days;
+        vm.warp(t);
+        sp.proposeBuyback(makeAddr("other"));
+        t += 2 days; // 8 days after the first, 2 after the second
+        vm.warp(t);
+        vm.expectRevert(abi.encodeWithSelector(RegiFeeSplitter.TooEarly.selector, t + 5 days));
+        sp.acceptBuyback();
+        sp.cancelBuyback();
+        vm.expectRevert(RegiFeeSplitter.NoPending.selector);
+        sp.acceptBuyback();
+        vm.stopPrank();
+        assertEq(sp.buyback(), buyback);
+    }
+
+    function test_nonSafeCannotAcceptOrCancel() public {
+        vm.prank(safe);
+        sp.proposeBuyback(next);
+        vm.warp(block.timestamp + 7 days);
+        vm.expectRevert(RegiFeeSplitter.NotSafe.selector);
+        sp.acceptBuyback();
+        vm.expectRevert(RegiFeeSplitter.NotSafe.selector);
+        sp.cancelBuyback();
+    }
+
+    function test_acceptsNativeSends() public {
+        vm.deal(address(this), 1 ether);
+        (bool ok,) = address(sp).call{value: 1 ether}("");
+        assertTrue(ok);
+    }
+}
