@@ -168,4 +168,40 @@ contract RegiBuybackTest is Test {
         (,,, bool ready4,,,) = bb.status();
         assertTrue(ready4);
     }
+
+    function test_priceLimitCapsImpactAtTwoPercent() public {
+        pm.setSqrtPrice(uint160(79228162514264337593543950336)); // 2**96
+        fund(200e6);
+        bb.burnChunk();
+        uint160 limit = pm.lastParams().sqrtPriceLimitX96;
+        assertEq(limit, uint160(uint256(79228162514264337593543950336) * 98_995 / 100_000));
+        assertTrue(pm.lastParams().zeroForOne);
+        assertEq(pm.lastParams().amountSpecified, -int256(50e6));
+        assertEq(pm.lastPoolId(), keccak256(abi.encode(bb.key())));
+    }
+
+    function test_partialFillSettlesOnlyWhatWasUsedAndKeepsTheRest() public {
+        pm.setFillBps(4_000); // the 2% cap stopped the swap at 40% of the chunk
+        fund(200e6);
+        (uint256 inAmt, uint256 burned) = bb.burnChunk();
+        assertEq(inAmt, 20e6);
+        assertEq(usdc.balanceOf(address(bb)), 180e6);
+        assertEq(regi.balanceOf(DEAD), burned);
+        assertEq(bb.totalUsdcSpent(), 20e6);
+    }
+
+    function test_callbackOnlyFromOurUnlock() public {
+        vm.expectRevert(RegiBuyback.NotPoolManager.selector);
+        bb.unlockCallback(abi.encode(uint256(50e6)));
+        vm.prank(address(pm));
+        vm.expectRevert(RegiBuyback.UnexpectedCallback.selector);
+        bb.unlockCallback(abi.encode(uint256(50e6)));
+    }
+
+    function test_limitClampsAboveMinPrice() public {
+        pm.setSqrtPrice(4295128740); // just above v4's MIN_SQRT_PRICE
+        fund(200e6);
+        bb.burnChunk();
+        assertEq(pm.lastParams().sqrtPriceLimitX96, uint160(4295128739 + 1)); // clamped to MIN_SQRT_PRICE + 1
+    }
 }

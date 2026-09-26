@@ -24,6 +24,10 @@ contract RegiBuyback is IUnlockCallback, ReentrancyGuard {
     uint256 public constant COOLDOWN = 10 minutes;
     uint256 public constant MAX_IMPACT_BPS = 200;
     uint160 internal constant MIN_SQRT_PRICE = 4295128739;
+    /// @dev sqrt(1 - MAX_IMPACT_BPS/10000) = sqrt(0.98) ≈ 0.98995: a zeroForOne buy may
+    ///      move sqrtPriceX96 down by this factor at most, i.e. the price by ≤ 2%.
+    uint256 internal constant SQRT_LIMIT_NUM = 98_995;
+    uint256 internal constant SQRT_LIMIT_DEN = 100_000;
 
     IPoolManagerMinimal public immutable POOL_MANAGER;
     IERC20 public immutable USDC;
@@ -142,13 +146,23 @@ contract RegiBuyback is IUnlockCallback, ReentrancyGuard {
         if (msg.sender != address(POOL_MANAGER)) revert NotPoolManager();
         if (!_swapping) revert UnexpectedCallback();
         uint256 amount = abi.decode(data, (uint256));
-        int256 delta = POOL_MANAGER.swap(key(), SwapParams(true, -int256(amount), MIN_SQRT_PRICE + 1), "");
-        uint256 usdcIn = amount;
-        uint256 regiOut = uint256(uint128(V4Lib.amount1(delta)));
-        POOL_MANAGER.sync(address(USDC));
-        USDC.safeTransfer(address(POOL_MANAGER), usdcIn);
-        POOL_MANAGER.settle();
-        POOL_MANAGER.take(REGI, DEAD, regiOut);
+        PoolKey memory k = key();
+        uint160 current = V4Lib.sqrtPriceX96(POOL_MANAGER, V4Lib.poolId(k));
+        uint160 limit = uint160(uint256(current) * SQRT_LIMIT_NUM / SQRT_LIMIT_DEN);
+        if (limit <= MIN_SQRT_PRICE) limit = MIN_SQRT_PRICE + 1;
+        int256 delta = POOL_MANAGER.swap(k, SwapParams(true, -int256(amount), limit), "");
+        int128 a0 = V4Lib.amount0(delta);
+        int128 a1 = V4Lib.amount1(delta);
+        // Caller-side delta: USDC owed is negative, REGI received (after the hook's cut)
+        // positive. At the limit the swap fills part of the chunk; pay only that.
+        uint256 usdcIn = a0 < 0 ? uint256(uint128(-a0)) : 0;
+        uint256 regiOut = a1 > 0 ? uint256(uint128(a1)) : 0;
+        if (usdcIn > 0) {
+            POOL_MANAGER.sync(address(USDC));
+            USDC.safeTransfer(address(POOL_MANAGER), usdcIn);
+            POOL_MANAGER.settle();
+        }
+        if (regiOut > 0) POOL_MANAGER.take(REGI, DEAD, regiOut);
         return abi.encode(usdcIn, regiOut);
     }
 }
