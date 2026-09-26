@@ -92,6 +92,7 @@ contract DeployScriptsTest is Test {
         usdc = new MockUSDC();
         admin = address(new SafeStub());
         vm.etch(disputeResolver, hex"00"); // a contract (a Safe): mainnet refuses an EOA resolver
+        vm.etch(treasury, hex"00"); // a contract (the fee splitter): mainnet refuses an EOA treasury
     }
 
     function _usdcAddr() internal view returns (address) {
@@ -793,6 +794,11 @@ contract DeployScriptsTest is Test {
         DeployNanoStack.Config memory nc = _v4Cfg();
         nc.disputeResolver = makeAddr("eoaResolver");
         vm.expectRevert(bytes("mainnet: DISPUTE_RESOLVER must be a contract (a Safe)"));
+        n.deploy(nc);
+        // V4's TREASURY is immutable: an EOA (the fee splitter not deployed yet) fails the deploy
+        nc = _v4Cfg();
+        nc.treasury = makeAddr("eoaTreasury");
+        vm.expectRevert(bytes("mainnet: TREASURY must be a contract (the RegiFeeSplitter)"));
         n.deploy(nc);
     }
 

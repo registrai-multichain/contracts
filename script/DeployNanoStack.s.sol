@@ -23,8 +23,9 @@ import {MarketsV4} from "../src/nanopay/MarketsV4.sol";
 ///                              Perennial must share one ledger
 ///      USDC                    [0x3600…0000] only used when deploying a ledger
 ///      TREASURY                MAINNET [deployer] the Registrai treasury (50%
-///                              leg of every trading fee); immutable; never the
-///                              deployer on mainnet
+///                              leg of every trading fee, void escrow without a
+///                              challenger, rounding dust); immutable; on mainnet
+///                              a CONTRACT (the RegiFeeSplitter, deployed first)
 ///      SETTLEMENT_WINDOW       MAINNET [24h]
 ///      RESOLUTION_GRACE        MAINNET [7d]
 ///      DISPUTE_RESOLVER        MAINNET [deployer] resolver feeds must name;
@@ -85,6 +86,9 @@ contract DeployNanoStack is DeployBase {
             require(c.approvedAgent != c.deployer, "mainnet: APPROVED_AGENT must not be the deployer");
             require(c.disputeResolver != c.approvedAgent, "mainnet: agent must not resolve its own disputes");
             require(c.disputeResolver.code.length > 0, "mainnet: DISPUTE_RESOLVER must be a contract (a Safe)");
+            // TREASURY is immutable: an EOA here (e.g. the fee splitter not deployed
+            // yet) would take every fee leg forever. Fail the deploy instead.
+            require(c.treasury.code.length > 0, "mainnet: TREASURY must be a contract (the RegiFeeSplitter)");
         }
 
         vm.startBroadcast(c.deployer);
