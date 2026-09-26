@@ -89,6 +89,13 @@ contract DeployNanoStack is DeployBase {
             // TREASURY is immutable: an EOA here (e.g. the fee splitter not deployed
             // yet) would take every fee leg forever. Fail the deploy instead.
             require(c.treasury.code.length > 0, "mainnet: TREASURY must be a contract (the RegiFeeSplitter)");
+            // ... and it must withdraw from the ledger V4 pays on: a splitter bound to
+            // another NanoLedger could never withdraw the treasury's income.
+            (bool ok, bytes memory ret) = c.treasury.staticcall(abi.encodeWithSignature("LEDGER()"));
+            require(
+                ok && ret.length == 32 && abi.decode(ret, (address)) == c.ledger,
+                "mainnet: TREASURY (RegiFeeSplitter) must withdraw from the same NanoLedger V4 pays on"
+            );
         }
 
         vm.startBroadcast(c.deployer);
