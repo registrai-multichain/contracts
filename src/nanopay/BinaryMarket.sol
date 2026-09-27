@@ -175,6 +175,7 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
     error DeadlineExpired();
     error ClaimsOutstanding();
     error NothingToSweep();
+    error AgentInactive();
 
     constructor(
         NanoLedger ledger_,
@@ -270,10 +271,22 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
         nonReentrant
         returns (uint256 sharesOut)
     {
+        return _buy(msg.sender, marketId, outcome, collateralIn, minSharesOut, deadline);
+    }
+
+    /// @dev A buy for `trader`: its ledger balance pays, its position grows.
+    function _buy(
+        address trader,
+        bytes32 marketId,
+        Outcome outcome,
+        uint256 collateralIn,
+        uint256 minSharesOut,
+        uint256 deadline
+    ) internal returns (uint256 sharesOut) {
         if (block.timestamp > deadline) revert DeadlineExpired();
         Core storage m = _trading(marketId);
         if (collateralIn == 0) revert LiquidityTooLow();
-        LEDGER.transferFromInternal(msg.sender, address(this), collateralIn);
+        LEDGER.transferFromInternal(trader, address(this), collateralIn);
 
         uint256 fee;
         uint256 yesAfter;
@@ -287,18 +300,18 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
         m.yesReserve = yesAfter;
         m.noReserve = noAfter;
         collateralOf[marketId] += effectiveIn;
-        if (netCost[marketId][msg.sender] == 0) _costHolders[marketId]++;
-        netCost[marketId][msg.sender] += effectiveIn;
+        if (netCost[marketId][trader] == 0) _costHolders[marketId]++;
+        netCost[marketId][trader] += effectiveIn;
         totalNetCost[marketId] += effectiveIn;
         if (outcome == Outcome.Yes) {
-            if (yesBalance[marketId][msg.sender] == 0) _yesHolders[marketId]++;
-            yesBalance[marketId][msg.sender] += sharesOut;
+            if (yesBalance[marketId][trader] == 0) _yesHolders[marketId]++;
+            yesBalance[marketId][trader] += sharesOut;
         } else {
-            if (noBalance[marketId][msg.sender] == 0) _noHolders[marketId]++;
-            noBalance[marketId][msg.sender] += sharesOut;
+            if (noBalance[marketId][trader] == 0) _noHolders[marketId]++;
+            noBalance[marketId][trader] += sharesOut;
         }
         _chargeFee(marketId, m, fee);
-        emit Bought(marketId, msg.sender, outcome, collateralIn, sharesOut, fee);
+        emit Bought(marketId, trader, outcome, collateralIn, sharesOut, fee);
     }
 
     /// @notice Sell `sharesIn` of `outcome` back to the pool. Reverts past
@@ -309,18 +322,30 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
         nonReentrant
         returns (uint256 collateralOut)
     {
+        return _sell(msg.sender, marketId, outcome, sharesIn, minCollateralOut, deadline);
+    }
+
+    /// @dev A sell for `trader`: its shares go in, the proceeds to its ledger balance.
+    function _sell(
+        address trader,
+        bytes32 marketId,
+        Outcome outcome,
+        uint256 sharesIn,
+        uint256 minCollateralOut,
+        uint256 deadline
+    ) internal returns (uint256 collateralOut) {
         if (block.timestamp > deadline) revert DeadlineExpired();
         Core storage m = _trading(marketId);
         if (sharesIn == 0) revert LiquidityTooLow();
         if (outcome == Outcome.Yes) {
-            uint256 bal = yesBalance[marketId][msg.sender];
+            uint256 bal = yesBalance[marketId][trader];
             if (bal < sharesIn) revert InsufficientShares();
-            yesBalance[marketId][msg.sender] = bal - sharesIn;
+            yesBalance[marketId][trader] = bal - sharesIn;
             if (bal == sharesIn) _yesHolders[marketId]--;
         } else {
-            uint256 bal = noBalance[marketId][msg.sender];
+            uint256 bal = noBalance[marketId][trader];
             if (bal < sharesIn) revert InsufficientShares();
-            noBalance[marketId][msg.sender] = bal - sharesIn;
+            noBalance[marketId][trader] = bal - sharesIn;
             if (bal == sharesIn) _noHolders[marketId]--;
         }
 
@@ -337,10 +362,10 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
 
         m.yesReserve = yesAfter;
         m.noReserve = noAfter;
-        _recordSell(marketId, grossOut);
+        _recordSell(marketId, trader, grossOut);
         _chargeFee(marketId, m, fee);
-        LEDGER.internalTransfer(msg.sender, collateralOut);
-        emit Sold(marketId, msg.sender, outcome, sharesIn, collateralOut, fee);
+        LEDGER.internalTransfer(trader, collateralOut);
+        emit Sold(marketId, trader, outcome, sharesIn, collateralOut, fee);
     }
 
     /// @dev The buy curve: the fee comes off `collateralIn`, the rest mints a full
@@ -391,17 +416,21 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
         if (m.createdAt == 0) revert MarketMissing();
         if (m.phase != Phase.Trading) revert NotTrading();
         if (block.timestamp >= m.expiry) revert MarketExpired();
+        // An agent no longer active on the feed (slashed, withdrawn) can never settle
+        // the market: it will void. Trading on a certain void is a free option
+        // against the LP (buy both legs, refund the losing one), so it stops.
+        if (!REGISTRY.isActiveAgent(m.feedId, m.agent)) revert AgentInactive();
     }
 
     /// @dev A sell burns `out` (the gross curve amount) of each side, so C falls by
     /// `out`. The seller's net cost falls by at most what it still has in: a
     /// profit beyond it is not a negative cost.
-    function _recordSell(bytes32 marketId, uint256 out) internal {
+    function _recordSell(bytes32 marketId, address trader, uint256 out) internal {
         collateralOf[marketId] -= out;
-        uint256 nc = netCost[marketId][msg.sender];
+        uint256 nc = netCost[marketId][trader];
         uint256 d = out < nc ? out : nc;
         if (d > 0) {
-            netCost[marketId][msg.sender] = nc - d;
+            netCost[marketId][trader] = nc - d;
             totalNetCost[marketId] -= d;
             if (d == nc) _costHolders[marketId]--;
         }
@@ -492,21 +521,26 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
     /// @notice Collect a settled market: 1 per winning share, or your refund on
     /// void. Reverts for an address with nothing to claim.
     function redeem(bytes32 marketId) external nonReentrant returns (uint256 payout) {
+        return _redeem(msg.sender, marketId);
+    }
+
+    /// @dev Collect for `holder`: the payout goes to its ledger balance.
+    function _redeem(address holder, bytes32 marketId) internal returns (uint256 payout) {
         Core storage m = _markets[marketId];
         if (m.createdAt == 0) revert MarketMissing();
         if (m.phase == Phase.Trading) revert NotResolved();
         bool claimant = m.phase == Phase.Resolved
-            ? (m.yesWon ? yesBalance[marketId][msg.sender] : noBalance[marketId][msg.sender]) > 0
-            : netCost[marketId][msg.sender] > 0;
+            ? (m.yesWon ? yesBalance[marketId][holder] : noBalance[marketId][holder]) > 0
+            : netCost[marketId][holder] > 0;
         if (!claimant) revert InsufficientShares();
-        payout = _redeemable(marketId, m, msg.sender);
-        yesBalance[marketId][msg.sender] = 0;
-        noBalance[marketId][msg.sender] = 0;
-        netCost[marketId][msg.sender] = 0;
+        payout = _redeemable(marketId, m, holder);
+        yesBalance[marketId][holder] = 0;
+        noBalance[marketId][holder] = 0;
+        netCost[marketId][holder] = 0;
         unpaid[marketId] -= payout;
         claimsLeft[marketId]--;
-        _pay(msg.sender, payout); // a void refund may floor to 0 on a dust net cost
-        emit Redeemed(marketId, msg.sender, payout);
+        _pay(holder, payout); // a void refund may floor to 0 on a dust net cost
+        emit Redeemed(marketId, holder, payout);
     }
 
     /// @notice Collect the LP's pot of a settled market.

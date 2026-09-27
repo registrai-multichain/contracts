@@ -203,6 +203,7 @@ abstract contract RoleTable is DeployBase {
             // V4 settles only on vetted agents and resolvers, as Perennial does.
             require(!MarketsV4(s.v4).approvedAgent(deployer), "deployer is an approved agent (v4)");
             require(!MarketsV4(s.v4).approvedResolver(deployer), "deployer is an approved resolver (v4)");
+            require(!MarketsV4(s.v4).approvedCreator(deployer), "deployer is an approved market creator (v4)");
             // Fee recipients are immutable: they must not be the deployer's key.
             require(MarketsV4(s.v4).TREASURY() != deployer, "deployer is the V4 treasury");
             require(fund.PROTOCOL_TREASURY() != deployer, "deployer is the protocol treasury");

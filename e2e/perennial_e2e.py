@@ -68,7 +68,8 @@ KEYS = {  # anvil's well-known dev keys — worthless anywhere but a local anvil
 }
 # more dev accounts from anvil's public test mnemonic
 EXTRA = (("builder2", 10), ("watcher", 11), ("vbuilder", 12), ("vdeployer", 13), ("stranger", 14), ("onboarder", 15),
-         ("whale", 16), ("vpayout", 17), ("vowner2", 18), ("vrecovered", 19), ("rounds", 20))
+         ("whale", 16), ("vpayout", 17), ("vowner2", 18), ("vrecovered", 19), ("rounds", 20),
+         ("session", 21))
 FEED_WINDOW = 3600          # the caretaker's default feed challenge window
 SETTLEMENT_WINDOW = 3600
 RESOLUTION_GRACE = 86400
@@ -1081,6 +1082,7 @@ def oracle_agent_stage(c, A, S, V, kenv, keeper_tick_full, data_dir, led):
           "dispute watch: the challenge is ALERTed at once with the reading's preimage (the resolver can recompute its "
           "input hash); the feed is NOT frozen (4x minBond still free)", log[-2500:])
     c.send("resolver", DISP, "resolve(bytes32,uint8)", did, 1)          # AttestationValid
+    c.increase_time(61)                    # a read market is rechecked at most once a minute (RPC budget)
     log = keeper_tick_full()
     check("ruled VALID" in log and f"settle: resolve {mid.lower()}" in log.lower(),
           "the ruling (VALID) is reported, and the keeper resolves the common market on the upheld reading", log[-2500:])
@@ -1108,7 +1110,7 @@ def rounds_stage(c, A, S, led):
     root = pathlib.Path(tempfile_mod.mkdtemp(prefix="rounds-e2e-"))
     srv, port = serve(root)
     down = set()
-    def btc(t0):   # minute t0's close: rises for two boundaries, then falls, so Up and Down both win
+    def btc(t0):   # minute t0's close: moves differently each 5 minutes, so rounds go Up and Down
         return 80000 + [0, 150, 310, 120, 90, 400][(t0 // 300) % 6] + (t0 // 60 % 5) / 100
     def eth(t0):
         return 2600 + (t0 // 60 % 50) / 10
@@ -1117,7 +1119,11 @@ def rounds_stage(c, A, S, led):
         for prod, fn in (("BTC-USD", btc), ("ETH-USD", eth)):
             f = root / f"products/{prod}/candles"; f.parent.mkdir(parents=True, exist_ok=True)
             start = (now // 60) * 60
-            rows = [] if prod in down else [[t, fn(t), fn(t), fn(t), fn(t), 1.0] for t in range(start + 7200, start - 7200, -60)]
+            # as on Coinbase: every closed minute AND the minute still trading, whose
+            # provisional close differs from its final one (the agent must never read it)
+            rows = [] if prod in down else [[t, fn(t), fn(t), fn(t), fn(t), 1.0] for t in range(start - 60, start - 7200, -60)]
+            if prod not in down:
+                rows.insert(0, [start, 0, 0, 0, fn(start) + 777, 1.0])
             f.write_text(json.dumps(rows))
     close = lambda fn, b: int(round(fn(b - 60) * 100))          # the close of the minute ending at boundary b
     c.send("admin", V4, "setApprovedAgent(address,bool)", AG, "true")
@@ -1128,8 +1134,11 @@ def rounds_stage(c, A, S, led):
            "ledger_addr": S["NanoLedger"], "usdc_addr": USDC, "agent_addr": AG, "feed_resolver": A["resolver"],
            "dispute_window": 600, "seed": 5 * U, "round_secs": 300, "settlement_window": SETTLEMENT_WINDOW,
            "markets_v4_deploy_block": c.block(),
-           "assets": [{"key": "btc-usd", "kind": "coinbase-spot", "product": "BTC-USD", "decimals": 2, "apiBase": base},
-                      {"key": "eth-usd", "kind": "coinbase-spot", "product": "ETH-USD", "decimals": 2, "apiBase": base}],
+           # the providers' quiet-book fallback runs on CHAIN time here (anvil is warped)
+           "assets": [{"key": "btc-usd", "kind": "coinbase-spot", "product": "BTC-USD", "decimals": 2, "apiBase": base,
+                       "_clock": c.now},
+                      {"key": "eth-usd", "kind": "coinbase-spot", "product": "ETH-USD", "decimals": 2, "apiBase": base,
+                       "_clock": c.now}],
            "events": [{"key": "arc-token-tradable", "kind": "curated", "value": 1, "since": None, "evidence": "",
                        "expiry": ev_expiry, "threshold": 1, "seed": 10 * U, "publishEvery": 3600, "disputeWindow": 600}]}
     chain = R.CastRoundsChain(cfg, KEYS["rounds"])
@@ -1142,27 +1151,39 @@ def rounds_stage(c, A, S, led):
         all_alerts.extend(alerts)
         return acts, alerts
 
-    # boundary b0: feeds, the first readings, the first rounds, the event market
+    # boundary b0: feeds, the event market, and the first round to bet on: [b1, b2]
     b0 = first
+    b1, b2, b3 = b0 + 300, b0 + 600, b0 + 900
+    btc_a, eth_a = cfg["assets"]
+    n = R.feed_count(cfg)
     acts, alerts = tick_at(b0 + 5)
-    fb, fe, fev = state["feeds"]["btc-usd"], state["feeds"]["eth-usd"], state["feeds"]["arc-token-tradable"]
+    ck1 = R.change_key(btc_a, b1, 300, n)
+    fb1, fev = state["feeds"][ck1], state["feeds"]["arc-token-tradable"]
     feed_t = "(address,string,bytes32,uint256,uint256,address,uint256,bool)"
-    fbw = c.call(REG, f"getFeed(bytes32)({feed_t})", fb).strip("()").split(",")
-    check(int(fbw[-4].split()[0]) == 600 and fbw[-3].strip().lower() == A["resolver"].lower()
-          and "registrai-data:btc-usd" in fbw[1],
-          "the rounds agent provisions registrai-data:btc-usd / eth-usd: 10-minute challenge window, independent resolver")
-    r0 = {st_["key"]: mid for mid, st_ in state["own"].items() if st_["expiry"] == b0 + 300}
-    m0 = mk(r0["btc-usd"])
-    check(int(m0[2].split()[0]) == close(btc, b0) and int(m0[4].split()[0]) == b0 + 300 and m0[3].strip() == "0"
-          and m0[1].strip().lower() == AG.lower(),
-          f"round [b0, b0+5m] opens on the price AS OF b0 ({close(btc, b0)/100:,.2f}): 'higher at b0+5m?' (GreaterThan), "
-          f"our agent settles it", m0)
+    fbw = c.call(REG, f"getFeed(bytes32)({feed_t})", fb1).strip("()").split(",")
+    changes = [k for k in state["feeds"] if ":5m-" in k]
+    check(n == 13 and len(changes) == 2 * n and int(fbw[-4].split()[0]) == 600
+          and fbw[-3].strip().lower() == A["resolver"].lower() and "registrai-data:btc-usd-5m-change-" in fbw[1],
+          f"the rounds agent provisions {n} rotating 5-minute CHANGE feeds per asset (a feed is reused only after its "
+          f"last round's 1-hour settlement window): 10-minute challenge window, independent resolver", fbw)
+    r1 = {st_["key"]: mid for mid, st_ in state["own"].items() if st_["expiry"] == b1}
+    m1 = mk(r1["btc-usd"])
+    check(set(r1) == {"btc-usd", "eth-usd"} and m1[2].strip() == "0" and int(m1[4].split()[0]) == b1
+          and m1[3].strip() == "0" and m1[1].strip().lower() == AG.lower() and m1[0].strip().lower() == fb1,
+          "at b0 the agent opens the NEXT round [b1, b2]: betting until b1 (its expiry), 'change > 0?' on the "
+          "round's own change feed, our agent settles it", m1)
+    try:
+        provs[ck1](b1)
+        unknowable = False
+    except Exception as e:
+        unknowable = getattr(e, "not_yet", False)
+    check(unknowable, "while betting is open the round's change cannot even be computed (its start minute is in the future)")
     evm = state["events"]["arc-token-tradable"]["market"]
     check(evm and int(mk(evm)[4].split()[0]) == ev_expiry and alerts == [],
           "the event market opens once: 'Arc token publicly tradable before <expiry>?' (>= 1), seeded 10 USDC", alerts)
 
-    # pre-settlement trading on the BTC round: both sides, a partial exit
-    mid = r0["btc-usd"]
+    # pre-settlement trading on the BTC round: both sides, a partial exit, all before b1
+    mid = r1["btc-usd"]
     for who, amt in (("alice", 30), ("bob", 30)):
         c.send(who, USDC, "approve(address,uint256)", S["NanoLedger"], amt * U)
         c.send(who, S["NanoLedger"], "deposit(uint256)", amt * U)
@@ -1177,28 +1198,53 @@ def rounds_stage(c, A, S, led):
     before = led(A["alice"])
     c.send("alice", V4, "sell(bytes32,uint8,uint256,uint256,uint256)", mid, 0, half, q_sell, 2**256 - 1)
     check(led(A["alice"]) - before == int(q_sell) > 0,
-          f"before the round closes: alice buys UP, bob buys DOWN at the quotes, alice sells half her UP at "
+          f"before betting closes: alice buys UP, bob buys DOWN at the quotes, alice sells half her UP at "
           f"{int(q_sell)/U:.4f} = quoteSell (pre-settlement exit through the AMM)")
-    c.send("bob", V4, "buy(bytes32,uint8,uint256,uint256,uint256)", r0["eth-usd"], 0, 5 * U, 0, 2**256 - 1)
+    c.send("bob", V4, "buy(bytes32,uint8,uint256,uint256,uint256)", r1["eth-usd"], 0, 5 * U, 0, 2**256 - 1)
 
-    # boundaries b1, b2: one reading per asset per boundary settles the round that closed and strikes the next
-    b1, b2, b3 = b0 + 300, b0 + 600, b0 + 900
+    # one-click betting: alice grants a session key once; it bets FOR her with no signature of hers
+    c.send("alice", V4, "setSession(address,uint128,uint64)", A["session"], 3 * U, c.now() + 86400, "--value", "0.1ether")
+    no_before, led_before = c.uint(V4, "noBalance(bytes32,address)(uint256)", mid, A["alice"]), led(A["alice"])
+    c.send("session", V4, "buyFor(address,bytes32,uint8,uint256,uint256,uint256)", A["alice"], mid, 1, 2 * U, 0, 2**256 - 1)
+    over = c.fails_with("session", V4, "buyFor(address,bytes32,uint8,uint256,uint256,uint256)", A["alice"], mid, 1, 2 * U, 0, 2**256 - 1)
+    check(c.uint(V4, "noBalance(bytes32,address)(uint256)", mid, A["alice"]) > no_before
+          and led(A["alice"]) == led_before - 2 * U and led(A["session"]) == 0
+          and reverted_with(over, "SessionSpendExceeded"),
+          "one-click session: alice signs once (setSession, gas forwarded to the key); the key buys DOWN for her "
+          "(her balance pays, her shares), holds nothing itself, and stops at the 3 USDC cap", over[-200:])
+
+    # b1: betting on [b1, b2] closes as the round starts; the next round opens
     down.add("ETH-USD")                        # the ETH source goes down from here: its round cannot settle
-    tick_at(b1 + 5)
-    found = c.call(ATT, "firstInWindow(bytes32,address,uint256,uint256)(bool,int256,uint256,bool)", fb, AG, b1,
+    acts, alerts = tick_at(b1 + 5)
+    late_buy = c.fails_with("alice", V4, "buy(bytes32,uint8,uint256,uint256,uint256)", mid, 0, 1 * U, 0, 2**256 - 1)
+    late_sell = c.fails_with("alice", V4, "sell(bytes32,uint8,uint256,uint256,uint256)", mid, 0, 1000, 0, 2**256 - 1)
+    check(reverted_with(late_buy, "MarketExpired") and reverted_with(late_sell, "MarketExpired"),
+          "from b1 the round is in play and nobody can trade it: buy and sell revert MarketExpired", late_buy[-200:])
+    r2 = {st_["key"]: m for m, st_ in state["own"].items() if st_["expiry"] == b2}
+    check(set(r2) == {"btc-usd"} and mk(r2["btc-usd"])[0].strip().lower() != fb1
+          and not any(st_["key"] == "eth-usd" and st_["expiry"] == b2 for st_ in state["own"].values()),
+          "the next round [b2, b3] opens on ANOTHER change feed; ETH source down: no new ETH round", (r2, alerts))
+    found = c.call(ATT, "firstInWindow(bytes32,address,uint256,uint256)(bool,int256,uint256,bool)", fb1, AG, b1,
                    b1 + SETTLEMENT_WINDOW).splitlines()
-    nxt = [m for m, st_ in state["own"].items() if st_["key"] == "btc-usd" and st_["expiry"] == b1 + 300][0]
-    check(found[0] == "true" and int(found[1].split()[0]) == close(btc, b1) and int(mk(nxt)[2].split()[0]) == close(btc, b1),
-          f"at b1 ONE BTC reading ({close(btc, b1)/100:,.2f}, as of b1) settles round [b0,b1] and is round [b1,b2]'s strike")
-    check(not any(st_["key"] == "eth-usd" and st_["expiry"] == b1 + 300 for st_ in state["own"].values()),
-          "ETH source down: no ETH reading and no new ETH round (never a stale price)")
+    check(found[0] == "false", "mid-round there is no reading on the round's feed: nothing to settle on yet")
+
+    # b2: the round ended; the agent attests its CHANGE on its own feed
     tick_at(b2 + 5)
-    acts, alerts = tick_at(b3 + 10)             # b1's reading is final after its 10-minute window
-    up_won = close(btc, b1) > close(btc, b0)
-    m0 = mk(mid)
-    check(m0[8].strip() == "1" and (m0[9].strip() == "true") == up_won and ("resolve", mid) in acts,
-          f"~10 minutes after it closed, the agent resolves round [b0,b1]: {'UP' if up_won else 'DOWN'} "
-          f"({close(btc, b0)/100:,.2f} -> {close(btc, b1)/100:,.2f})", acts)
+    found = c.call(ATT, "firstInWindow(bytes32,address,uint256,uint256)(bool,int256,uint256,bool)", fb1, AG, b1,
+                   b1 + SETTLEMENT_WINDOW).splitlines()
+    chg = close(btc, b2) - close(btc, b1)
+    check(found[0] == "true" and int(found[1].split()[0]) == chg and int(found[2].split()[0]) >= b2,
+          f"at b2 the agent attests round [b1, b2]'s change on its feed: {close(btc, b2)/100:,.2f} - "
+          f"{close(btc, b1)/100:,.2f} = {chg/100:+,.2f}", found)
+    f2 = mk(r2["btc-usd"])[0].strip()
+    found2 = c.call(ATT, "firstInWindow(bytes32,address,uint256,uint256)(bool,int256,uint256,bool)", f2, AG, b2,
+                    b2 + SETTLEMENT_WINDOW).splitlines()
+    check(found2[0] == "false", "and the round in play now ([b2, b3], betting closed at b2) has no reading yet")
+    acts, alerts = tick_at(b2 + 5 + 600 + 5)   # the reading is final after its 10-minute window
+    up_won = chg > 0
+    m1 = mk(mid)
+    check(m1[8].strip() == "1" and (m1[9].strip() == "true") == up_won and ("resolve", mid) in acts,
+          f"~10 minutes after the round ended, the agent resolves it: {'UP' if up_won else 'DOWN'} ({chg/100:+,.2f})", acts)
     winner = "alice" if up_won else "bob"
     owed = c.uint(V4, "redeemable(bytes32,address)(uint256)", mid, A[winner])
     before = led(A[winner])
@@ -1217,10 +1263,11 @@ def rounds_stage(c, A, S, led):
           "event market: the curated value (1, with its evidence URL) as of the deadline settles it YES")
 
     # the ETH round with the source down all window long: it voids, traders get their net cost back
-    eth_mid = r0["eth-usd"]
+    eth_mid = r1["eth-usd"]
+    tick_at(b1 + SETTLEMENT_WINDOW * 4 // 5)   # past 3/4 of the window: the agent alerts
     acts, alerts = tick_at(b1 + SETTLEMENT_WINDOW + 10)
     check(mk(eth_mid)[8].strip() == "2" and ("void", eth_mid) in acts
-          and any("eth-usd" in a.lower() or fe in a.lower() for a in all_alerts if "not ready" in a or "failed" in a),
+          and any(eth_mid in a and "no reading" in a for a in all_alerts),
           "ETH source down for the whole settlement window: the round voids (and the agent ALERTed while it could act)",
           all_alerts[-5:])
     refund = c.uint(V4, "redeemable(bytes32,address)(uint256)", eth_mid, A["bob"])

@@ -49,6 +49,7 @@ contract MarketsV4SettlementTest is Test {
         markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, WINDOW, GRACE);
         markets.setApprovedResolver(resolver, true);
         markets.setApprovedAgent(oracle, true);
+        markets.setApprovedCreator(creator, true); // a team creator key (V4 refuses strangers)
 
         usdc.mint(oracle, 10_000e6);
         vm.startPrank(oracle);

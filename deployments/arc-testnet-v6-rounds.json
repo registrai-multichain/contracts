@@ -1,0 +1,37 @@
+{
+  "network": "arc-testnet",
+  "chainId": 5042002,
+  "date": "2026-09-26",
+  "purpose": "Common markets (5-minute rounds, events) with one-click sessions: a second MarketsV4 next to v6's, used by the rounds agent only. v6 contracts unchanged.",
+  "contracts": {
+    "MarketsV4": "0xf98Be8dA6AB0262B6dA5Dc0D090aAB331A961cB9"
+  },
+  "deployBlock": 64119042,
+  "deployTx": "0x375c37b547b75b803e76f810142101a928df4186d3379150f947eaf502e60d86",
+  "constructor": {
+    "ledger": "0x02D278930B67A290fEfE93Ac049a086A9b5e0FB5",
+    "registry": "0xa3205b555e48e80A49b8464706b1263CdCe67a50",
+    "attestation": "0xC526Ad338A3562ACd045ECdc317b129876D4cE9c",
+    "admin": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+    "treasury": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+    "settlementWindow": 3600,
+    "resolutionGrace": 86400
+  },
+  "roles": {
+    "admin_governor": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
+    "approvedResolver": "0x580a7791DBF10578ce1DBF7A7A438B16Ee9CAAfd",
+    "approvedAgent_rounds": "0x31CCE575eC134bFD57c46997A295Ab14Ab887BB4",
+    "deployer_holds_nothing": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e"
+  },
+  "retired": {
+    "MarketsV4_v6": "0xC27F9779e7Fb01C64Bb1634191C9E219dA251F4c",
+    "MarketsV4_sessions_v1": "0xd77fa5a7A88E2797F281c54CB1DaAfF73E558DF9"
+  },
+  "history": [
+    {
+      "MarketsV4": "0xd77fa5a7A88E2797F281c54CB1DaAfF73E558DF9",
+      "deployBlock": 63999959,
+      "retired": "2026-09-26: session v1, delegates could sell any owner position (S1)"
+    }
+  ]
+}

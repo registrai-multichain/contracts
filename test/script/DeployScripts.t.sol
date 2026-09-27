@@ -92,6 +92,9 @@ contract DeployScriptsTest is Test {
         usdc = new MockUSDC();
         admin = address(new SafeStub());
         vm.etch(disputeResolver, hex"00"); // a contract (a Safe): mainnet refuses an EOA resolver
+        // a contract (the fee splitter) bound to the test ledger: mainnet refuses an EOA
+        // treasury or one on another ledger (_bindSplitter once the ledger exists)
+        vm.etch(treasury, type(MockFeeSplitter).runtimeCode);
     }
 
     function _usdcAddr() internal view returns (address) {
@@ -103,6 +106,7 @@ contract DeployScriptsTest is Test {
             DeployOracle.Config({deployer: deployer, usdc: _usdcAddr(), minBond: 10e6, points: address(0)})
         );
         ledger = new DeployNanoLedger().deploy(DeployNanoLedger.Config({deployer: deployer, usdc: _usdcAddr()}));
+        _bindSplitter();
         DeployPerennial.Config memory pc = _perennialCfg();
         if (block.chainid == 5042) {
             // mainnet: the builder side is phase 1; markets must reuse it
@@ -134,6 +138,11 @@ contract DeployScriptsTest is Test {
         c.wonderExpiry = 180 days;
     }
 
+    /// The treasury stand-in reports the test ledger as its LEDGER().
+    function _bindSplitter() internal {
+        vm.store(treasury, bytes32(0), bytes32(uint256(uint160(address(ledger)))));
+    }
+
     function _v4Cfg() internal view returns (DeployNanoStack.Config memory c) {
         c.deployer = deployer;
         c.usdc = _usdcAddr();
@@ -141,7 +150,7 @@ contract DeployScriptsTest is Test {
         c.attestation = address(attestation);
         c.ledger = address(ledger);
         c.treasury = treasury;
-        c.settlementWindow = 24 hours;
+        c.settlementWindow = 1 hours; // mainnet requires it (the rounds' feed rotation)
         c.resolutionGrace = 7 days;
         c.disputeResolver = disputeResolver;
         c.approvedAgent = agent;
@@ -274,6 +283,7 @@ contract DeployScriptsTest is Test {
             DeployOracle.Config({deployer: deployer, usdc: _usdcAddr(), minBond: 10e6, points: address(0)})
         );
         ledger = new DeployNanoLedger().deploy(DeployNanoLedger.Config({deployer: deployer, usdc: _usdcAddr()}));
+        _bindSplitter();
         DeployPerennial.Config memory pc = _perennialCfg();
         pc.builders = address(builders);
         pc.caretakers = address(caretakers);
@@ -794,6 +804,25 @@ contract DeployScriptsTest is Test {
         nc.disputeResolver = makeAddr("eoaResolver");
         vm.expectRevert(bytes("mainnet: DISPUTE_RESOLVER must be a contract (a Safe)"));
         n.deploy(nc);
+        // V4's TREASURY is immutable: an EOA (the fee splitter not deployed yet) fails the deploy
+        nc = _v4Cfg();
+        nc.treasury = makeAddr("eoaTreasury");
+        vm.expectRevert(bytes("mainnet: TREASURY must be a contract (the RegiFeeSplitter)"));
+        n.deploy(nc);
+        // the rounds' feed rotation needs a 1-hour settlement window on mainnet
+        nc = _v4Cfg();
+        nc.settlementWindow = 24 hours;
+        vm.expectRevert(bytes("mainnet: SETTLEMENT_WINDOW must be 1 hour (the rounds' feed rotation)"));
+        n.deploy(nc);
+        // ... and a splitter bound to another NanoLedger fails too (it could never withdraw)
+        nc = _v4Cfg();
+        vm.store(treasury, bytes32(0), bytes32(uint256(uint160(makeAddr("otherLedger")))));
+        vm.expectRevert(bytes("mainnet: TREASURY (RegiFeeSplitter) must withdraw from the same NanoLedger V4 pays on"));
+        n.deploy(nc);
+        // ... and one that is not a splitter at all (no LEDGER()) as well
+        nc.treasury = disputeResolver; // a contract without LEDGER()
+        vm.expectRevert(bytes("mainnet: TREASURY (RegiFeeSplitter) must withdraw from the same NanoLedger V4 pays on"));
+        n.deploy(nc);
     }
 
     function test_perennial_mainnetRefusesDeployerAsProtocolTreasury() public {
@@ -857,4 +886,9 @@ contract DeployScriptsTest is Test {
         vm.expectRevert(Registry.AlreadyWired.selector);
         registry.wire(address(1), address(2));
     }
+}
+
+/// Stands in for the RegiFeeSplitter: only its LEDGER() matters to the deploy guard.
+contract MockFeeSplitter {
+    address public LEDGER;
 }
