@@ -71,10 +71,38 @@ contract BuilderFundLateTest is Test {
         return ledger.balanceOf(alice);
     }
 
+    /// Final review 2026-09-27 (Important 1): late income goes to an ENDED epoch, so
+    /// without a hold a wrong claimant (a squatter the Safe missed during the 7-day
+    /// release queue) could release and claim in one transaction. It waits LATE_HOLD,
+    /// during which the Safe can deactivate the builder and sweepFrozen it.
+    function test_lateIncomeWaitsTheHold_theSafeCanStillFreezeIt() public {
+        vm.warp(T0 + 3 * EPOCH);
+        _late(0, 5_000 * U);
+        assertEq(fund.LATE_HOLD(), 7 days);
+        vm.expectRevert(BuilderFund.LateIncomeHeld.selector);
+        fund.claimFor(0, aliceId);
+        // the Safe freezes the wrong claimant within the hold
+        builders.setActive(aliceId, false);
+        uint256 poolBefore = ledger.balanceOf(address(pool));
+        fund.sweepFrozen(0, aliceId);
+        assertEq(ledger.balanceOf(address(pool)) - poolBefore, 5_000 * U);
+    }
+
+    function test_lateIncomeClaimableOnceTheHoldEnds() public {
+        vm.warp(T0 + 3 * EPOCH);
+        _late(0, 5_000 * U);
+        vm.warp(vm.getBlockTimestamp() + 7 days - 1);
+        vm.expectRevert(BuilderFund.LateIncomeHeld.selector);
+        fund.claimFor(0, aliceId);
+        vm.warp(vm.getBlockTimestamp() + 1);
+        assertGt(fund.claimFor(0, aliceId), 0);
+    }
+
     function test_lateIncomeIntoAnUnclaimedEpoch_isTaxedWithThatEpochsIncome() public {
         _earn(5_000 * U); // epoch 0
         vm.warp(T0 + 3 * EPOCH);
         _late(0, 5_000 * U);
+        vm.warp(vm.getBlockTimestamp() + fund.LATE_HOLD());
         uint256 net = fund.claimFor(0, aliceId);
         uint256 tax = _tax(10_000 * U);
         uint256 fee = (10_000 * U - tax) / 100;
@@ -91,6 +119,7 @@ contract BuilderFundLateTest is Test {
         vm.warp(T0 + 4 * EPOCH);
         _late(0, 5_000 * U);
         assertFalse(fund.claimed(0, aliceId), "unpaid income again");
+        vm.warp(vm.getBlockTimestamp() + fund.LATE_HOLD());
         uint256 second = fund.claimFor(0, aliceId);
         // together exactly as if the 10k had been claimed at once
         uint256 tax = _tax(10_000 * U);
@@ -108,6 +137,7 @@ contract BuilderFundLateTest is Test {
         vm.warp(T0 + 7 * EPOCH);
         uint256 before = _paid();
         for (uint256 e; e < 6; e++) _late(e, 10_000 * U);
+        vm.warp(vm.getBlockTimestamp() + fund.LATE_HOLD());
         uint256 seasonBefore = ledger.balanceOf(address(pool));
         for (uint256 e; e < 6; e++) fund.claimFor(e, aliceId);
         assertEq(ledger.balanceOf(address(pool)) - seasonBefore, onTimeTax, "taxed per epoch earned");

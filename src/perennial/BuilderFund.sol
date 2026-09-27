@@ -59,6 +59,9 @@ contract BuilderFund is AccessControl {
     uint256 public constant MIN_FREE_UPTO = 100e6;
     /// @notice Full epochs of notice for a new schedule (it applies from epoch e + SCHEDULE_DELAY + 1).
     uint256 public constant SCHEDULE_DELAY = 2;
+    /// @notice Late income waits this long before it can be claimed: the Safe's window
+    /// to deactivate a wrong claimant and sweepFrozen it (final review 2026-09-27).
+    uint256 public constant LATE_HOLD = 7 days;
 
     NanoLedger public immutable LEDGER;
     BuilderRegistry public immutable BUILDERS;
@@ -77,6 +80,8 @@ contract BuilderFund is AccessControl {
     mapping(uint256 => mapping(uint256 => uint256)) public incomeOf;
     /// @notice epoch => builderId => income already paid out (claimed or swept).
     mapping(uint256 => mapping(uint256 => uint256)) public paidGross;
+    /// @notice epoch => builderId => when its latest late income becomes claimable.
+    mapping(uint256 => mapping(uint256 => uint64)) public lateHoldUntil;
     /// @notice Income credited and not yet claimed or swept.
     uint256 public outstanding;
 
@@ -105,6 +110,7 @@ contract BuilderFund is AccessControl {
     error ZeroEpochLength();
     error Unfunded();
     error EpochNotEnded();
+    error LateIncomeHeld();
     error AlreadyClaimed();
     error NoIncome();
     error BuilderInactive();
@@ -169,6 +175,7 @@ contract BuilderFund is AccessControl {
         if (block.timestamp < epochEnd(epoch)) revert EpochNotEnded();
         incomeOf[epoch][builderId] += amount;
         outstanding += amount;
+        lateHoldUntil[epoch][builderId] = uint64(block.timestamp + LATE_HOLD);
         if (LEDGER.balanceOf(address(this)) < outstanding) revert Unfunded();
         emit LateIncomeCredited(epoch, builderId, amount);
     }
@@ -189,6 +196,7 @@ contract BuilderFund is AccessControl {
     /// Permissionless, once per (epoch, builder). Returns the net.
     function claimFor(uint256 epoch, uint256 builderId) external returns (uint256 net) {
         if (block.timestamp < epochEnd(epoch)) revert EpochNotEnded();
+        if (block.timestamp < lateHoldUntil[epoch][builderId]) revert LateIncomeHeld();
         uint256 income = incomeOf[epoch][builderId];
         if (income == 0) revert NoIncome();
         uint256 paid = paidGross[epoch][builderId];

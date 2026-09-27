@@ -244,7 +244,8 @@ contract WonderMarketsTest is Test {
     }
 
     /// The whole money path: a trade on a bound wonder market escrows the builder
-    /// leg; the team claims; the release becomes builder income; the epoch's claim
+    /// leg; the team claims; the release becomes builder income (of the epoch it was
+    /// earned in, claimable after LATE_HOLD); the epoch's claim
     /// pays the builder's payout (1% protocol fee, untaxed under $1,000).
     function test_lifecycle_escrow_release_claim() public {
         bytes32 id = _wonder(wonderFeed);
@@ -258,6 +259,9 @@ contract WonderMarketsTest is Test {
         vm.warp(block.timestamp + 7 days);
         escrow.executeRelease(KEY);
         assertEq(fund.incomeOf(epoch, teamId), 10e6, "late income of the epoch it was earned in");
+        vm.expectRevert(BuilderFund.LateIncomeHeld.selector);
+        fund.claimFor(epoch, teamId); // the Safe's window to freeze a wrong claimant
+        vm.warp(block.timestamp + fund.LATE_HOLD());
         uint256 before = ledger.balanceOf(team);
         uint256 net = fund.claimFor(epoch, teamId);
         assertEq(net, 99e5, "10 USDC less the 1% protocol fee");
