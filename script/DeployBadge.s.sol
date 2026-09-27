@@ -56,7 +56,7 @@ contract DeployBadge is DeployBase {
         require(c.admin != address(0) && c.operator != address(0), "ADMIN/OPERATOR not set");
         require(c.admin != c.operator, "ADMIN and OPERATOR must differ: the operator may only set status");
         if (_isMainnet()) {
-            require(c.admin.code.length > 0, "mainnet: ADMIN must be a contract (Safe/timelock), not an EOA");
+            require(_isContract(c.admin), "mainnet: ADMIN must be a contract (Safe/timelock), not an EOA");
             require(c.admin != c.deployer && c.operator != c.deployer, "mainnet: deployer must hold no badge role");
         }
 

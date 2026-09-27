@@ -63,7 +63,7 @@ contract DeployNanoLedger is DeployBase {
             // The deployer-owned path (admin == deployer, handed off by Handoff after the whole
             // stack) stays available for the full-stack order; any OTHER admin must be the Safe.
             if (admin != c.deployer) {
-                require(admin == ADMIN_SAFE && admin.code.length > 0, "mainnet: ADMIN must be the Admin Safe 0xFeE9...80Fb");
+                require(admin == ADMIN_SAFE && _isContract(admin), "mainnet: ADMIN must be the Admin Safe 0xFeE9...80Fb");
             }
         }
         vm.startBroadcast(c.deployer);

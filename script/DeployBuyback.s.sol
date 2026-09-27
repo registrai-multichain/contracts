@@ -33,7 +33,7 @@ contract DeployBuyback is Script {
     function deploy(address safe, address ledger) public returns (RegiBuyback bb, RegiFeeSplitter sp) {
         require(block.chainid == 5042, "DeployBuyback: Arc mainnet only");
         require(safe == ADMIN_SAFE, "SAFE must be the Admin Safe 0xFeE9...80Fb");
-        require(ledger.code.length > 0, "NANO_LEDGER must be the shared ledger");
+        require(_isContract(ledger), "NANO_LEDGER must be the shared ledger");
         // MarketsV4 pays the splitter on its ledger; a ledger on another token (or a
         // different ledger than DeployNanoStack uses) strands 100% of treasury income.
         (bool ok, bytes memory ret) = ledger.staticcall(abi.encodeWithSignature("USDC()"));
@@ -56,5 +56,13 @@ contract DeployBuyback is Script {
         console.log("next: CANARY GATE before any TREASURY points at the splitter:");
         console.log("  send 200 USDC to the buyback and press burnChunk() 4 times, 10 min apart;");
         console.log("  every press must burn REGI to 0x...dEaD. Only then DeployNanoStack with TREASURY =", address(sp));
+    }
+
+    /// @dev As DeployBase._isContract: an EIP-7702-delegated EOA carries 23 bytes of
+    ///      code (0xef0100 ++ delegate) yet one key controls it; it is not a contract.
+    function _isContract(address a) internal view returns (bool) {
+        bytes memory c = a.code;
+        if (c.length == 0) return false;
+        return !(c.length == 23 && c[0] == 0xef && c[1] == 0x01 && c[2] == 0x00);
     }
 }

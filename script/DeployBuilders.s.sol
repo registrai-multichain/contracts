@@ -84,7 +84,7 @@ contract DeployBuilders is DeployBase {
             );
         }
         if (_isMainnet()) {
-            require(c.admin.code.length > 0, "mainnet: ADMIN must be a contract (Safe/timelock), not an EOA");
+            require(_isContract(c.admin), "mainnet: ADMIN must be a contract (Safe/timelock), not an EOA");
             require(c.operator != c.deployer, "mainnet: OPERATOR must not be the deployer");
         }
 
