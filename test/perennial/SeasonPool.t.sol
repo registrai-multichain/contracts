@@ -118,6 +118,21 @@ contract SeasonPoolTest is Test {
 
     // ───────────────────────────── publish ─────────────────────────────
 
+    /// Audit 2026-09-27 I-3: a deadline typo (ms instead of s, or max) would lock
+    /// the season's allocation for ever; at most MAX_SEASON_LENGTH (365 days) ahead.
+    function test_publish_deadlineAtMostAYearAhead() public {
+        _fund(TOTAL);
+        bytes32 root = MerkleKit.root(leaves);
+        uint256 max = pool.MAX_SEASON_LENGTH();
+        assertEq(max, 365 days);
+        uint64 now_ = uint64(vm.getBlockTimestamp());
+        vm.expectRevert(SeasonPool.BadDeadline.selector);
+        pool.publishSeason(S1, root, TOTAL, type(uint64).max);
+        vm.expectRevert(SeasonPool.BadDeadline.selector);
+        pool.publishSeason(S1, root, TOTAL, now_ + uint64(max) + 1);
+        pool.publishSeason(S1, root, TOTAL, now_ + uint64(max));
+    }
+
     function test_publish_boundedByUnallocated() public {
         _fund(TOTAL - 1);
         bytes32 root = MerkleKit.root(leaves);
