@@ -24,8 +24,12 @@ import {BinaryMarket} from "./BinaryMarket.sol";
 ///         proceeds and payouts stay the owner's. A delegate sells for an owner
 ///         only shares IT bought for that owner (per market and outcome), so a
 ///         leaked delegate key can at worst trade the capped amount badly until
-///         the session expires or is revoked; the owner's other positions, and
-///         shares the owner added by hand, are out of its reach. The owner
+///         the session expires or is revoked. Its sell right is a COUNT of shares
+///         per market and outcome, not a claim on specific shares: if the owner
+///         sold those by hand and later bought again, the delegate may still sell
+///         up to that count (proceeds always to the owner; bounded by what the
+///         session bought within its spend cap). revokeSession ends every earlier
+///         right of that delegate. The owner
 ///         still approves this contract on the ledger (the ledger allowance caps
 ///         the delegate as well).
 ///

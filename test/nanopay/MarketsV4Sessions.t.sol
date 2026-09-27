@@ -229,6 +229,26 @@ contract MarketsV4SessionsTest is Test {
         markets.sellFor(owner, id, BinaryMarket.Outcome.Yes, shares, 0, block.timestamp);
     }
 
+    /// Buys after a revoke-and-renew belong to the NEW epoch: the delegate can sell
+    /// them (audit mutation gap: crediting epoch 0 went undetected).
+    function test_afterRevokeAndRenew_newBuysAreSellable() public {
+        _session(20e6);
+        vm.prank(delegate);
+        uint256 old = markets.buyFor(owner, id, BinaryMarket.Outcome.Yes, 2e6, 0, block.timestamp);
+        vm.prank(owner);
+        markets.revokeSession(delegate);
+        _session(20e6);
+        vm.prank(delegate);
+        uint256 fresh = markets.buyFor(owner, id, BinaryMarket.Outcome.Yes, 3e6, 0, block.timestamp);
+        assertEq(markets.sessionShares(owner, delegate, id, BinaryMarket.Outcome.Yes), fresh, "only the new epoch's buys");
+        vm.prank(delegate);
+        vm.expectRevert(MarketsV4.SessionSharesExceeded.selector);
+        markets.sellFor(owner, id, BinaryMarket.Outcome.Yes, fresh + old, 0, block.timestamp);
+        vm.prank(delegate);
+        markets.sellFor(owner, id, BinaryMarket.Outcome.Yes, fresh, 0, block.timestamp);
+        assertEq(markets.yesBalance(id, owner), old, "the pre-revoke shares stay, sellable by the owner only");
+    }
+
     function test_aStrangerCannotOpenAMarketOnTheAgentsFeed() public {
         // the decoy of the audit (C-1): another expiry on our feed would get our
         // agent's reading first inside a real market's window

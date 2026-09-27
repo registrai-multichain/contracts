@@ -176,6 +176,7 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
     error ClaimsOutstanding();
     error NothingToSweep();
     error AgentInactive();
+    error AgentBondLocked();
 
     constructor(
         NanoLedger ledger_,
@@ -224,6 +225,7 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
         if (expiry % EXPIRY_GRID() != 0) revert ExpiryOffGrid();
         if (liquidity < MIN_LIQUIDITY) revert LiquidityTooLow();
         if (!REGISTRY.isActiveAgent(feedId, agent)) revert AgentNotRegistered();
+        if (!_bondFree(feedId, agent)) revert AgentBondLocked();
         _requireApprovedOracle(feedId, agent);
         _requireSettleableFeed(REGISTRY, feedId);
 
@@ -420,6 +422,17 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
         // the market: it will void. Trading on a certain void is a free option
         // against the LP (buy both legs, refund the losing one), so it stops.
         if (!REGISTRY.isActiveAgent(m.feedId, m.agent)) revert AgentInactive();
+        // Nor while challenges hold the agent's bond below the feed's minBond: it
+        // cannot attest (Attestation needs minBond free), so the market heads for a
+        // void, and a void refunds per-account net cost - a certain void can be
+        // farmed from the LP seed with two accounts (audit 2026-09-27, BinaryMarket
+        // M-1). Trading resumes once the bond is topped up or the disputes resolve.
+        if (!_bondFree(m.feedId, m.agent)) revert AgentBondLocked();
+    }
+
+    /// The agent has at least the feed's minBond free, i.e. it can post a reading.
+    function _bondFree(bytes32 feedId, address agent) internal view returns (bool) {
+        return REGISTRY.availableBond(feedId, agent) >= REGISTRY.getFeed(feedId).minBond;
     }
 
     /// @dev A sell burns `out` (the gross curve amount) of each side, so C falls by

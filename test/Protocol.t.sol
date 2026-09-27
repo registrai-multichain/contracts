@@ -60,10 +60,9 @@ contract ProtocolTest is Test {
     }
 
     function _challenge(bytes32 attId, address who) internal returns (bytes32 disputeId) {
-        Registry.Agent memory a = registry.getAgent(attestation.getAttestation(attId).feedId, agent);
-        uint256 available = a.bond - a.lockedBond;
+        uint256 stake = dispute.challengeStake(attId); // always the feed's minBond
         vm.startPrank(who);
-        usdc.approve(address(dispute), available);
+        usdc.approve(address(dispute), stake);
         disputeId = dispute.challenge(attId, keccak256("evidence"));
         vm.stopPrank();
     }
@@ -325,18 +324,55 @@ contract ProtocolTest is Test {
         _attest(feedId, 15001, keccak256("y"));
     }
 
-    function test_challenge_stakeCappedAtAvailable() public {
+    function test_challenge_lockCappedAtAvailable_stakeAlwaysMinBond() public {
         bytes32 feedId = _createFeed();
         _registerAgent(feedId, agent, MIN_BOND + MIN_BOND / 2);
         bytes32 a1 = _attest(feedId, 1, keccak256("a"));
         vm.warp(block.timestamp + 1);
         bytes32 a2 = _attest(feedId, 2, keccak256("b"));
         _challenge(a1, challenger);
-        // half a minBond is left free: the second challenge stakes (and locks) only that
-        assertEq(dispute.challengeStake(a2), MIN_BOND / 2);
+        // half a minBond is left free: the second challenge still stakes a full
+        // minBond and is accepted; it locks only what is free
+        assertEq(dispute.challengeStake(a2), MIN_BOND);
+        uint256 before = usdc.balanceOf(challenger2);
         _challenge(a2, challenger2);
-        assertEq(registry.getAgent(feedId, agent).lockedBond, MIN_BOND + MIN_BOND / 2);
-        assertEq(dispute.challengeStake(a2), 0);
+        assertEq(before - usdc.balanceOf(challenger2), MIN_BOND, "full stake");
+        assertEq(registry.getAgent(feedId, agent).lockedBond, MIN_BOND + MIN_BOND / 2, "lock capped at the free bond");
+        assertEq(dispute.getDispute(dispute.disputeOf(a2)).lockedBond, MIN_BOND / 2);
+    }
+
+    /// Audit 2026-09-27 H-1: an exhausted bond never shields a reading. With 0 free
+    /// the challenge is accepted (reading Pending, nothing locked); an Invalid
+    /// ruling still deactivates the agent and returns the challenger's stake.
+    function test_challenge_acceptedWithNoFreeBond_invalidStillDeactivates() public {
+        bytes32 feedId = _createFeed();
+        _registerAgent(feedId, agent, MIN_BOND);
+        bytes32 a1 = _attest(feedId, 1, keccak256("a"));
+        vm.warp(block.timestamp + 1);
+        bytes32 a2 = _attest(feedId, 2, keccak256("b"));
+        _challenge(a1, challenger); // locks the whole bond
+        assertEq(registry.availableBond(feedId, agent), 0);
+        uint256 before = usdc.balanceOf(challenger2);
+        _challenge(a2, challenger2); // nothing free: still accepted
+        assertEq(uint8(attestation.getAttestation(a2).status), uint8(Attestation.DisputeStatus.Pending));
+        assertEq(dispute.getDispute(dispute.disputeOf(a2)).lockedBond, 0);
+        bytes32 d2 = dispute.disputeOf(a2); // (read before the prank: an argument call would consume it)
+        vm.prank(resolver);
+        dispute.resolve(d2, Dispute.DisputeOutcome.AttestationInvalid);
+        assertEq(usdc.balanceOf(challenger2), before, "stake returned");
+        assertFalse(registry.isActiveAgent(feedId, agent), "an Invalid ruling always deactivates");
+        assertEq(uint8(attestation.getAttestation(a2).status), uint8(Attestation.DisputeStatus.ResolvedInvalid));
+    }
+
+    function test_challenge_agentCannotChallengeItsOwnReading() public {
+        bytes32 feedId = _createFeed();
+        _registerAgent(feedId, agent, 2 * MIN_BOND);
+        bytes32 a1 = _attest(feedId, 1, keccak256("a"));
+        vm.startPrank(agent);
+        usdc.approve(address(dispute), type(uint256).max);
+        vm.expectRevert(Dispute.AgentCannotChallenge.selector);
+        dispute.challenge(a1, bytes32(0));
+        vm.stopPrank();
     }
 
     function test_resolveInvalid_slashIsCoveredByLock() public {
