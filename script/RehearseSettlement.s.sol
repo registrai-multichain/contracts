@@ -64,6 +64,7 @@ contract RehearseSettlement is Script {
         escrow.grantRole(escrow.MARKETS_ROLE(), address(markets));
         fund.grantRole(fund.MARKETS_ROLE(), address(markets));
         fund.grantRole(fund.MARKETS_ROLE(), address(escrow));
+        fund.grantRole(fund.LATE_ROLE(), address(escrow)); // releases credit the epochs escrow was earned in
         pool.grantRole(pool.FUNDER_ROLE(), address(fund));
         // oracle allowlist: our agent, the foreign agent (so its market exists to
         // be ignored), and the deployer as every feed's dispute resolver
