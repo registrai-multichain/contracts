@@ -158,19 +158,39 @@ contract WonderEscrowTest is Test {
         escrow.executeRelease(KEY);
     }
 
-    function test_sweepAfterExpiryToSeasonPool() public {
+    event Swept(bytes32 indexed key, uint256 toSeason, uint256 toTreasury);
+
+    /// Owner decision 2026-09-27: unclaimed escrow is taxed 10% to the protocol
+    /// treasury (the fund's PROTOCOL_TREASURY), 90% to the season pool.
+    function test_sweepAfterExpiry_90PctToSeasonPool_10PctToTreasury() public {
         _credit(40e6);
         vm.expectRevert(WonderEscrow.NotExpired.selector);
         escrow.sweep(KEY);
         vm.warp(block.timestamp + EXPIRY);
+        address treasury = fund.PROTOCOL_TREASURY();
         uint256 poolBefore = ledger.balanceOf(address(pool));
+        uint256 treasuryBefore = ledger.balanceOf(treasury);
+        vm.expectEmit(true, false, false, true);
+        emit Swept(KEY, 36e6, 4e6);
         escrow.sweep(KEY);
         assertEq(escrow.escrowOf(KEY), 0);
         assertEq(escrow.firstCreditAt(KEY), 0);
-        assertEq(ledger.balanceOf(address(pool)) - poolBefore, 40e6);
+        assertEq(ledger.balanceOf(address(pool)) - poolBefore, 36e6);
+        assertEq(ledger.balanceOf(treasury) - treasuryBefore, 4e6);
+        assertEq(escrow.totalEscrow(), 0);
         // a later credit starts a fresh clock
         _credit(3e6);
         assertEq(escrow.firstCreditAt(KEY), block.timestamp);
+    }
+
+    function test_sweepRoundsTheTreasuryTaxDown_theSeasonPoolGetsTheRest() public {
+        _credit(19); // 1.9 base units of tax -> 1
+        vm.warp(block.timestamp + EXPIRY);
+        uint256 poolBefore = ledger.balanceOf(address(pool));
+        uint256 treasuryBefore = ledger.balanceOf(fund.PROTOCOL_TREASURY());
+        escrow.sweep(KEY);
+        assertEq(ledger.balanceOf(fund.PROTOCOL_TREASURY()) - treasuryBefore, 1);
+        assertEq(ledger.balanceOf(address(pool)) - poolBefore, 18);
     }
 
     function test_pendingReleaseBlocksSweep() public {

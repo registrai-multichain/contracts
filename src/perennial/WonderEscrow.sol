@@ -40,6 +40,9 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
     bytes32 public constant YIELD_ROLE = keccak256("YIELD_ROLE");
 
     uint256 public constant RELEASE_DELAY = 7 days;
+    /// @notice The treasury's cut of swept (never claimed) escrow, to the fund's
+    /// PROTOCOL_TREASURY; the rest goes to the season pool (owner, 2026-09-27).
+    uint256 public constant SWEEP_TREASURY_BPS = 1000;
     /// @notice Shortfall below this is vault rounding, not a loss (0.01 USDC).
     uint256 public constant LOSS_DUST = 1e4;
 
@@ -73,7 +76,7 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
     event ReleaseQueued(bytes32 indexed key, uint256 indexed builderId, uint256 projectId, uint64 readyAt);
     event ReleaseCancelled(bytes32 indexed key);
     event Released(bytes32 indexed key, uint256 indexed builderId, uint256 amount);
-    event Swept(bytes32 indexed key, uint256 amount);
+    event Swept(bytes32 indexed key, uint256 toSeason, uint256 toTreasury);
     event Unreleased(bytes32 indexed key, uint256 indexed builderId);
     event VaultSet(address vault);
     event CapSet(uint256 cap);
@@ -203,7 +206,8 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
     // ───────────────────────────── expiry ─────────────────────────────
 
     /// @notice Anyone: EXPIRY after a source's first unreleased credit, its
-    /// escrow goes to the season pool and the clock resets.
+    /// escrow goes 90% to the season pool and 10% (rounded down) to the fund's
+    /// PROTOCOL_TREASURY, and the clock resets.
     function sweep(bytes32 key) external nonReentrant {
         if (releasedTo[key] != 0) revert AlreadyReleased();
         if (pendingRelease[key].readyAt != 0) revert ReleasePending();
@@ -214,12 +218,17 @@ contract WonderEscrow is AccessControl, ReentrancyGuard {
         escrowOf[key] = 0;
         firstCreditAt[key] = 0;
         totalEscrow -= amount;
+        uint256 toTreasury = (amount * SWEEP_TREASURY_BPS) / 10_000;
+        uint256 toSeason = amount - toTreasury;
         if (amount > 0) {
             _ensureLiquid(amount);
-            LEDGER.internalTransfer(address(FUND), amount);
-            FUND.creditSeason(amount);
+            if (toTreasury > 0) LEDGER.internalTransfer(FUND.PROTOCOL_TREASURY(), toTreasury);
+            if (toSeason > 0) {
+                LEDGER.internalTransfer(address(FUND), toSeason);
+                FUND.creditSeason(toSeason);
+            }
         }
-        emit Swept(key, amount);
+        emit Swept(key, toSeason, toTreasury);
     }
 
     // ───────────────────────────── yield (GOVERNOR) ─────────────────────────────
