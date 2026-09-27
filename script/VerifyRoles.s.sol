@@ -19,6 +19,11 @@ import {RoleTable} from "./lib/RoleTable.sol";
 ///      block; read in 5,000-block windows, the public RPC caps getLogs).
 contract VerifyRoles is RoleTable {
     uint256 internal constant LOG_WINDOW = 5_000;
+    /// @dev The public Arc RPCs rate-limit eth_getLogs per IP (about 4/s, recovering
+    /// ~2 s after a burst), and forge's throttle does not cover the cheatcode.
+    uint256 internal constant LOG_PACE_MS = 350;
+    uint256 internal constant LOG_BACKOFF_MS = 2_500;
+    uint256 internal constant LOG_TRIES = 6;
 
     function run() external {
         _guardChain();
@@ -51,7 +56,7 @@ contract VerifyRoles is RoleTable {
         for (uint256 t; t < targets.length; t++) {
             for (uint256 from = fromBlock; from <= toBlock; from += LOG_WINDOW) {
                 uint256 to = from + LOG_WINDOW - 1 < toBlock ? from + LOG_WINDOW - 1 : toBlock;
-                VmSafe.EthGetLogs[] memory got = vm.eth_getLogs(from, to, targets[t], topics);
+                VmSafe.EthGetLogs[] memory got = _getLogsPaced(from, to, targets[t], topics);
                 for (uint256 i; i < got.length; i++) {
                     require(n < buf.length, "too many RoleGranted logs");
                     buf[n++] = VmSafe.Log({topics: got[i].topics, data: got[i].data, emitter: got[i].emitter});
@@ -69,5 +74,25 @@ contract VerifyRoles is RoleTable {
         console2.log("DEPLOYER:", deployer);
         _verifyRoles(s, admin, deployer, true);
         console2.log("OK: role table verified");
+    }
+
+    /// @dev One getLogs window, paced, retried with back-off while the RPC refuses.
+    function _getLogsPaced(uint256 from, uint256 to, address target, bytes32[] memory topics)
+        internal
+        returns (VmSafe.EthGetLogs[] memory)
+    {
+        for (uint256 i = 1; ; i++) {
+            vm.sleep(LOG_PACE_MS);
+            try vm.eth_getLogs(from, to, target, topics) returns (VmSafe.EthGetLogs[] memory got) {
+                return got;
+            } catch (bytes memory err) {
+                if (i >= LOG_TRIES) {
+                    assembly {
+                        revert(add(err, 32), mload(err))
+                    }
+                }
+                vm.sleep(LOG_BACKOFF_MS);
+            }
+        }
     }
 }
