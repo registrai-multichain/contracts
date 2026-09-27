@@ -1,0 +1,20 @@
+{
+  "network": "arc-mainnet",
+  "chainId": 5042,
+  "Registry": "0x52bb229697c552d8b8e01298525093572420a7eb",
+  "Attestation": "0x86df667e1cd560e39600827c4f4709b939f55d2b",
+  "Dispute": "0xf62cd073f6748f56a0233c43c2ce02640faa75d8",
+  "minBond": 2000000,
+  "oracleBlock": 23010997,
+  "NanoLedger": "0x82CC64bc010Bc244E63654817202B5330f1Ac112",
+  "treasury": "0xd8Dc4Ca674de4571E33040EEb14D487D2Bc37Df7",
+  "disputeResolver": "0xFeE926e8Be2D1C6192213cf20f31D94Dad1e80Fb",
+  "agent": "0x422700c9C549e055672FA670f4f0076C43C4eE36",
+  "admin": "0xFeE926e8Be2D1C6192213cf20f31D94Dad1e80Fb",
+  "MarketsV4": "0xbdc4b03bf67b4ef70195b1862303ace61f0d77ce",
+  "marketsV4Block": 23011086,
+  "settlementWindow": 3600,
+  "resolutionGrace": 604800,
+  "handoff": "done",
+  "verified": "2026-09-27T10:04:07Z"
+}
