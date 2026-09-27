@@ -35,5 +35,43 @@
     "deployer_holds_nothing": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e"
   },
   "superseded": "arc-testnet-v6.json (pre-audit-fix; the keeper no longer runs it)",
-  "handoffNote": "Handoff ran with MARKETS_V4 = the retired v6 V4 0xC27F\u2026 (admin already held its roles, so a no-op there); the live testnet V4 is 0xf98B\u20261cB9."
+  "handoffNote": "Handoff ran with MARKETS_V4 = the retired v6 V4 0xC27F\u2026 (admin already held its roles, so a no-op there); the live testnet V4 is 0xf98B\u20261cB9.",
+  "rehearsal": {
+    "startedAt": "2026-09-27",
+    "builder": {
+      "id": 2,
+      "owner": "0xA9Fa24e1147E8337C3D25b084890121BE10a132B",
+      "project": 2,
+      "source": "domain:registrai-rehearsal.pages.dev",
+      "badgeSerial": 2,
+      "caretaker": "0xf26db19bc8DC33c9A72399128CF5cfB5dDC76263",
+      "proof": "https://registrai-rehearsal.pages.dev/.well-known/registrai.json (Pages project registrai-rehearsal)",
+      "milestoneFeed": "0xfa35ef101edb18ff1459e451b9e804a77805d5f5b15ec12c9b24ce96cdf8a543"
+    },
+    "wonderSource": {
+      "source": "github:registrai-multichain/contracts",
+      "nominatedBy": "0x01853CC09BD811904b4EEB199e02E0e13d812cef",
+      "milestoneFeed": "0x3eb78725fa9739d9ae2e8209d51c4fc2d8afbeca501dfad683b7424cde40f433"
+    },
+    "markets": {
+      "builder": {
+        "marketId": "0x2cf4d0b63ad2076e2acbe84e3b275a2db6b890816d29e5e28868a5694765eafd",
+        "question": "builder #2 milestone count >= 1",
+        "expiry": 1791151200,
+        "liquidity": 5000000,
+        "trade": "1 USDC YES",
+        "bound": true
+      },
+      "wonder": {
+        "marketId": "0x65b26eb39ab24d7b9054f07d3eed636646bc8f98bda46c06614b0cab01d3363f",
+        "question": "github:registrai-multichain/contracts releases >= 1",
+        "expiry": 1791151200,
+        "liquidity": 5000000,
+        "trade": "1 USDC NO",
+        "bound": true
+      }
+    },
+    "checked": "keeper tick 21:30 UTC validated the proof, provisioned and bound both feeds; trades routed the builder leg to BuilderFund income (builder #2, 5000) and to WonderEscrow (5000, bucketed by epoch)",
+    "next": "expiry 2026-10-04 22:00 UTC: the keeper attests and settles; then a claim of the wonder source by a verified builder exercises queueRelease -> 7 days -> executeRelease (late income) -> LATE_HOLD 7 days -> claimFor"
+  }
 }
