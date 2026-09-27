@@ -28,6 +28,8 @@ MUTANTS = [
   ("F4 schedule notice back to one epoch", F, "        uint256 effective = currentEpoch() + SCHEDULE_DELAY + 1;", "        uint256 effective = currentEpoch() + SCHEDULE_DELAY;"),
   ("F5 sweepFrozen moves paid income again", F, "        uint256 gross = income - paid;\n        paidGross[epoch][builderId] = income;\n        outstanding -= gross;\n        _toSeason(gross);",
    "        uint256 gross = income;\n        paidGross[epoch][builderId] = income;\n        outstanding -= gross;\n        _toSeason(gross);"),
+  ("F6 late income claimable at once (final review Important 1)", F, "        if (block.timestamp < lateHoldUntil[epoch][builderId]) revert LateIncomeHeld();\n", ""),
+  ("F7 late income hold never set", F, "        lateHoldUntil[epoch][builderId] = uint64(block.timestamp + LATE_HOLD);\n", ""),
   ("S1 season deadline uncapped", S, " || deadline > block.timestamp + MAX_SEASON_LENGTH", ""),
   ("D1 any mainnet epoch >= 7 days", D, 'require(c.epochLength == 30 days, "mainnet: EPOCH_LENGTH must be 30 days");', 'require(c.epochLength >= 7 days, "mainnet: EPOCH_LENGTH must be 30 days");'),
   ("D2 treasury on any ledger", D, "_isContract(c.protocolTreasury) && _ledgerOf(c.protocolTreasury) == c.ledger", "_isContract(c.protocolTreasury)"),
