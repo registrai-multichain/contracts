@@ -47,6 +47,7 @@ library MarketsKit {
         escrow.grantRole(escrow.MARKETS_ROLE(), address(markets));
         fund.grantRole(fund.MARKETS_ROLE(), address(markets));
         fund.grantRole(fund.MARKETS_ROLE(), address(escrow));
+        fund.grantRole(fund.LATE_ROLE(), address(escrow));
     }
 
     /// Drop-in for the pre-wonder constructor: deploys a badge and an escrow

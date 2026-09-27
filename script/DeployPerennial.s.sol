@@ -21,11 +21,11 @@ import {WonderEscrow} from "../src/perennial/WonderEscrow.sol";
 ///         feeds the SeasonPool) + MarketsPerennial (whose 50% builder leg of the
 ///         1% trading fee is credited in the fund to the builder the market is
 ///         about) + WonderEscrow (the builder leg of bound wonder markets, held
-///         per nominated source for its team; idle escrow earns ERC-4626 yield
-///         for the season pool once the Safe sets a vault). Wires MarketsPerennial
+///         per nominated source for its team, per epoch earned; no yield vault).
+///         Wires MarketsPerennial
 ///         and the escrow as the fund's MARKETS_ROLE holders, MarketsPerennial as
 ///         the escrow's only MARKETS_ROLE and the fund as the pool's only
-///         FUNDER_ROLE; the operator gets FEED (bind feeds), RELEASER and YIELD,
+///         FUNDER_ROLE; the operator gets FEED (bind feeds) and RELEASER,
 ///         the onboarder NOMINATOR. Fees and the launch tax schedule
 ///         are fixed in code (no fee inputs). The deployer holds every admin role
 ///         until Handoff.s.sol.
@@ -46,10 +46,10 @@ import {WonderEscrow} from "../src/perennial/WonderEscrow.sol";
 ///                          optional, both or neither (neither = deploy new ones).
 ///      VERIFIED_BADGE      the phase-1 VerifiedBuilderBadge; required on mainnet
 ///                          (with the registries); elsewhere zero = deploy a new one
-///      WONDER_EXPIRY       [180 days] unclaimed wonder escrow goes to the season
-///                          pool this long after its first credit; immutable
-///      OPERATOR            MAINNET [deployer] binds feeds, queues escrow releases,
-///                          runs the yield vault; never the deployer on mainnet
+///      WONDER_EXPIRY       [180 days] unclaimed wonder escrow is swept (90% season
+///                          pool, 10% treasury) this long after its first credit; immutable
+///      OPERATOR            MAINNET [deployer] binds feeds and queues escrow
+///                          releases; never the deployer on mainnet
 ///      ONBOARDER           MAINNET [deployer] nominates wonder-market sources
 ///                          (with the Safe); never the deployer on mainnet
 ///      The launch tax schedule is lib/LaunchSchedule.sol (the spec's defaults); the
@@ -218,9 +218,9 @@ contract DeployPerennial is DeployBase {
         );
         d.fund.grantRole(d.fund.MARKETS_ROLE(), address(d.markets));
         d.fund.grantRole(d.fund.MARKETS_ROLE(), address(d.escrow));
+        d.fund.grantRole(d.fund.LATE_ROLE(), address(d.escrow)); // releases credit the epochs escrow was earned in
         d.escrow.grantRole(d.escrow.MARKETS_ROLE(), address(d.markets));
         d.escrow.grantRole(d.escrow.RELEASER_ROLE(), c.operator);
-        d.escrow.grantRole(d.escrow.YIELD_ROLE(), c.operator);
         d.markets.grantRole(d.markets.FEED_ROLE(), c.operator);
         d.markets.grantRole(d.markets.NOMINATOR_ROLE(), c.onboarder);
         d.seasonPool.grantRole(d.seasonPool.FUNDER_ROLE(), address(d.fund));
@@ -231,6 +231,7 @@ contract DeployPerennial is DeployBase {
         require(d.fund.hasRole(d.fund.MARKETS_ROLE(), address(d.markets)), "markets not wired to the fund");
         require(d.seasonPool.hasRole(d.seasonPool.FUNDER_ROLE(), address(d.fund)), "fund not wired to the season pool");
         require(d.fund.hasRole(d.fund.MARKETS_ROLE(), address(d.escrow)), "escrow not wired to the fund");
+        require(d.fund.hasRole(d.fund.LATE_ROLE(), address(d.escrow)), "escrow cannot credit late income");
         require(d.escrow.hasRole(d.escrow.MARKETS_ROLE(), address(d.markets)), "markets not wired to the escrow");
     }
 }

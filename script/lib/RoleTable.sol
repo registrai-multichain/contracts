@@ -19,7 +19,7 @@ import {WonderEscrow} from "../../src/perennial/WonderEscrow.sol";
 /// deployer holds none, only MarketsPerennial and the WonderEscrow credit builder
 /// income (fund MARKETS_ROLE), only MarketsPerennial credits the escrow, only the
 /// fund funds the season pool (FUNDER_ROLE), the deployer keeps no operator
-/// role (FEED, RELEASER, YIELD), and
+/// role (FEED, RELEASER, fund LATE), and
 /// the oracle stack's one-shot deployer powers (wire, setPoints) are consumed.
 abstract contract RoleTable is DeployBase {
     struct Stack {
@@ -43,7 +43,7 @@ abstract contract RoleTable is DeployBase {
     bytes32 internal constant NOMINATOR = keccak256("NOMINATOR_ROLE");
     bytes32 internal constant FEED = keccak256("FEED_ROLE");
     bytes32 internal constant RELEASER = keccak256("RELEASER_ROLE");
-    bytes32 internal constant YIELD = keccak256("YIELD_ROLE");
+    bytes32 internal constant LATE = keccak256("LATE_ROLE");
 
     function _loadStack() internal view returns (Stack memory s) {
         s.registry = vm.envAddress("REGISTRY");
@@ -210,7 +210,7 @@ abstract contract RoleTable is DeployBase {
             // Operator roles: never the deployer's key (off mainnet the deployer
             // may be the operator, as DeployPerennial defaults it).
             require(!_has(s.escrow, RELEASER, deployer), "deployer holds WonderEscrow RELEASER");
-            require(!_has(s.escrow, YIELD, deployer), "deployer holds WonderEscrow YIELD");
+            require(!_has(s.fund, LATE, deployer), "deployer holds BuilderFund LATE");
             require(!_has(s.perennial, FEED, deployer), "deployer holds MarketsPerennial FEED");
         }
     }
@@ -247,7 +247,7 @@ abstract contract RoleTable is DeployBase {
         require(!_has(s.seasonPool, FUNDER, onboarder), "ONBOARDER holds SeasonPool FUNDER");
         require(!_has(s.escrow, MARKETS, onboarder), "ONBOARDER holds WonderEscrow MARKETS");
         require(!_has(s.escrow, RELEASER, onboarder), "ONBOARDER holds WonderEscrow RELEASER");
-        require(!_has(s.escrow, YIELD, onboarder), "ONBOARDER holds WonderEscrow YIELD");
+        require(!_has(s.fund, LATE, onboarder), "ONBOARDER holds BuilderFund LATE");
         require(!_has(s.perennial, FEED, onboarder), "ONBOARDER holds MarketsPerennial FEED");
         if (print) console2.log("OK: onboarder holds no market/admin role");
     }

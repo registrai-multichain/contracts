@@ -85,7 +85,7 @@ contract DeployScriptsTest is Test {
     bytes32 constant NOMINATOR = keccak256("NOMINATOR_ROLE");
     bytes32 constant FEED = keccak256("FEED_ROLE");
     bytes32 constant RELEASER = keccak256("RELEASER_ROLE");
-    bytes32 constant YIELD = keccak256("YIELD_ROLE");
+    bytes32 constant LATE = keccak256("LATE_ROLE");
 
     function setUp() public {
         vm.warp(3600); // markets expire on the hour (BinaryMarket.EXPIRY_GRID): start on the grid
@@ -197,7 +197,7 @@ contract DeployScriptsTest is Test {
         (w[n], r[n++]) = (escrow, GOVERNOR);
         (w[n], r[n++]) = (escrow, MARKETS);
         (w[n], r[n++]) = (escrow, RELEASER);
-        (w[n], r[n++]) = (escrow, YIELD);
+        (w[n], r[n++]) = (address(fund), LATE);
         assertEq(n, 23);
     }
 
@@ -325,7 +325,9 @@ contract DeployScriptsTest is Test {
         assertEq(escrow.EXPIRY(), 180 days);
         assertTrue(escrow.hasRole(MARKETS, address(perennial)));
         assertTrue(fund.hasRole(MARKETS, address(escrow)));
-        assertTrue(escrow.hasRole(RELEASER, operator) && escrow.hasRole(YIELD, operator));
+        assertTrue(fund.hasRole(LATE, address(escrow)), "releases credit the epochs escrow was earned in");
+        assertTrue(escrow.hasRole(RELEASER, operator));
+        assertFalse(escrow.hasRole(keccak256("YIELD_ROLE"), operator), "no yield vault, no yield role");
         assertTrue(perennial.hasRole(FEED, operator));
         assertTrue(perennial.hasRole(NOMINATOR, onboarder));
         new Handoff().handoff(_stack(), admin, deployer);
