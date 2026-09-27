@@ -1,0 +1,41 @@
+
+-------------------------------------------------
+# Configuration
+-------------------------------------------------
+Root - /Users/tobiasd/Desktop/arc/contracts
+Source - /Users/tobiasd/Desktop/arc/contracts/src
+Remappings - [
+    "@openzeppelin/=lib/openzeppelin-contracts/",
+    "forge-std/=lib/forge-std/src/",
+    "erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/",
+    "halmos-cheatcodes/=lib/openzeppelin-contracts/lib/halmos-cheatcodes/src/",
+    "openzeppelin-contracts/=lib/openzeppelin-contracts/",
+]
+EVM version - prague
+-------------------------------------------------
+# Source Scope
+-------------------------------------------------
+Include Filepaths Containing - [
+    "src/nanopay/MarketsV4.sol",
+    "src/nanopay/BinaryMarket.sol",
+    "src/nanopay/SettlementPolicy.sol",
+    "src/Registry.sol",
+    "src/Attestation.sol",
+    "src/Dispute.sol",
+]
+Exclude Filepaths Containing - No specific criteria.
+Auto Excluding - No Files.
+-------------------------------------------------
+# Compiling Abstract Syntax Trees
+-------------------------------------------------
+Ingesting 6 compiled files [solc : v0.8.35]
+-------------------------------------------------
+# Scanning Contracts
+-------------------------------------------------
+Running 88 detectors
+Detectors run, printing report.
+Report printed to audit/common-markets/aderyn.md
+
+🐦 Aderyn finds bugs. You write safer code.
+⭐ Star us on GitHub if that sounds fair:
+https://github.com/Cyfrin/aderyn

@@ -1,0 +1,210 @@
+'forge clean' running (wd: /Users/tobiasd/Desktop/arc/contracts)
+'forge config --json' running
+'forge build --build-info src/nanopay/MarketsV4.sol' running (wd: /Users/tobiasd/Desktop/arc/contracts)
+INFO:Detectors:
+Detector: divide-before-multiply
+BinaryMarket._sellMath(uint256,uint256,BinaryMarket.Outcome,uint256) (src/nanopay/BinaryMarket.sol#399-412) performs a multiplication on the result of a division:
+	- grossOut = (sum - Math.sqrt(disc,Math.Rounding.Ceil)) / 2 (src/nanopay/BinaryMarket.sol#408)
+	- fee = (grossOut * TRADE_FEE_BPS) / BPS (src/nanopay/BinaryMarket.sol#409)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#divide-before-multiply
+INFO:Detectors:
+Detector: incorrect-equality
+Attestation.isFinalized(bytes32) (src/Attestation.sol#195-202) uses a dangerous strict equality:
+	- att.timestamp == 0 (src/Attestation.sol#197)
+Attestation.isFinalized(bytes32) (src/Attestation.sol#195-202) uses a dangerous strict equality:
+	- att.status == DisputeStatus.ResolvedInvalid (src/Attestation.sol#198)
+Attestation.isFinalized(bytes32) (src/Attestation.sol#195-202) uses a dangerous strict equality:
+	- att.status == DisputeStatus.Pending (src/Attestation.sol#199)
+Attestation.isFinalized(bytes32) (src/Attestation.sol#195-202) uses a dangerous strict equality:
+	- att.status == DisputeStatus.ResolvedValid (src/Attestation.sol#200)
+Attestation.valueAt(bytes32,address,uint256) (src/Attestation.sol#216-230) uses a dangerous strict equality:
+	- att.status == DisputeStatus.ResolvedInvalid (src/Attestation.sol#226)
+BinaryMarket.claimableLP(bytes32,address) (src/nanopay/BinaryMarket.sol#605-610) uses a dangerous strict equality:
+	- _markets[marketId].phase == Phase.Trading (src/nanopay/BinaryMarket.sol#606)
+NanoLedger.settleStream(uint256) (src/nanopay/NanoLedger.sol#238-253) uses a dangerous strict equality:
+	- streamed == s.cap (src/nanopay/NanoLedger.sol#249)
+NanoLedger.skimSurplus(address) (src/nanopay/NanoLedger.sol#345-351) uses a dangerous strict equality:
+	- surplus == 0 (src/nanopay/NanoLedger.sol#349)
+NanoLedger.streamedSoFar(uint256) (src/nanopay/NanoLedger.sol#215-227) uses a dangerous strict equality:
+	- elapsed == 0 (src/nanopay/NanoLedger.sol#219)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
+INFO:Detectors:
+Detector: reentrancy-no-eth
+Reentrancy in BinaryMarket._open(bytes32,address,int256,BinaryMarket.Comparator,uint256,uint256) (src/nanopay/BinaryMarket.sol#215-252):
+	External calls:
+	- LEDGER.transferFromInternal(msg.sender,address(this),liquidity) (src/nanopay/BinaryMarket.sol#234)
+	State variables written after the call(s):
+	- _markets[marketId] = Core({feedId:feedId,agent:agent,threshold:threshold,comparator:comparator,expiry:expiry,creator:msg.sender,yesReserve:liquidity,noReserve:liquidity,phase:Phase.Trading,yesWon:false,createdAt:block.timestamp}) (src/nanopay/BinaryMarket.sol#236-248)
+	BinaryMarket._markets (src/nanopay/BinaryMarket.sol#92) can be used in cross function reentrancies:
+	- BinaryMarket.claimableLP(bytes32,address) (src/nanopay/BinaryMarket.sol#605-610)
+	- BinaryMarket.priceOf(bytes32,BinaryMarket.Outcome) (src/nanopay/BinaryMarket.sol#657-663)
+	- BinaryMarket.quoteBuy(bytes32,BinaryMarket.Outcome,uint256) (src/nanopay/BinaryMarket.sol#623-634)
+	- BinaryMarket.quoteSell(bytes32,BinaryMarket.Outcome,uint256) (src/nanopay/BinaryMarket.sol#640-651)
+	- BinaryMarket.redeemable(bytes32,address) (src/nanopay/BinaryMarket.sol#600-602)
+	- BinaryMarket.settlementState(bytes32) (src/nanopay/BinaryMarket.sol#614-618)
+Reentrancy in Dispute.challenge(bytes32,bytes32) (src/Dispute.sol#61-99):
+	External calls:
+	- REGISTRY.lockBond(att.feedId,att.agent,bond) (src/Dispute.sol#82)
+	State variables written after the call(s):
+	- disputeOf[attestationId] = disputeId (src/Dispute.sol#94)
+	Dispute.disputeOf (src/Dispute.sol#35) can be used in cross function reentrancies:
+	- Dispute.challenge(bytes32,bytes32) (src/Dispute.sol#61-99)
+	- Dispute.disputeOf (src/Dispute.sol#35)
+	- Dispute.invalidatedBy(bytes32) (src/Dispute.sol#143-146)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-2
+INFO:Detectors:
+Detector: unused-return
+SettlementPolicy._settlement(Attestation,bytes32,address,uint256) (src/nanopay/SettlementPolicy.sol#78-91) ignores return value by (found,v,None,finalized) = attestation.firstInWindow(feedId,agent,expiry,close) (src/nanopay/SettlementPolicy.sol#85)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#unused-return
+INFO:Detectors:
+Detector: reentrancy-benign
+Reentrancy in BinaryMarket._buy(address,bytes32,BinaryMarket.Outcome,uint256,uint256,uint256) (src/nanopay/BinaryMarket.sol#278-315):
+	External calls:
+	- LEDGER.transferFromInternal(trader,address(this),collateralIn) (src/nanopay/BinaryMarket.sol#289)
+	State variables written after the call(s):
+	- _costHolders[marketId] ++ (src/nanopay/BinaryMarket.sol#303)
+	- _noHolders[marketId] ++ (src/nanopay/BinaryMarket.sol#310)
+	- _yesHolders[marketId] ++ (src/nanopay/BinaryMarket.sol#307)
+	- collateralOf[marketId] += effectiveIn (src/nanopay/BinaryMarket.sol#302)
+	- netCost[marketId][trader] += effectiveIn (src/nanopay/BinaryMarket.sol#304)
+	- noBalance[marketId][trader] += sharesOut (src/nanopay/BinaryMarket.sol#311)
+	- totalNetCost[marketId] += effectiveIn (src/nanopay/BinaryMarket.sol#305)
+	- yesBalance[marketId][trader] += sharesOut (src/nanopay/BinaryMarket.sol#308)
+Reentrancy in BinaryMarket._open(bytes32,address,int256,BinaryMarket.Comparator,uint256,uint256) (src/nanopay/BinaryMarket.sol#215-252):
+	External calls:
+	- LEDGER.transferFromInternal(msg.sender,address(this),liquidity) (src/nanopay/BinaryMarket.sol#234)
+	State variables written after the call(s):
+	- collateralOf[marketId] = liquidity (src/nanopay/BinaryMarket.sol#251)
+	- lpShares[marketId][msg.sender] = liquidity (src/nanopay/BinaryMarket.sol#249)
+	- totalLpShares[marketId] = liquidity (src/nanopay/BinaryMarket.sol#250)
+Reentrancy in MarketsV4.buyFor(address,bytes32,BinaryMarket.Outcome,uint256,uint256,uint256) (src/nanopay/MarketsV4.sol#160-174):
+	External calls:
+	- shares = _buy(owner,marketId,outcome,collateralIn,minSharesOut,deadline) (src/nanopay/MarketsV4.sol#171)
+		- LEDGER.internalTransfer(to,amount) (src/nanopay/BinaryMarket.sol#451)
+		- LEDGER.transferFromInternal(trader,address(this),collateralIn) (src/nanopay/BinaryMarket.sol#289)
+	State variables written after the call(s):
+	- _sessionShares[owner][msg.sender][sessionEpoch[owner][msg.sender]][marketId][outcome] += shares (src/nanopay/MarketsV4.sol#172)
+Reentrancy in Dispute.challenge(bytes32,bytes32) (src/Dispute.sol#61-99):
+	External calls:
+	- REGISTRY.lockBond(att.feedId,att.agent,bond) (src/Dispute.sol#82)
+	State variables written after the call(s):
+	- _disputes[disputeId] = DisputeData({attestationId:attestationId,challenger:msg.sender,challengerBond:bond,evidenceHash:evidenceHash,openedAt:block.timestamp,resolver:f.resolver,outcome:DisputeOutcome.Pending}) (src/Dispute.sol#85-93)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-3
+INFO:Detectors:
+Detector: reentrancy-events
+Reentrancy in Attestation._record(bytes32,address,int256,bytes32,bool) (src/Attestation.sol#108-146):
+	External calls:
+	- REGISTRY.recordAttestation(feedId,agent) (src/Attestation.sol#137)
+	Event emitted after the call(s):
+	- Attested(attestationId,feedId,agent,value,inputHash,block.timestamp + f.disputeWindow) (src/Attestation.sol#139)
+Reentrancy in Dispute.challenge(bytes32,bytes32) (src/Dispute.sol#61-99):
+	External calls:
+	- REGISTRY.lockBond(att.feedId,att.agent,bond) (src/Dispute.sol#82)
+	- ATTESTATION.setStatus(attestationId,Attestation.DisputeStatus.Pending) (src/Dispute.sol#96)
+	Event emitted after the call(s):
+	- Challenged(disputeId,attestationId,msg.sender,bond,evidenceHash) (src/Dispute.sol#98)
+Reentrancy in Dispute.resolve(bytes32,Dispute.DisputeOutcome) (src/Dispute.sol#101-127):
+	External calls:
+	- REGISTRY.unlockBond(att.feedId,att.agent,d.challengerBond) (src/Dispute.sol#116)
+	- ATTESTATION.setStatus(d.attestationId,Attestation.DisputeStatus.ResolvedValid) (src/Dispute.sol#117)
+	- REGISTRY.slash(att.feedId,att.agent,d.challengerBond,d.challenger) (src/Dispute.sol#122)
+	- ATTESTATION.setStatus(d.attestationId,Attestation.DisputeStatus.ResolvedInvalid) (src/Dispute.sol#123)
+	Event emitted after the call(s):
+	- Resolved(disputeId,outcome) (src/Dispute.sol#126)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-4
+INFO:Detectors:
+Detector: timestamp
+Attestation._record(bytes32,address,int256,bytes32,bool) (src/Attestation.sol#108-146) uses timestamp for comparisons
+	Dangerous comparisons:
+	- _attestations[attestationId].timestamp != 0 (src/Attestation.sol#122)
+Attestation._repairLatestPointer(bytes32,address,bytes32) (src/Attestation.sol#174-187) uses timestamp for comparisons
+	Dangerous comparisons:
+	- _attestations[h[i - 1]].status != DisputeStatus.ResolvedInvalid (src/Attestation.sol#181)
+Attestation.isFinalized(bytes32) (src/Attestation.sol#195-202) uses timestamp for comparisons
+	Dangerous comparisons:
+	- att.timestamp == 0 (src/Attestation.sol#197)
+	- att.status == DisputeStatus.ResolvedInvalid (src/Attestation.sol#198)
+	- att.status == DisputeStatus.Pending (src/Attestation.sol#199)
+	- att.status == DisputeStatus.ResolvedValid (src/Attestation.sol#200)
+	- block.timestamp >= att.finalizedAt (src/Attestation.sol#201)
+Attestation.valueAt(bytes32,address,uint256) (src/Attestation.sol#216-230) uses timestamp for comparisons
+	Dangerous comparisons:
+	- att.timestamp > atTimestamp (src/Attestation.sol#225)
+	- att.status == DisputeStatus.ResolvedInvalid (src/Attestation.sol#226)
+Attestation._lowerBound(bytes32[],uint256) (src/Attestation.sol#282-289) uses timestamp for comparisons
+	Dangerous comparisons:
+	- _attestations[h[mid]].timestamp < from (src/Attestation.sol#286)
+Dispute.challenge(bytes32,bytes32) (src/Dispute.sol#61-99) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp >= att.finalizedAt (src/Dispute.sol#64)
+	- disputeOf[attestationId] != bytes32(0) (src/Dispute.sol#65)
+Registry._register(bytes32,bytes32,uint256,address) (src/Registry.sol#166-202) uses timestamp for comparisons
+	Dangerous comparisons:
+	- msg.sender != f.creator (src/Registry.sol#178)
+	- bondAmount < f.minBond (src/Registry.sol#179)
+Registry.withdrawBond(bytes32) (src/Registry.sol#214-226) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < anchor + WITHDRAW_COOLDOWN (src/Registry.sol#219)
+Registry.lockBond(bytes32,address,uint256) (src/Registry.sol#238-246) uses timestamp for comparisons
+	Dangerous comparisons:
+	- require(bool,string)(a.bond - a.lockedBond >= amount,Registry: insufficient available bond) (src/Registry.sol#243)
+Registry.unlockBond(bytes32,address,uint256) (src/Registry.sol#248-254) uses timestamp for comparisons
+	Dangerous comparisons:
+	- require(bool,string)(a.lockedBond >= amount,Registry: unlock exceeds locked) (src/Registry.sol#251)
+BinaryMarket._open(bytes32,address,int256,BinaryMarket.Comparator,uint256,uint256) (src/nanopay/BinaryMarket.sol#215-252) uses timestamp for comparisons
+	Dangerous comparisons:
+	- expiry <= block.timestamp (src/nanopay/BinaryMarket.sol#223)
+BinaryMarket._buy(address,bytes32,BinaryMarket.Outcome,uint256,uint256,uint256) (src/nanopay/BinaryMarket.sol#278-315) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp > deadline (src/nanopay/BinaryMarket.sol#286)
+BinaryMarket._sell(address,bytes32,BinaryMarket.Outcome,uint256,uint256,uint256) (src/nanopay/BinaryMarket.sol#329-369) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp > deadline (src/nanopay/BinaryMarket.sol#337)
+BinaryMarket._trading(bytes32) (src/nanopay/BinaryMarket.sol#414-423) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp >= m.expiry (src/nanopay/BinaryMarket.sol#418)
+BinaryMarket.resolve(bytes32) (src/nanopay/BinaryMarket.sol#458-482) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < m.expiry (src/nanopay/BinaryMarket.sol#462)
+BinaryMarket.claimableLP(bytes32,address) (src/nanopay/BinaryMarket.sol#605-610) uses timestamp for comparisons
+	Dangerous comparisons:
+	- _markets[marketId].phase == Phase.Trading (src/nanopay/BinaryMarket.sol#606)
+BinaryMarket.quoteBuy(bytes32,BinaryMarket.Outcome,uint256) (src/nanopay/BinaryMarket.sol#623-634) uses timestamp for comparisons
+	Dangerous comparisons:
+	- ! _isTrading(m) || collateralIn == 0 (src/nanopay/BinaryMarket.sol#629)
+BinaryMarket.quoteSell(bytes32,BinaryMarket.Outcome,uint256) (src/nanopay/BinaryMarket.sol#640-651) uses timestamp for comparisons
+	Dangerous comparisons:
+	- ! _isTrading(m) || sharesIn == 0 (src/nanopay/BinaryMarket.sol#646)
+BinaryMarket._isTrading(BinaryMarket.Core) (src/nanopay/BinaryMarket.sol#653-655) uses timestamp for comparisons
+	Dangerous comparisons:
+	- m.createdAt != 0 && m.phase == Phase.Trading && block.timestamp < m.expiry (src/nanopay/BinaryMarket.sol#654)
+MarketsV4.setSession(address,uint128,uint64) (src/nanopay/MarketsV4.sol#140-149) uses timestamp for comparisons
+	Dangerous comparisons:
+	- expiry <= block.timestamp || expiry > block.timestamp + MAX_SESSION (src/nanopay/MarketsV4.sol#142)
+MarketsV4._session(address) (src/nanopay/MarketsV4.sol#208-211) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp >= s.expiry (src/nanopay/MarketsV4.sol#210)
+NanoLedger._move(address,address,uint256) (src/nanopay/NanoLedger.sol#157-164) uses timestamp for comparisons
+	Dangerous comparisons:
+	- amount > bal (src/nanopay/NanoLedger.sol#161)
+NanoLedger.openStream(address,uint256,uint256) (src/nanopay/NanoLedger.sol#191-205) uses timestamp for comparisons
+	Dangerous comparisons:
+	- cap > bal (src/nanopay/NanoLedger.sol#197)
+NanoLedger.streamedSoFar(uint256) (src/nanopay/NanoLedger.sol#215-227) uses timestamp for comparisons
+	Dangerous comparisons:
+	- elapsed == 0 (src/nanopay/NanoLedger.sol#219)
+	- rate > cap / elapsed (src/nanopay/NanoLedger.sol#225)
+NanoLedger.settleStream(uint256) (src/nanopay/NanoLedger.sol#238-253) uses timestamp for comparisons
+	Dangerous comparisons:
+	- amount > 0 (src/nanopay/NanoLedger.sol#244)
+	- streamed == s.cap (src/nanopay/NanoLedger.sol#249)
+NanoLedger.accrue(bytes32,uint256) (src/nanopay/NanoLedger.sol#305-316) uses timestamp for comparisons
+	Dangerous comparisons:
+	- amount > bal (src/nanopay/NanoLedger.sol#312)
+SettlementPolicy._settlement(Attestation,bytes32,address,uint256) (src/nanopay/SettlementPolicy.sol#78-91) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < expiry (src/nanopay/SettlementPolicy.sol#83)
+	- block.timestamp <= close (src/nanopay/SettlementPolicy.sol#87)
+	- block.timestamp > close + RESOLUTION_GRACE (src/nanopay/SettlementPolicy.sol#89)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#block-timestamp
+INFO:Slither:src/nanopay/MarketsV4.sol analyzed (23 contracts with 97 detectors), 47 result(s) found

@@ -1,0 +1,99 @@
+'forge clean' running (wd: /Users/tobiasd/Desktop/arc/contracts)
+'forge config --json' running
+'forge build --build-info src/Dispute.sol' running (wd: /Users/tobiasd/Desktop/arc/contracts)
+INFO:Detectors:
+Detector: incorrect-equality
+Attestation.isFinalized(bytes32) (src/Attestation.sol#195-202) uses a dangerous strict equality:
+	- att.timestamp == 0 (src/Attestation.sol#197)
+Attestation.isFinalized(bytes32) (src/Attestation.sol#195-202) uses a dangerous strict equality:
+	- att.status == DisputeStatus.ResolvedInvalid (src/Attestation.sol#198)
+Attestation.isFinalized(bytes32) (src/Attestation.sol#195-202) uses a dangerous strict equality:
+	- att.status == DisputeStatus.Pending (src/Attestation.sol#199)
+Attestation.isFinalized(bytes32) (src/Attestation.sol#195-202) uses a dangerous strict equality:
+	- att.status == DisputeStatus.ResolvedValid (src/Attestation.sol#200)
+Attestation.valueAt(bytes32,address,uint256) (src/Attestation.sol#216-230) uses a dangerous strict equality:
+	- att.status == DisputeStatus.ResolvedInvalid (src/Attestation.sol#226)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#dangerous-strict-equalities
+INFO:Detectors:
+Detector: reentrancy-no-eth
+Reentrancy in Dispute.challenge(bytes32,bytes32) (src/Dispute.sol#61-99):
+	External calls:
+	- REGISTRY.lockBond(att.feedId,att.agent,bond) (src/Dispute.sol#82)
+	State variables written after the call(s):
+	- disputeOf[attestationId] = disputeId (src/Dispute.sol#94)
+	Dispute.disputeOf (src/Dispute.sol#35) can be used in cross function reentrancies:
+	- Dispute.challenge(bytes32,bytes32) (src/Dispute.sol#61-99)
+	- Dispute.disputeOf (src/Dispute.sol#35)
+	- Dispute.invalidatedBy(bytes32) (src/Dispute.sol#143-146)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-2
+INFO:Detectors:
+Detector: reentrancy-benign
+Reentrancy in Dispute.challenge(bytes32,bytes32) (src/Dispute.sol#61-99):
+	External calls:
+	- REGISTRY.lockBond(att.feedId,att.agent,bond) (src/Dispute.sol#82)
+	State variables written after the call(s):
+	- _disputes[disputeId] = DisputeData({attestationId:attestationId,challenger:msg.sender,challengerBond:bond,evidenceHash:evidenceHash,openedAt:block.timestamp,resolver:f.resolver,outcome:DisputeOutcome.Pending}) (src/Dispute.sol#85-93)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-3
+INFO:Detectors:
+Detector: reentrancy-events
+Reentrancy in Attestation._record(bytes32,address,int256,bytes32,bool) (src/Attestation.sol#108-146):
+	External calls:
+	- REGISTRY.recordAttestation(feedId,agent) (src/Attestation.sol#137)
+	Event emitted after the call(s):
+	- Attested(attestationId,feedId,agent,value,inputHash,block.timestamp + f.disputeWindow) (src/Attestation.sol#139)
+Reentrancy in Dispute.challenge(bytes32,bytes32) (src/Dispute.sol#61-99):
+	External calls:
+	- REGISTRY.lockBond(att.feedId,att.agent,bond) (src/Dispute.sol#82)
+	- ATTESTATION.setStatus(attestationId,Attestation.DisputeStatus.Pending) (src/Dispute.sol#96)
+	Event emitted after the call(s):
+	- Challenged(disputeId,attestationId,msg.sender,bond,evidenceHash) (src/Dispute.sol#98)
+Reentrancy in Dispute.resolve(bytes32,Dispute.DisputeOutcome) (src/Dispute.sol#101-127):
+	External calls:
+	- REGISTRY.unlockBond(att.feedId,att.agent,d.challengerBond) (src/Dispute.sol#116)
+	- ATTESTATION.setStatus(d.attestationId,Attestation.DisputeStatus.ResolvedValid) (src/Dispute.sol#117)
+	- REGISTRY.slash(att.feedId,att.agent,d.challengerBond,d.challenger) (src/Dispute.sol#122)
+	- ATTESTATION.setStatus(d.attestationId,Attestation.DisputeStatus.ResolvedInvalid) (src/Dispute.sol#123)
+	Event emitted after the call(s):
+	- Resolved(disputeId,outcome) (src/Dispute.sol#126)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#reentrancy-vulnerabilities-4
+INFO:Detectors:
+Detector: timestamp
+Attestation._record(bytes32,address,int256,bytes32,bool) (src/Attestation.sol#108-146) uses timestamp for comparisons
+	Dangerous comparisons:
+	- _attestations[attestationId].timestamp != 0 (src/Attestation.sol#122)
+Attestation._repairLatestPointer(bytes32,address,bytes32) (src/Attestation.sol#174-187) uses timestamp for comparisons
+	Dangerous comparisons:
+	- _attestations[h[i - 1]].status != DisputeStatus.ResolvedInvalid (src/Attestation.sol#181)
+Attestation.isFinalized(bytes32) (src/Attestation.sol#195-202) uses timestamp for comparisons
+	Dangerous comparisons:
+	- att.timestamp == 0 (src/Attestation.sol#197)
+	- att.status == DisputeStatus.ResolvedInvalid (src/Attestation.sol#198)
+	- att.status == DisputeStatus.Pending (src/Attestation.sol#199)
+	- att.status == DisputeStatus.ResolvedValid (src/Attestation.sol#200)
+	- block.timestamp >= att.finalizedAt (src/Attestation.sol#201)
+Attestation.valueAt(bytes32,address,uint256) (src/Attestation.sol#216-230) uses timestamp for comparisons
+	Dangerous comparisons:
+	- att.timestamp > atTimestamp (src/Attestation.sol#225)
+	- att.status == DisputeStatus.ResolvedInvalid (src/Attestation.sol#226)
+Attestation._lowerBound(bytes32[],uint256) (src/Attestation.sol#282-289) uses timestamp for comparisons
+	Dangerous comparisons:
+	- _attestations[h[mid]].timestamp < from (src/Attestation.sol#286)
+Dispute.challenge(bytes32,bytes32) (src/Dispute.sol#61-99) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp >= att.finalizedAt (src/Dispute.sol#64)
+	- disputeOf[attestationId] != bytes32(0) (src/Dispute.sol#65)
+Registry._register(bytes32,bytes32,uint256,address) (src/Registry.sol#166-202) uses timestamp for comparisons
+	Dangerous comparisons:
+	- msg.sender != f.creator (src/Registry.sol#178)
+	- bondAmount < f.minBond (src/Registry.sol#179)
+Registry.withdrawBond(bytes32) (src/Registry.sol#214-226) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < anchor + WITHDRAW_COOLDOWN (src/Registry.sol#219)
+Registry.lockBond(bytes32,address,uint256) (src/Registry.sol#238-246) uses timestamp for comparisons
+	Dangerous comparisons:
+	- require(bool,string)(a.bond - a.lockedBond >= amount,Registry: insufficient available bond) (src/Registry.sol#243)
+Registry.unlockBond(bytes32,address,uint256) (src/Registry.sol#248-254) uses timestamp for comparisons
+	Dangerous comparisons:
+	- require(bool,string)(a.lockedBond >= amount,Registry: unlock exceeds locked) (src/Registry.sol#251)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#block-timestamp
+INFO:Slither:src/Dispute.sol analyzed (10 contracts with 97 detectors), 20 result(s) found
