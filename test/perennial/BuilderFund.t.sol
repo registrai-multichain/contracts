@@ -477,61 +477,61 @@ contract BuilderFundTest is Test {
     /// income of every earlier epoch keeps the schedule it was earned under.
     function test_schedule_twoEpochDelay_andHistoryFixed() public {
         vm.expectEmit(address(fund));
-        emit ScheduleSet(2);
-        fund.setSchedule(_flat(4000)); // in epoch 0 -> from epoch 2
+        emit ScheduleSet(3);
+        fund.setSchedule(_flat(4000)); // in epoch 0 -> from epoch 3 (two FULL epochs of notice)
         assertEq(fund.scheduleFor(0)[1].rateBps, 1000, "epoch 0: launch");
-        assertEq(fund.scheduleFor(1)[1].rateBps, 1000, "epoch 1: launch");
-        assertEq(fund.scheduleFor(2)[1].rateBps, 4000, "epoch 2: new");
+        assertEq(fund.scheduleFor(2)[1].rateBps, 1000, "epoch 2: launch");
+        assertEq(fund.scheduleFor(3)[1].rateBps, 4000, "epoch 3: new");
         assertEq(fund.scheduleFor(99)[1].rateBps, 4000);
 
         _earn(aliceId, 2_000 * U); // epoch 0, launch: 10% of 1,000
         vm.warp(fund.epochEnd(0));
         _earn(aliceId, 2_000 * U); // epoch 1, launch
-        vm.warp(fund.epochEnd(1));
-        _earn(aliceId, 2_000 * U); // epoch 2, new: 40% of 1,900
+        vm.warp(fund.epochEnd(2));
+        _earn(aliceId, 2_000 * U); // epoch 3, new: 40% of 1,900
 
         vm.warp(fund.epochEnd(3));
-        fund.setSchedule(_flat(0)); // epoch 4 -> from 6; history untouched
-        assertEq(fund.scheduleFor(2)[1].rateBps, 4000, "epoch 2 kept its schedule");
+        fund.setSchedule(_flat(0)); // epoch 4 -> from 7; history untouched
+        assertEq(fund.scheduleFor(3)[1].rateBps, 4000, "epoch 3 kept its schedule");
         (,, uint256 f0,) = fund.quote(0, aliceId);
         (, uint256 t0,,) = fund.quote(0, aliceId);
         (, uint256 t1,,) = fund.quote(1, aliceId);
-        (, uint256 t2,,) = fund.quote(2, aliceId);
+        (, uint256 t3,,) = fund.quote(3, aliceId);
         assertEq(t0, 100 * U);
         assertEq(f0, 19 * U);
         assertEq(t1, 100 * U);
-        assertEq(t2, 760 * U);
-        fund.claimFor(2, aliceId);
+        assertEq(t3, 760 * U);
+        fund.claimFor(3, aliceId);
         assertEq(ledger.balanceOf(address(pool)), 760 * U);
         assertEq(fund.scheduleCount(), 3);
         (uint256 eff,) = fund.scheduleAt(2);
-        assertEq(eff, 6);
+        assertEq(eff, 7);
     }
 
     /// A second setSchedule in the same epoch replaces the pending one; one
     /// already announced for the next epoch is final and stays.
     function test_schedule_pendingReplacement() public {
-        fund.setSchedule(_flat(2000)); // epoch 0 -> 2
-        fund.setSchedule(_flat(2500)); // epoch 0 -> 2: replaces
+        fund.setSchedule(_flat(2000)); // epoch 0 -> 3
+        fund.setSchedule(_flat(2500)); // epoch 0 -> 3: replaces
         assertEq(fund.scheduleCount(), 2, "replaced, not appended");
-        assertEq(fund.scheduleFor(2)[1].rateBps, 2500);
-        assertEq(fund.scheduleFor(2).length, 2);
+        assertEq(fund.scheduleFor(3)[1].rateBps, 2500);
+        assertEq(fund.scheduleFor(3).length, 2);
 
         // replacing with a longer schedule leaves no stale brackets
         fund.setSchedule(LaunchSchedule.brackets());
-        assertEq(fund.scheduleFor(2).length, 4);
+        assertEq(fund.scheduleFor(3).length, 4);
         fund.setSchedule(_flat(2500));
-        assertEq(fund.scheduleFor(2).length, 2);
+        assertEq(fund.scheduleFor(3).length, 2);
 
-        vm.warp(fund.epochEnd(0)); // epoch 1: the epoch-2 schedule is now final
-        fund.setSchedule(_flat(3500)); // -> 3, appended
+        vm.warp(fund.epochEnd(0)); // epoch 1: the epoch-3 schedule is now final
+        fund.setSchedule(_flat(3500)); // -> 4, appended
         assertEq(fund.scheduleCount(), 3);
-        assertEq(fund.scheduleFor(1)[1].rateBps, 1000, "epoch 1: launch");
-        assertEq(fund.scheduleFor(2)[1].rateBps, 2500, "epoch 2: final");
-        assertEq(fund.scheduleFor(3)[1].rateBps, 3500, "epoch 3: pending");
-        fund.setSchedule(_flat(3000)); // same epoch: replaces the epoch-3 one only
+        assertEq(fund.scheduleFor(2)[1].rateBps, 1000, "epoch 2: launch");
+        assertEq(fund.scheduleFor(3)[1].rateBps, 2500, "epoch 3: final");
+        assertEq(fund.scheduleFor(4)[1].rateBps, 3500, "epoch 4: pending");
+        fund.setSchedule(_flat(3000)); // same epoch: replaces the epoch-4 one only
         assertEq(fund.scheduleCount(), 3);
-        assertEq(fund.scheduleFor(2)[1].rateBps, 2500);
-        assertEq(fund.scheduleFor(3)[1].rateBps, 3000);
+        assertEq(fund.scheduleFor(3)[1].rateBps, 2500);
+        assertEq(fund.scheduleFor(4)[1].rateBps, 3000);
     }
 }

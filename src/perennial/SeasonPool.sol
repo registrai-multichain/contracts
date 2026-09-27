@@ -29,6 +29,9 @@ contract SeasonPool is AccessControl {
 
     /// @notice A single builder's claim may not exceed 20% of the season total.
     uint256 public constant CAP_BPS = 2000;
+    /// @notice A season's claim deadline is at most this far ahead (audit 2026-09-27 I-3:
+    /// a typo would otherwise lock its allocation for ever).
+    uint256 public constant MAX_SEASON_LENGTH = 365 days;
     uint256 public constant BPS = 10_000;
 
     NanoLedger public immutable LEDGER;
@@ -122,7 +125,7 @@ contract SeasonPool is AccessControl {
     {
         if (seasons[seasonId].deadline != 0) revert SeasonExists();
         if (root == bytes32(0) || total == 0) revert BadSeason();
-        if (deadline <= block.timestamp) revert BadDeadline();
+        if (deadline <= block.timestamp || deadline > block.timestamp + MAX_SEASON_LENGTH) revert BadDeadline();
         if (total > unallocated) revert InsufficientUnallocated();
         unallocated -= total;
         reserved += total;

@@ -2,7 +2,6 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
-import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {MockUSDC} from "../MockUSDC.sol";
 import {Registry} from "../../src/Registry.sol";
 import {Attestation} from "../../src/Attestation.sol";
@@ -19,7 +18,6 @@ import {WonderEscrow} from "../../src/perennial/WonderEscrow.sol";
 import {SourceKey} from "../../src/perennial/SourceKey.sol";
 import {FundKit} from "../perennial/FundKit.sol";
 import {MarketsKit} from "../perennial/MarketsKit.sol";
-import {MockVault} from "../perennial/MockVault.sol";
 
 contract WonderMarketsTest is Test {
     MockUSDC usdc;
@@ -206,29 +204,18 @@ contract WonderMarketsTest is Test {
         vm.stopPrank();
     }
 
-    function test_tradeSucceedsWhileVaultReverts() public {
-        MockVault v = new MockVault(usdc);
-        escrow.setVault(IERC4626(address(v)));
-        escrow.setCap(1_000e6);
-        escrow.grantRole(escrow.YIELD_ROLE(), address(this));
-        bytes32 id = _wonder(wonderFeed);
-        _buy(id, 1_000e6);
-        escrow.deploy(4e6);
-        v.setBroken(true);
-        _buy(id, 1_000e6); // must not revert
-        assertEq(escrow.escrowOf(KEY), 10e6);
-    }
-
     function test_releasedSourceRoutesToBuilder() public {
         bytes32 id = _wonder(wonderFeed);
         _buy(id, 1_000e6);
+        uint256 earned = fund.currentEpoch();
         (uint256 teamId, uint256 projectId) = MarketsKit.onboard(builders, badge, team, SRC);
         escrow.grantRole(escrow.RELEASER_ROLE(), address(this));
         escrow.queueRelease(SRC, projectId);
         vm.warp(block.timestamp + 7 days);
         escrow.executeRelease(KEY);
         _buy(id, 1_000e6);
-        assertEq(fund.incomeOf(fund.currentEpoch(), teamId), 5e6 + 5e6);
+        assertEq(fund.incomeOf(earned, teamId), 5e6, "escrowed leg: the epoch it was earned in");
+        assertEq(fund.incomeOf(fund.currentEpoch(), teamId), 5e6, "after the release: straight to current income");
     }
 
     // ── final-review minors ──
@@ -257,21 +244,24 @@ contract WonderMarketsTest is Test {
     }
 
     /// The whole money path: a trade on a bound wonder market escrows the builder
-    /// leg; the team claims; the release becomes builder income; the epoch's claim
+    /// leg; the team claims; the release becomes builder income (of the epoch it was
+    /// earned in, claimable after LATE_HOLD); the epoch's claim
     /// pays the builder's payout (1% protocol fee, untaxed under $1,000).
     function test_lifecycle_escrow_release_claim() public {
         bytes32 id = _wonder(wonderFeed);
         _buy(id, 1_000e6);
         _buy(id, 1_000e6);
         assertEq(escrow.escrowOf(KEY), 10e6);
+        uint256 epoch = fund.currentEpoch(); // the epoch the escrow was earned in
         (uint256 teamId, uint256 projectId) = MarketsKit.onboard(builders, badge, team, SRC);
         escrow.grantRole(escrow.RELEASER_ROLE(), address(this));
         escrow.queueRelease(SRC, projectId);
         vm.warp(block.timestamp + 7 days);
         escrow.executeRelease(KEY);
-        uint256 epoch = fund.currentEpoch();
-        assertEq(fund.incomeOf(epoch, teamId), 10e6);
-        vm.warp(fund.epochEnd(epoch));
+        assertEq(fund.incomeOf(epoch, teamId), 10e6, "late income of the epoch it was earned in");
+        vm.expectRevert(BuilderFund.LateIncomeHeld.selector);
+        fund.claimFor(epoch, teamId); // the Safe's window to freeze a wrong claimant
+        vm.warp(block.timestamp + fund.LATE_HOLD());
         uint256 before = ledger.balanceOf(team);
         uint256 net = fund.claimFor(epoch, teamId);
         assertEq(net, 99e5, "10 USDC less the 1% protocol fee");

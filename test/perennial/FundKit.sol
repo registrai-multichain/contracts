@@ -27,4 +27,10 @@ library FundKit {
     function wire(BuilderFund fund, address markets) internal {
         fund.grantRole(fund.MARKETS_ROLE(), markets);
     }
+
+    /// The WonderEscrow writes income (current epoch) and late income (ended epochs).
+    function wireEscrow(BuilderFund fund, address escrow) internal {
+        fund.grantRole(fund.MARKETS_ROLE(), escrow);
+        fund.grantRole(fund.LATE_ROLE(), escrow);
+    }
 }

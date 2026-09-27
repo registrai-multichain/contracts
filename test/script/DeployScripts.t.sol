@@ -85,7 +85,7 @@ contract DeployScriptsTest is Test {
     bytes32 constant NOMINATOR = keccak256("NOMINATOR_ROLE");
     bytes32 constant FEED = keccak256("FEED_ROLE");
     bytes32 constant RELEASER = keccak256("RELEASER_ROLE");
-    bytes32 constant YIELD = keccak256("YIELD_ROLE");
+    bytes32 constant LATE = keccak256("LATE_ROLE");
 
     function setUp() public {
         vm.warp(3600); // markets expire on the hour (BinaryMarket.EXPIRY_GRID): start on the grid
@@ -122,7 +122,13 @@ contract DeployScriptsTest is Test {
         (builders, caretakers, pool, fund, perennial) = (d.builders, d.caretakers, d.seasonPool, d.fund, d.markets);
     }
 
-    function _perennialCfg() internal view returns (DeployPerennial.Config memory c) {
+    function _perennialCfg() internal returns (DeployPerennial.Config memory c) {
+        // On mainnet the protocol treasury must be a contract on this ledger (the fee
+        // splitter): give the stand-in code and a LEDGER() that answers this ledger.
+        if (block.chainid == 5042) {
+            vm.etch(protocolTreasury, hex"00");
+            vm.mockCall(protocolTreasury, abi.encodeWithSignature("LEDGER()"), abi.encode(address(ledger)));
+        }
         c.deployer = deployer;
         c.registry = address(registry);
         c.attestation = address(attestation);
@@ -197,7 +203,7 @@ contract DeployScriptsTest is Test {
         (w[n], r[n++]) = (escrow, GOVERNOR);
         (w[n], r[n++]) = (escrow, MARKETS);
         (w[n], r[n++]) = (escrow, RELEASER);
-        (w[n], r[n++]) = (escrow, YIELD);
+        (w[n], r[n++]) = (address(fund), LATE);
         assertEq(n, 23);
     }
 
@@ -325,7 +331,9 @@ contract DeployScriptsTest is Test {
         assertEq(escrow.EXPIRY(), 180 days);
         assertTrue(escrow.hasRole(MARKETS, address(perennial)));
         assertTrue(fund.hasRole(MARKETS, address(escrow)));
-        assertTrue(escrow.hasRole(RELEASER, operator) && escrow.hasRole(YIELD, operator));
+        assertTrue(fund.hasRole(LATE, address(escrow)), "releases credit the epochs escrow was earned in");
+        assertTrue(escrow.hasRole(RELEASER, operator));
+        assertFalse(escrow.hasRole(keccak256("YIELD_ROLE"), operator), "no yield vault, no yield role");
         assertTrue(perennial.hasRole(FEED, operator));
         assertTrue(perennial.hasRole(NOMINATOR, onboarder));
         new Handoff().handoff(_stack(), admin, deployer);
@@ -797,7 +805,10 @@ contract DeployScriptsTest is Test {
         p.deploy(c);
         c = _perennialCfg();
         c.epochLength = 1 days;
-        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be at least 7 days (runbook: 30 days)"));
+        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 30 days"));
+        p.deploy(c);
+        c.epochLength = 31 days;
+        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 30 days"));
         p.deploy(c);
         DeployNanoStack n = new DeployNanoStack();
         DeployNanoStack.Config memory nc = _v4Cfg();
