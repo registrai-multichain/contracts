@@ -65,9 +65,9 @@
     "MarketsV4": "0xf98Be8dA6AB0262B6dA5Dc0D090aAB331A961cB9",
     "BuilderRegistry": "0xB52FC2AB9b2457D8c56d3b4A624543aD61c70D9C",
     "CaretakerRegistry": "0x7adDA1fe8c6F3A5D405dc1F1aF68B42f2F6CAa78",
-    "MarketsPerennial": "0x243Ad74b2CE035f00E23288F8F016E9D11172d3a",
-    "BuilderFund": "0xA210565Aa9ABc61808a1Ff3a9cE562105074EA67",
-    "SeasonPool": "0xffeDbd5967a1a5b46cf26554B6D62687faB801be",
+    "MarketsPerennial": "0x26a6bfCE1929A6310B3Ca935ef8B71081BB30452",
+    "BuilderFund": "0xEAE38F0fD3ab5742B801Fc3a62DFcc75B524273c",
+    "SeasonPool": "0x15662D2864F3B74105eD826aCCe40550a99F6A54",
     "VerifiedBuilderBadge": "0xBF7FF680e0Ee7472E244cf2550EE016939cb6335",
     "Registry_v4": "0x770d0feedcDa264c9d5C835D56fA7903cbC5719c",
     "Attestation_v4": "0xeA2804dE57Ac57D17E77fC7ad5F55726636E74B7",
@@ -80,12 +80,16 @@
     "MarketsV4_v5": "0xff3dcbB85ED027395C915e1EeF7353453A84a594",
     "BuilderFund_v5": "0x06ef72DE4Cb130e7F3EC2807eC34066053c86C8d",
     "SeasonPool_v5": "0x96c7C8E5E2805334c30C23C94930542E91D19567",
-    "WonderEscrow": "0x78813F2FDBe804F3073632e7D8c4adDaEcdF9c2A",
+    "WonderEscrow": "0x351BB192455775053Ba99d1D0E5A8cd79DA03055",
     "Registry_v6": "0xa3205b555e48e80A49b8464706b1263CdCe67a50",
     "Attestation_v6": "0xC526Ad338A3562ACd045ECdc317b129876D4cE9c",
     "Dispute_v6": "0x47634A84a5BD97eE0281B56Af28406BF3bF706B0",
     "MarketsV4_v6": "0xC27F9779e7Fb01C64Bb1634191C9E219dA251F4c",
-    "MarketsV4_sessions_v1": "0xd77fa5a7A88E2797F281c54CB1DaAfF73E558DF9"
+    "MarketsV4_sessions_v1": "0xd77fa5a7A88E2797F281c54CB1DaAfF73E558DF9",
+    "MarketsPerennial_v6": "0x243Ad74b2CE035f00E23288F8F016E9D11172d3a",
+    "WonderEscrow_v6": "0x78813F2FDBe804F3073632e7D8c4adDaEcdF9c2A",
+    "BuilderFund_v6": "0xA210565Aa9ABc61808a1Ff3a9cE562105074EA67",
+    "SeasonPool_v6": "0xffeDbd5967a1a5b46cf26554B6D62687faB801be"
   },
   "agent": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e",
   "feeds": [
@@ -375,7 +379,7 @@
         "The caretaker MUST run as operator_addr \u2014 propose needs PROPOSER_ROLE + registered caretaker. Running as the deployer degrades silently to 'propose FAILED' every tick; the runner now preflights the role and exits 1 rather than half-working."
       ]
     },
-    "deployBlock": 63992119,
+    "deployBlock": 64320432,
     "blockTimeSeconds": 0.555,
     "builders": {
       "note": "Builder #1 (the deployer, registered during testing) was setActive(false) on 2026-09-21 so the atlas starts empty for a real registration. Builder #2 was the junk 0x...c2 the caretaker onboarded from demo builders.json, also inactive. There is no delete in BuilderRegistry, so ids 1 and 2 stay occupied and the next real registration is #3.",
@@ -426,10 +430,10 @@
       }
     },
     "builderFund": {
-      "address": "0xA210565Aa9ABc61808a1Ff3a9cE562105074EA67"
+      "address": "0xEAE38F0fD3ab5742B801Fc3a62DFcc75B524273c"
     },
     "seasonPool": {
-      "address": "0xffeDbd5967a1a5b46cf26554B6D62687faB801be"
+      "address": "0x15662D2864F3B74105eD826aCCe40550a99F6A54"
     },
     "v5": {
       "deployedAt": "2026-09-25",
@@ -450,6 +454,16 @@
       "builderFund": "0xA210565Aa9ABc61808a1Ff3a9cE562105074EA67",
       "seasonPool": "0xffeDbd5967a1a5b46cf26554B6D62687faB801be",
       "marketsV4": "0xf98Be8dA6AB0262B6dA5Dc0D090aAB331A961cB9"
+    },
+    "v7": {
+      "deployedAt": "2026-09-27",
+      "deployBlock": 64320432,
+      "record": "deployments/arc-testnet-v7.json",
+      "note": "The audit-fixed Perennial stack (late income per epoch earned + LATE_HOLD, WonderEscrow without the yield vault, SeasonPool deadline cap). Contract keys now point at v7; v6 kept as *_v6. The testnet keeper (config.arc.json) switched to v7 on 2026-09-27 20:10 UTC.",
+      "marketsPerennial": "0x26a6bfCE1929A6310B3Ca935ef8B71081BB30452",
+      "wonderEscrow": "0x351BB192455775053Ba99d1D0E5A8cd79DA03055",
+      "builderFund": "0xEAE38F0fD3ab5742B801Fc3a62DFcc75B524273c",
+      "seasonPool": "0x15662D2864F3B74105eD826aCCe40550a99F6A54"
     }
   }
 }

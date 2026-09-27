@@ -24,7 +24,7 @@
     "WonderEscrow": "0x351BB192455775053Ba99d1D0E5A8cd79DA03055",
     "BuilderFund": "0xEAE38F0fD3ab5742B801Fc3a62DFcc75B524273c",
     "SeasonPool": "0x15662D2864F3B74105eD826aCCe40550a99F6A54",
-    "MarketsV4": "0xC27F9779e7Fb01C64Bb1634191C9E219dA251F4c"
+    "MarketsV4": "0xf98Be8dA6AB0262B6dA5Dc0D090aAB331A961cB9"
   },
   "roles": {
     "admin_all": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
@@ -34,5 +34,6 @@
     "protocol_treasury": "0xaE1A21Be03a9099971aaFc1dFDc9544c3b07F0AF",
     "deployer_holds_nothing": "0x84C799941C6B69AbB296EC46a02E4e0772Ad2E5e"
   },
-  "superseded": "arc-testnet-v6.json (pre-audit-fix; the keeper no longer runs it)"
+  "superseded": "arc-testnet-v6.json (pre-audit-fix; the keeper no longer runs it)",
+  "handoffNote": "Handoff ran with MARKETS_V4 = the retired v6 V4 0xC27F\u2026 (admin already held its roles, so a no-op there); the live testnet V4 is 0xf98B\u20261cB9."
 }
