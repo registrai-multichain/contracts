@@ -30,6 +30,15 @@ abstract contract DeployBase is Script {
         return block.chainid == ARC_MAINNET;
     }
 
+    /// @dev A deployed contract, not an EOA. `code.length > 0` alone is not enough
+    /// on Arc: an EOA with an EIP-7702 delegation carries 23 bytes of code
+    /// (0xef0100 ++ delegate), yet one private key still controls it.
+    function _isContract(address a) internal view returns (bool) {
+        bytes memory c = a.code;
+        if (c.length == 0) return false;
+        return !(c.length == 23 && c[0] == 0xef && c[1] == 0x01 && c[2] == 0x00);
+    }
+
     function _requireSet(string memory name) internal view {
         require(vm.envExists(name), string.concat("mainnet: required env var not set: ", name));
     }

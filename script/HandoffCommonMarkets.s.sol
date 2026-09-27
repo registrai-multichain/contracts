@@ -61,7 +61,7 @@ contract HandoffCommonMarkets is DeployBase {
         _guardChain();
         require(admin != address(0) && deployer != address(0), "ADMIN/deployer not set");
         require(admin != deployer, "ADMIN must not be the deployer");
-        if (_isMainnet()) require(admin.code.length > 0, "mainnet: ADMIN must be a contract (Safe/timelock), not an EOA");
+        if (_isMainnet()) require(_isContract(admin), "mainnet: ADMIN must be a contract (Safe/timelock), not an EOA");
         (address[4] memory where, bytes32[4] memory roles) = _roles(c);
         vm.startBroadcast(deployer);
         for (uint256 i; i < 4; i++) {
@@ -96,7 +96,7 @@ contract HandoffCommonMarkets is DeployBase {
             require(!v4.approvedResolver(deployer), "deployer is an approved resolver (v4)");
             require(!v4.approvedCreator(deployer), "deployer is an approved market creator (v4)");
             address t = v4.TREASURY();
-            require(t != deployer && t.code.length > 0, "mainnet: V4 TREASURY must be a contract (the fee splitter)");
+            require(t != deployer && _isContract(t), "mainnet: V4 TREASURY must be a contract (the fee splitter)");
             (bool ok, bytes memory ret) = t.staticcall(abi.encodeWithSignature("LEDGER()"));
             require(ok && ret.length == 32 && abi.decode(ret, (address)) == c.ledger, "mainnet: V4 TREASURY withdraws from another ledger");
         }

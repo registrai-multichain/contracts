@@ -65,6 +65,28 @@ contract HandoffCommonMarketsTest is DeployScriptsTest {
         h.handoff(c, makeAddr("eoaAdmin"), deployer);
     }
 
+    /// An EOA with an EIP-7702 delegation has code on Arc: it is still one key.
+    function test_common_a7702DelegatedEOAIsNotASafe() public {
+        HandoffCommonMarkets.Common memory c = _commonOnMainnet(false);
+        address eoa7702 = makeAddr("delegatedEoa");
+        vm.etch(eoa7702, abi.encodePacked(hex"ef0100", address(0x1234)));
+        HandoffCommonMarkets h = new HandoffCommonMarkets();
+        vm.expectRevert(bytes("mainnet: ADMIN must be a contract (Safe/timelock), not an EOA"));
+        h.handoff(c, eoa7702, deployer);
+        // and as a V4 treasury or resolver at deploy
+        DeployNanoStack.Config memory nc = _v4Cfg();
+        nc.settlementWindow = 1 hours;
+        nc.treasury = eoa7702;
+        DeployNanoStack n = new DeployNanoStack();
+        vm.expectRevert(bytes("mainnet: TREASURY must be a contract (the RegiFeeSplitter)"));
+        n.deploy(nc);
+        nc = _v4Cfg();
+        nc.settlementWindow = 1 hours;
+        nc.disputeResolver = eoa7702;
+        vm.expectRevert(bytes("mainnet: DISPUTE_RESOLVER must be a contract (a Safe)"));
+        n.deploy(nc);
+    }
+
     /// Phase 2 later: the Perennial layer joins the same oracle and ledger, and the
     /// full Handoff completes the table on top of the common-markets handoff.
     function test_common_thenTheFullHandoffStillCompletes() public {

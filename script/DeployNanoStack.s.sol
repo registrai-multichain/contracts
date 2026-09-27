@@ -85,7 +85,7 @@ contract DeployNanoStack is DeployBase {
             require(c.disputeResolver != c.deployer, "mainnet: DISPUTE_RESOLVER must not be the deployer");
             require(c.approvedAgent != c.deployer, "mainnet: APPROVED_AGENT must not be the deployer");
             require(c.disputeResolver != c.approvedAgent, "mainnet: agent must not resolve its own disputes");
-            require(c.disputeResolver.code.length > 0, "mainnet: DISPUTE_RESOLVER must be a contract (a Safe)");
+            require(_isContract(c.disputeResolver), "mainnet: DISPUTE_RESOLVER must be a contract (a Safe)");
             // The rounds agent rotates 13 feeds per asset on the assumption of a
             // 1-hour settlement window (a feed is reused only once its previous
             // round's window closed); a longer window would let a late reading
@@ -94,7 +94,7 @@ contract DeployNanoStack is DeployBase {
             require(address(Attestation(c.attestation).REGISTRY()) == c.registry, "mainnet: ATTESTATION must be wired to REGISTRY");
             // TREASURY is immutable: an EOA here (e.g. the fee splitter not deployed
             // yet) would take every fee leg forever. Fail the deploy instead.
-            require(c.treasury.code.length > 0, "mainnet: TREASURY must be a contract (the RegiFeeSplitter)");
+            require(_isContract(c.treasury), "mainnet: TREASURY must be a contract (the RegiFeeSplitter)");
             // ... and it must withdraw from the ledger V4 pays on: a splitter bound to
             // another NanoLedger could never withdraw the treasury's income.
             (bool ok, bytes memory ret) = c.treasury.staticcall(abi.encodeWithSignature("LEDGER()"));

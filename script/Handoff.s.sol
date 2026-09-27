@@ -33,7 +33,7 @@ contract Handoff is RoleTable {
         require(admin != address(0), "ADMIN not set");
         require(deployer != address(0), "deployer not set");
         require(admin != deployer, "ADMIN must not be the deployer");
-        if (_isMainnet()) require(admin.code.length > 0, "mainnet: ADMIN must be a contract (Safe/timelock), not an EOA");
+        if (_isMainnet()) require(_isContract(admin), "mainnet: ADMIN must be a contract (Safe/timelock), not an EOA");
 
         (address[] memory where, bytes32[] memory roles, string[] memory names) = _adminRoles(s);
 
