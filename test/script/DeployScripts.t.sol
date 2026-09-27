@@ -122,7 +122,13 @@ contract DeployScriptsTest is Test {
         (builders, caretakers, pool, fund, perennial) = (d.builders, d.caretakers, d.seasonPool, d.fund, d.markets);
     }
 
-    function _perennialCfg() internal view returns (DeployPerennial.Config memory c) {
+    function _perennialCfg() internal returns (DeployPerennial.Config memory c) {
+        // On mainnet the protocol treasury must be a contract on this ledger (the fee
+        // splitter): give the stand-in code and a LEDGER() that answers this ledger.
+        if (block.chainid == 5042) {
+            vm.etch(protocolTreasury, hex"00");
+            vm.mockCall(protocolTreasury, abi.encodeWithSignature("LEDGER()"), abi.encode(address(ledger)));
+        }
         c.deployer = deployer;
         c.registry = address(registry);
         c.attestation = address(attestation);
@@ -799,7 +805,10 @@ contract DeployScriptsTest is Test {
         p.deploy(c);
         c = _perennialCfg();
         c.epochLength = 1 days;
-        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be at least 7 days (runbook: 30 days)"));
+        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 30 days"));
+        p.deploy(c);
+        c.epochLength = 31 days;
+        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 30 days"));
         p.deploy(c);
         DeployNanoStack n = new DeployNanoStack();
         DeployNanoStack.Config memory nc = _v4Cfg();

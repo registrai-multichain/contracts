@@ -33,16 +33,18 @@ import {WonderEscrow} from "../src/perennial/WonderEscrow.sol";
 /// @dev env (MAINNET = required on 5042, no default; else default in brackets):
 ///      REGISTRY, ATTESTATION, NANO_LEDGER      always required
 ///      EPOCH_LENGTH        MAINNET [1h]   BuilderFund epoch, seconds, > 0
-///                                         (mainnet: 30 days); immutable
+///                                         (mainnet: exactly 30 days); immutable
 ///      SETTLEMENT_WINDOW   MAINNET [24h]  immutable, 1h..7d
 ///      RESOLUTION_GRACE    MAINNET [7d]   immutable, 1d..30d
 ///      PROTOCOL_TREASURY   MAINNET [deployer] receives the fund's 1% of every
-///                                         builder payout; immutable; never the
-///                                         deployer on mainnet
+///                                         builder payout and 10% of swept wonder
+///                                         escrow; immutable; on mainnet a contract
+///                                         on NANO_LEDGER (the fee splitter)
 ///      APPROVED_AGENT      MAINNET [deployer] agent allowed to settle markets
 ///      DISPUTE_RESOLVER    MAINNET [deployer] resolver feeds must name
 ///      BUILDER_REGISTRY, CARETAKER_REGISTRY   the phase-1 registries
-///                          (DeployBuilders.s.sol); required on mainnet; elsewhere
+///                          (DeployBuilders.s.sol); required on mainnet, and there
+///                          pinned to the live addresses (MAINNET_* below); elsewhere
 ///                          optional, both or neither (neither = deploy new ones).
 ///      VERIFIED_BADGE      the phase-1 VerifiedBuilderBadge; required on mainnet
 ///                          (with the registries); elsewhere zero = deploy a new one
@@ -114,6 +116,13 @@ contract DeployPerennial is DeployBase {
         console2.log("  disputeResolver:", c.disputeResolver);
     }
 
+    /// @notice The live phase-1 contracts on Arc mainnet (DeployBuilders, block
+    /// 22642042). Where they have code (Arc mainnet and its forks) the env must name
+    /// exactly these (audit 2026-09-27 L-4).
+    address public constant MAINNET_BUILDER_REGISTRY = 0xBB6F4B18776Fd20Bb53a1205375273373DD1E5bA;
+    address public constant MAINNET_CARETAKER_REGISTRY = 0x64725935d90F0aa6f3c8642Bb9cACF44CAA46224;
+    address public constant MAINNET_VERIFIED_BADGE = 0xF229d2Ed13Cc35d46fa7676a579495E5C80CFEB2;
+
     function load(address deployer) public view returns (Config memory c) {
         _guardChain();
         c.deployer = deployer;
@@ -150,9 +159,17 @@ contract DeployPerennial is DeployBase {
             require(c.protocolTreasury != c.deployer, "mainnet: PROTOCOL_TREASURY must not be the deployer");
             // The resolver adjudicates every challenged reading: a Safe, never a hot key.
             require(_isContract(c.disputeResolver), "mainnet: DISPUTE_RESOLVER must be a contract (a Safe)");
-            // The tax brackets are per builder per epoch: a short epoch multiplies every
-            // tax-free allowance (runbook: 30 days).
-            require(c.epochLength >= 7 days, "mainnet: EPOCH_LENGTH must be at least 7 days (runbook: 30 days)");
+            // The tax brackets are per builder per epoch and the epoch is immutable:
+            // shorter multiplies every tax-free allowance, longer (a typo) locks every
+            // first claim for as long (audit L-3).
+            require(c.epochLength == 30 days, "mainnet: EPOCH_LENGTH must be 30 days");
+            // The 1% fee is immutable and paid on the ledger: the treasury must be a
+            // contract that can use a balance on THIS ledger (the fee splitter), never an
+            // EOA or a contract on another ledger (audit L-3).
+            require(
+                _isContract(c.protocolTreasury) && _ledgerOf(c.protocolTreasury) == c.ledger,
+                "mainnet: PROTOCOL_TREASURY must be a contract on this NanoLedger (the fee splitter)"
+            );
             // Phase 1 put the builder side on chain first; forgetting the reuse
             // env here would silently fork builders, caretakers and badges.
             require(
@@ -163,6 +180,15 @@ contract DeployPerennial is DeployBase {
                 c.operator != c.deployer && c.onboarder != c.deployer,
                 "mainnet: OPERATOR and ONBOARDER must not be the deployer"
             );
+            if (MAINNET_BUILDER_REGISTRY.code.length > 0) {
+                require(c.builders == MAINNET_BUILDER_REGISTRY, "mainnet: BUILDER_REGISTRY is not the live phase-1 BuilderRegistry");
+            }
+            if (MAINNET_CARETAKER_REGISTRY.code.length > 0) {
+                require(c.caretakers == MAINNET_CARETAKER_REGISTRY, "mainnet: CARETAKER_REGISTRY is not the live phase-1 CaretakerRegistry");
+            }
+            if (MAINNET_VERIFIED_BADGE.code.length > 0) {
+                require(c.badge == MAINNET_VERIFIED_BADGE, "mainnet: VERIFIED_BADGE is not the live phase-1 badge");
+            }
         }
 
         bool reuse = c.builders != address(0) || c.caretakers != address(0);
@@ -174,6 +200,13 @@ contract DeployPerennial is DeployBase {
             require(
                 address(CaretakerRegistry(c.caretakers).BUILDERS()) == c.builders,
                 "CARETAKER_REGISTRY belongs to a different BuilderRegistry"
+            );
+            // CARETAKERS.payoutOf decides where every payout lands (audit L-4): its only
+            // immutable is BUILDERS, so a local copy over the same registry has exactly its
+            // runtime code. Created outside the broadcast: nothing is sent.
+            require(
+                c.caretakers.codehash == address(new CaretakerRegistry(BuilderRegistry(c.builders), c.deployer)).codehash,
+                "CARETAKER_REGISTRY is not this CaretakerRegistry"
             );
         }
 
@@ -233,5 +266,12 @@ contract DeployPerennial is DeployBase {
         require(d.fund.hasRole(d.fund.MARKETS_ROLE(), address(d.escrow)), "escrow not wired to the fund");
         require(d.fund.hasRole(d.fund.LATE_ROLE(), address(d.escrow)), "escrow cannot credit late income");
         require(d.escrow.hasRole(d.escrow.MARKETS_ROLE(), address(d.markets)), "markets not wired to the escrow");
+    }
+
+    /// @dev The NanoLedger a fee recipient uses (its LEDGER()), or zero.
+    function _ledgerOf(address who) internal view returns (address) {
+        (bool ok, bytes memory ret) = who.staticcall(abi.encodeWithSignature("LEDGER()"));
+        if (!ok || ret.length != 32) return address(0);
+        return abi.decode(ret, (address));
     }
 }

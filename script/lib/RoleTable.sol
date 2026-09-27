@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {console2} from "forge-std/Script.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {DeployBase} from "./DeployBase.sol";
 import {Registry} from "../../src/Registry.sol";
@@ -250,6 +251,97 @@ abstract contract RoleTable is DeployBase {
         require(!_has(s.fund, LATE, onboarder), "ONBOARDER holds BuilderFund LATE");
         require(!_has(s.perennial, FEED, onboarder), "ONBOARDER holds MarketsPerennial FEED");
         if (print) console2.log("OK: onboarder holds no market/admin role");
+    }
+
+    // ───────────────────── exact table (audit 2026-09-27 L-2) ─────────────────────
+
+    bytes32 internal constant ROLE_GRANTED = keccak256("RoleGranted(bytes32,address,address)");
+
+    /// @notice "Nobody but the expected holders": every (contract, role, account)
+    /// ever granted on the builder side and the Perennial stack that is STILL held
+    /// must be on this list. `logs` are the RoleGranted logs of those contracts
+    /// (recorded in tests, read from the chain by VerifyRoles), from their
+    /// deployment on: AccessControl emits RoleGranted for every grant, the
+    /// constructors' included, so no holder can be missing from them.
+    function _verifyExact(Stack memory s, address admin, address operator, address onboarder, Vm.Log[] memory logs)
+        internal
+        view
+    {
+        require(admin != address(0) && operator != address(0) && onboarder != address(0), "admin/operator/onboarder not set");
+        uint256 checked;
+        for (uint256 i; i < logs.length; i++) {
+            Vm.Log memory l = logs[i];
+            if (l.topics.length < 3 || l.topics[0] != ROLE_GRANTED) continue;
+            string memory name = _contractName(s, l.emitter);
+            if (bytes(name).length == 0) continue;
+            bytes32 role = l.topics[1];
+            address account = address(uint160(uint256(l.topics[2])));
+            if (!_has(l.emitter, role, account)) continue; // revoked or renounced since
+            require(
+                _allowed(s, l.emitter, role, account, admin, operator, onboarder),
+                string.concat("stray role holder: ", name, " ", _roleName(role))
+            );
+            checked++;
+        }
+        require(checked > 0, "no RoleGranted logs for the stack: wrong addresses or block range");
+    }
+
+    function _allowed(Stack memory s, address where, bytes32 role, address a, address admin, address operator, address onboarder)
+        internal
+        pure
+        returns (bool)
+    {
+        if (role == DEFAULT_ADMIN) return a == admin;
+        if (where == s.builders) return role == REGISTRAR && a == admin;
+        if (where == s.caretakers) return role == GOVERNOR && (a == admin || a == onboarder);
+        if (where == s.fund) {
+            if (role == GOVERNOR) return a == admin;
+            if (role == MARKETS) return a == s.perennial || a == s.escrow;
+            if (role == LATE) return a == s.escrow;
+            return false;
+        }
+        if (where == s.seasonPool) {
+            if (role == GOVERNOR) return a == admin;
+            if (role == FUNDER) return a == s.fund;
+            return false;
+        }
+        if (where == s.perennial) {
+            if (role == GOVERNOR) return a == admin;
+            if (role == FEED) return a == admin || a == operator;
+            if (role == NOMINATOR) return a == admin || a == onboarder;
+            return false;
+        }
+        if (where == s.escrow) {
+            if (role == GOVERNOR) return a == admin;
+            if (role == MARKETS) return a == s.perennial;
+            if (role == RELEASER) return a == operator;
+            return false;
+        }
+        return false;
+    }
+
+    /// @dev The contracts the exact check covers (empty name: not covered).
+    function _contractName(Stack memory s, address where) internal pure returns (string memory) {
+        if (where == s.builders) return "BuilderRegistry";
+        if (where == s.caretakers) return "CaretakerRegistry";
+        if (where == s.fund) return "BuilderFund";
+        if (where == s.seasonPool) return "SeasonPool";
+        if (where == s.perennial) return "MarketsPerennial";
+        if (where == s.escrow) return "WonderEscrow";
+        return "";
+    }
+
+    function _roleName(bytes32 role) internal pure returns (string memory) {
+        if (role == DEFAULT_ADMIN) return "DEFAULT_ADMIN";
+        if (role == GOVERNOR) return "GOVERNOR";
+        if (role == REGISTRAR) return "REGISTRAR";
+        if (role == MARKETS) return "MARKETS";
+        if (role == FUNDER) return "FUNDER";
+        if (role == NOMINATOR) return "NOMINATOR";
+        if (role == FEED) return "FEED";
+        if (role == RELEASER) return "RELEASER";
+        if (role == LATE) return "LATE";
+        return vm.toString(role);
     }
 
     function _b(bool v) internal pure returns (string memory) {
