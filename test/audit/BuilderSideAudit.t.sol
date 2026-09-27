@@ -846,7 +846,13 @@ contract BuilderSideAuditDeployTest is Test {
         ledger = new DeployNanoLedger().deploy(DeployNanoLedger.Config({deployer: deployer, usdc: _usdcAddr()}));
     }
 
-    function _perennialCfg() internal view returns (DeployPerennial.Config memory c) {
+    function _perennialCfg() internal returns (DeployPerennial.Config memory c) {
+        // On mainnet the protocol treasury must be a contract on this ledger (the fee
+        // splitter): give the stand-in code and a LEDGER() that answers this ledger.
+        if (block.chainid == 5042) {
+            vm.etch(protocolTreasury, hex"00");
+            vm.mockCall(protocolTreasury, abi.encodeWithSignature("LEDGER()"), abi.encode(address(ledger)));
+        }
         c.deployer = deployer;
         c.registry = address(registry);
         c.attestation = address(attestation);
