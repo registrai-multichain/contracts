@@ -94,6 +94,7 @@ contract HandoffCommonMarkets is DeployBase {
         if (_isMainnet()) {
             require(!v4.approvedAgent(deployer), "deployer is an approved agent (v4)");
             require(!v4.approvedResolver(deployer), "deployer is an approved resolver (v4)");
+            require(!v4.approvedCreator(deployer), "deployer is an approved market creator (v4)");
             address t = v4.TREASURY();
             require(t != deployer && t.code.length > 0, "mainnet: V4 TREASURY must be a contract (the fee splitter)");
             (bool ok, bytes memory ret) = t.staticcall(abi.encodeWithSignature("LEDGER()"));

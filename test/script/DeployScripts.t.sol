@@ -150,7 +150,7 @@ contract DeployScriptsTest is Test {
         c.attestation = address(attestation);
         c.ledger = address(ledger);
         c.treasury = treasury;
-        c.settlementWindow = 24 hours;
+        c.settlementWindow = 1 hours; // mainnet requires it (the rounds' feed rotation)
         c.resolutionGrace = 7 days;
         c.disputeResolver = disputeResolver;
         c.approvedAgent = agent;
@@ -808,6 +808,11 @@ contract DeployScriptsTest is Test {
         nc = _v4Cfg();
         nc.treasury = makeAddr("eoaTreasury");
         vm.expectRevert(bytes("mainnet: TREASURY must be a contract (the RegiFeeSplitter)"));
+        n.deploy(nc);
+        // the rounds' feed rotation needs a 1-hour settlement window on mainnet
+        nc = _v4Cfg();
+        nc.settlementWindow = 24 hours;
+        vm.expectRevert(bytes("mainnet: SETTLEMENT_WINDOW must be 1 hour (the rounds' feed rotation)"));
         n.deploy(nc);
         // ... and a splitter bound to another NanoLedger fails too (it could never withdraw)
         nc = _v4Cfg();

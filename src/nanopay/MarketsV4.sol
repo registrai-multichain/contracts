@@ -21,10 +21,11 @@ import {BinaryMarket} from "./BinaryMarket.sol";
 ///         a key the app keeps in the browser, trade for it until an expiry and
 ///         within a spend cap: buyFor / sellFor / redeemFor move the OWNER's
 ///         ledger balance and positions, never the delegate's. Positions,
-///         proceeds and payouts stay the owner's. A delegate sells only in
-///         markets it bought into for that owner, so a leaked delegate key can at
-///         worst trade the capped amount badly until the session expires or is
-///         revoked; the owner's other positions are out of its reach. The owner
+///         proceeds and payouts stay the owner's. A delegate sells for an owner
+///         only shares IT bought for that owner (per market and outcome), so a
+///         leaked delegate key can at worst trade the capped amount badly until
+///         the session expires or is revoked; the owner's other positions, and
+///         shares the owner added by hand, are out of its reach. The owner
 ///         still approves this contract on the ledger (the ledger allowance caps
 ///         the delegate as well).
 ///
@@ -57,6 +58,10 @@ contract MarketsV4 is BinaryMarket {
     /// @notice Governor allowlist of bonded agents a market may settle on.
     mapping(address => bool) public approvedAgent;
 
+    /// @notice Governor allowlist of keys that may open markets besides the agent
+    /// that settles them (our own keys only: see createMarket).
+    mapping(address => bool) public approvedCreator;
+
     /// @notice Longest session an owner can grant.
     uint256 public constant MAX_SESSION = 7 days;
 
@@ -70,11 +75,16 @@ contract MarketsV4 is BinaryMarket {
     /// @notice owner => delegate => session.
     mapping(address => mapping(address => Session)) public sessions;
 
-    /// @notice owner => delegate => market => the delegate bought into it for the
-    /// owner (only there may it sell for the owner).
-    mapping(address => mapping(address => mapping(bytes32 => bool))) public sessionMarket;
+    /// @notice owner => delegate => revocation count. revokeSession bumps it, so
+    /// the delegate's sell rights from before a revocation are gone for good.
+    mapping(address => mapping(address => uint256)) public sessionEpoch;
+
+    /// @dev owner => delegate => epoch => market => outcome => shares the delegate
+    /// bought for the owner and has not sold back: the most it may sell for them.
+    mapping(address => mapping(address => mapping(uint256 => mapping(bytes32 => mapping(Outcome => uint256))))) internal _sessionShares;
 
     event AgentApprovalSet(address indexed agent, bool approved);
+    event CreatorApprovalSet(address indexed creator, bool approved);
     event MarketCreated(bytes32 indexed marketId, address indexed creator, bytes32 indexed feedId, address agent, int256 threshold, Comparator comparator, uint256 expiry, uint256 liquidity);
     event FeesPaid(bytes32 indexed marketId, uint256 creatorFee, uint256 commonsFee, uint256 agentFee);
     event VoidFeesPaid(
@@ -86,7 +96,8 @@ contract MarketsV4 is BinaryMarket {
     error AgentNotApproved();
     error SessionInvalid();
     error SessionSpendExceeded();
-    error SessionMarketNotAllowed();
+    error SessionSharesExceeded();
+    error NotTheAgent();
     error GasForwardFailed();
 
     constructor(
@@ -110,6 +121,12 @@ contract MarketsV4 is BinaryMarket {
         uint256 expiry,
         uint256 liquidity
     ) external nonReentrant returns (bytes32 marketId) {
+        // Common markets are opened by the agent that settles them (or a creator
+        // key the governor approved). A market a stranger opens on the agent's
+        // feed, with another expiry, would make the agent's reading for it land
+        // inside a real market's settlement window first and settle that market
+        // on the wrong value.
+        if (msg.sender != agent && !approvedCreator[msg.sender]) revert NotTheAgent();
         marketId = _open(feedId, agent, threshold, comparator, expiry, liquidity);
         emit MarketCreated(marketId, msg.sender, feedId, agent, threshold, comparator, expiry, liquidity);
     }
@@ -134,6 +151,7 @@ contract MarketsV4 is BinaryMarket {
     /// @notice End a delegate's session now.
     function revokeSession(address delegate) external {
         delete sessions[msg.sender][delegate];
+        sessionEpoch[msg.sender][delegate]++;
         emit SessionSet(msg.sender, delegate, 0, 0);
     }
 
@@ -150,13 +168,14 @@ contract MarketsV4 is BinaryMarket {
         Session storage s = _session(owner);
         if (collateralIn > s.spendLeft) revert SessionSpendExceeded();
         s.spendLeft -= uint128(collateralIn);
-        sessionMarket[owner][msg.sender][marketId] = true;
-        return _buy(owner, marketId, outcome, collateralIn, minSharesOut, deadline);
+        uint256 shares = _buy(owner, marketId, outcome, collateralIn, minSharesOut, deadline);
+        _sessionShares[owner][msg.sender][sessionEpoch[owner][msg.sender]][marketId][outcome] += shares;
+        return shares;
     }
 
-    /// @notice `sell` for `owner`, as its session delegate, in a market the
-    /// delegate bought into for the owner: the owner's shares go in, the proceeds
-    /// go to the owner's ledger balance.
+    /// @notice `sell` for `owner`, as its session delegate, of shares the delegate
+    /// bought for the owner (sessionShares): they go in, the proceeds go to the
+    /// owner's ledger balance.
     function sellFor(
         address owner,
         bytes32 marketId,
@@ -166,7 +185,10 @@ contract MarketsV4 is BinaryMarket {
         uint256 deadline
     ) external nonReentrant returns (uint256) {
         _session(owner);
-        if (!sessionMarket[owner][msg.sender][marketId]) revert SessionMarketNotAllowed();
+        mapping(Outcome => uint256) storage bought = _sessionShares[owner][msg.sender][sessionEpoch[owner][msg.sender]][marketId];
+        uint256 mine = bought[outcome];
+        if (sharesIn > mine) revert SessionSharesExceeded();
+        bought[outcome] = mine - sharesIn;
         return _sell(owner, marketId, outcome, sharesIn, minCollateralOut, deadline);
     }
 
@@ -175,6 +197,12 @@ contract MarketsV4 is BinaryMarket {
     function redeemFor(address owner, bytes32 marketId) external nonReentrant returns (uint256) {
         _session(owner);
         return _redeem(owner, marketId);
+    }
+
+    /// @notice Shares of `outcome` in `marketId` that `delegate` may still sell for
+    /// `owner`: what it bought for them in the current epoch, not sold back.
+    function sessionShares(address owner, address delegate, bytes32 marketId, Outcome outcome) external view returns (uint256) {
+        return _sessionShares[owner][delegate][sessionEpoch[owner][delegate]][marketId][outcome];
     }
 
     function _session(address owner) internal view returns (Session storage s) {
@@ -213,6 +241,12 @@ contract MarketsV4 is BinaryMarket {
     }
 
     // ──────────────────────────── governor ────────────────────────────
+
+    function setApprovedCreator(address creator, bool approved) external onlyRole(GOVERNOR_ROLE) {
+        if (creator == address(0)) revert ZeroAddress();
+        approvedCreator[creator] = approved;
+        emit CreatorApprovalSet(creator, approved);
+    }
 
     function setApprovedAgent(address agent, bool approved) external onlyRole(GOVERNOR_ROLE) {
         if (agent == address(0)) revert ZeroAddress();

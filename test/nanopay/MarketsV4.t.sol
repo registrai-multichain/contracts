@@ -44,6 +44,7 @@ contract MarketsV4Test is Test {
         markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, 1 hours, 1 days);
         markets.setApprovedResolver(resolver, true);
         markets.setApprovedAgent(oracle, true);
+        markets.setApprovedCreator(creator, true); // a team creator key (V4 refuses strangers)
         // no ledger role: V4 creates no fee pools
 
         // bonded agent + feed (creator == agent in v2)

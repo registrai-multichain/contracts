@@ -30,6 +30,9 @@ contract SessionHandler is Test {
     uint256 public spentSinceGrant; // buyFor collateral since that grant
     uint256 public strangerSucceeded;
     uint256 public delegateSold;
+    uint256 public ownYes; // shares the owner bought by hand (out of the delegate's reach)
+    mapping(bool => uint256) public boughtBy; // shares the delegate bought, per side (yes = true)
+    mapping(bool => uint256) public soldBy;
     bool public settled;
 
     constructor(MarketsV4 m, NanoLedger l, Attestation a, bytes32 f, bytes32 mid, uint256 exp, address o, address d, address s, address orc) {
@@ -53,18 +56,28 @@ contract SessionHandler is Test {
     function delegateBuy(uint256 amt, bool yes) public {
         amt = bound(amt, 1, 60e6);
         vm.prank(delegate);
-        try markets.buyFor(owner, id, yes ? BinaryMarket.Outcome.Yes : BinaryMarket.Outcome.No, amt, 0, block.timestamp) {
+        try markets.buyFor(owner, id, yes ? BinaryMarket.Outcome.Yes : BinaryMarket.Outcome.No, amt, 0, block.timestamp) returns (uint256 s) {
             spentSinceGrant += amt;
+            boughtBy[yes] += s;
         } catch {}
     }
 
     function delegateSell(uint256 frac, bool yes) public {
         uint256 bal = yes ? markets.yesBalance(id, owner) : markets.noBalance(id, owner);
         if (bal == 0) return;
-        uint256 amt = bound(frac, 1, bal);
+        uint256 amt = bound(frac, 1, bal); // tries any amount, the owner's own shares included
         vm.prank(delegate);
         try markets.sellFor(owner, id, yes ? BinaryMarket.Outcome.Yes : BinaryMarket.Outcome.No, amt, 0, block.timestamp) {
             delegateSold++;
+            soldBy[yes] += amt;
+        } catch {}
+    }
+
+    function ownerBuysByHand(uint256 amt) public {
+        amt = bound(amt, 1e4, 30e6);
+        vm.prank(owner);
+        try markets.buy(id, BinaryMarket.Outcome.Yes, amt, 0, block.timestamp) returns (uint256 s) {
+            ownYes += s;
         } catch {}
     }
 
@@ -162,9 +175,15 @@ contract MarketsV4SessionsInvariantTest is Test {
     }
 
     /// A key without a session from the owner never moves the owner's funds.
-    /// Every share the delegate can sell for the owner sits in a market it bought into.
-    function invariant_sellsOnlyWhereTheDelegateBought() public view {
-        if (!markets.sessionMarket(owner, delegate, h.id())) assertEq(h.delegateSold(), 0);
+    /// The delegate never sells more of a side than it bought on that side, so the
+    /// shares the owner bought by hand always stay with the owner.
+    function invariant_sellsOnlyWhatTheDelegateBought() public view {
+        assertLe(h.soldBy(true), h.boughtBy(true));
+        assertLe(h.soldBy(false), h.boughtBy(false));
+        if (!h.settled()) {
+            // while it trades (a redeem after settlement zeroes balances by design)
+            assertGe(markets.yesBalance(h.id(), owner), h.ownYes(), "the owner's own YES never leaves via the delegate");
+        }
     }
 
     function invariant_aStrangerNeverActs() public view {

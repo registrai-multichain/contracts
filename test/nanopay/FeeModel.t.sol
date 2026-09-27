@@ -115,6 +115,7 @@ contract FeeModelTest is Test {
         perennial.setApprovedResolver(resolver, true);
         v4.setApprovedResolver(resolver, true);
         v4.setApprovedAgent(agent, true); // common markets settle on vetted agents only
+        v4.setApprovedCreator(creator, true); // a team creator key (V4 refuses strangers)
 
         usdc.mint(agent, 10_000e6);
         vm.startPrank(agent);

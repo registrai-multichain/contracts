@@ -64,6 +64,7 @@ contract OracleAllowlistTest is Test {
             MarketsKit.perennial(ledger, registry, attestation, builders, address(this), fund, WINDOW, GRACE);
         FundKit.wire(fund, address(perennial));
         v4 = new MarketsV4(ledger, registry, attestation, address(this), address(0x7EA), WINDOW, GRACE);
+        v4.setApprovedCreator(creator, true); // a team creator key (V4 refuses strangers)
 
         usdc.mint(agent, 1_000e6);
         vm.startPrank(agent);

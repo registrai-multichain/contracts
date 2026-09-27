@@ -48,6 +48,7 @@ contract MarketsV4SessionsTest is Test {
         markets = new MarketsV4(ledger, registry, attestation, address(this), treasury, 1 hours, 1 days);
         markets.setApprovedResolver(resolver, true);
         markets.setApprovedAgent(oracle, true);
+        markets.setApprovedCreator(creator, true);
         usdc.mint(oracle, 1_000e6);
         vm.startPrank(oracle);
         usdc.approve(address(registry), type(uint256).max);
@@ -177,22 +178,86 @@ contract MarketsV4SessionsTest is Test {
         assertEq(markets.yesBalance(id, owner), 0);
     }
 
-    function test_aDelegateSellsOnlyWhereItBoughtForTheOwner() public {
-        // the owner's own position, bought with the wallet: out of the delegate's reach
+    function test_aDelegateSellsOnlyTheSharesItBought() public {
+        // the owner's own position, bought with the wallet
         vm.prank(owner);
         uint256 own = markets.buy(id, BinaryMarket.Outcome.Yes, 10e6, 0, block.timestamp);
         _session(20e6);
         vm.prank(delegate);
-        vm.expectRevert(MarketsV4.SessionMarketNotAllowed.selector);
-        markets.sellFor(owner, id, BinaryMarket.Outcome.Yes, own, 0, block.timestamp);
-        // once the delegate bought into this market for the owner, it may sell there
+        vm.expectRevert(MarketsV4.SessionSharesExceeded.selector);
+        markets.sellFor(owner, id, BinaryMarket.Outcome.Yes, 1, 0, block.timestamp);
+        // a dust buy (the old bypass) unlocks only the dust it bought, not the owner's shares
         vm.prank(delegate);
-        markets.buyFor(owner, id, BinaryMarket.Outcome.No, 1e6, 0, block.timestamp);
-        assertTrue(markets.sessionMarket(owner, delegate, id));
-        uint256 bought = markets.noBalance(id, owner); // read before the prank (a call would consume it)
+        uint256 dust = markets.buyFor(owner, id, BinaryMarket.Outcome.Yes, 1, 0, block.timestamp);
+        assertEq(markets.sessionShares(owner, delegate, id, BinaryMarket.Outcome.Yes), dust);
+        vm.prank(delegate);
+        vm.expectRevert(MarketsV4.SessionSharesExceeded.selector);
+        markets.sellFor(owner, id, BinaryMarket.Outcome.Yes, own, 0, block.timestamp);
+        vm.prank(delegate);
+        vm.expectRevert(MarketsV4.SessionSharesExceeded.selector);
+        markets.sellFor(owner, id, BinaryMarket.Outcome.Yes, dust + 1, 0, block.timestamp);
+        // what it bought, it may sell back; then nothing more
+        vm.prank(delegate);
+        uint256 bought = markets.buyFor(owner, id, BinaryMarket.Outcome.No, 2e6, 0, block.timestamp);
         vm.prank(delegate);
         markets.sellFor(owner, id, BinaryMarket.Outcome.No, bought, 0, block.timestamp);
-        assertEq(markets.noBalance(id, owner), 0);
+        assertEq(markets.sessionShares(owner, delegate, id, BinaryMarket.Outcome.No), 0);
+        assertEq(markets.yesBalance(id, owner), own + dust, "the owner's own shares are untouched");
+    }
+
+    function test_revokingEndsTheOldSellRights_evenForTheSameDelegate() public {
+        _session(20e6);
+        vm.prank(delegate);
+        uint256 shares = markets.buyFor(owner, id, BinaryMarket.Outcome.Yes, 5e6, 0, block.timestamp);
+        vm.prank(owner);
+        markets.revokeSession(delegate);
+        vm.prank(owner);
+        markets.setSession(delegate, 0, uint64(block.timestamp + 1 days)); // a new session, cap 0
+        assertEq(markets.sessionShares(owner, delegate, id, BinaryMarket.Outcome.Yes), 0);
+        vm.prank(delegate);
+        vm.expectRevert(MarketsV4.SessionSharesExceeded.selector);
+        markets.sellFor(owner, id, BinaryMarket.Outcome.Yes, shares, 0, block.timestamp);
+        assertEq(markets.yesBalance(id, owner), shares, "the owner keeps them (sells with the wallet)");
+    }
+
+    function test_renewingKeepsTheSellRights() public {
+        _session(20e6);
+        vm.prank(delegate);
+        uint256 shares = markets.buyFor(owner, id, BinaryMarket.Outcome.Yes, 5e6, 0, block.timestamp);
+        _session(20e6); // setSession again (renewal) is not a revocation
+        vm.prank(delegate);
+        markets.sellFor(owner, id, BinaryMarket.Outcome.Yes, shares, 0, block.timestamp);
+    }
+
+    function test_aStrangerCannotOpenAMarketOnTheAgentsFeed() public {
+        // the decoy of the audit (C-1): another expiry on our feed would get our
+        // agent's reading first inside a real market's window
+        address stranger_ = address(0xBAD);
+        usdc.mint(stranger_, 100e6);
+        vm.startPrank(stranger_);
+        usdc.approve(address(ledger), type(uint256).max);
+        ledger.deposit(50e6);
+        ledger.approveSpender(address(markets), type(uint256).max);
+        vm.expectRevert(MarketsV4.NotTheAgent.selector);
+        markets.createMarket(feedId, oracle, 0, BinaryMarket.Comparator.GreaterThan, expiry - 300, 5e6);
+        vm.stopPrank();
+        // the agent itself may; only the governor approves other creator keys
+        vm.prank(stranger_);
+        vm.expectRevert();
+        markets.setApprovedCreator(stranger_, true);
+    }
+
+    function test_tradingStopsOnceTheAgentIsInactive() public {
+        // a market far out, so the agent's bond cooldown can pass before it closes
+        uint256 far = (block.timestamp + 8 days) / 300 * 300;
+        vm.prank(creator);
+        bytes32 m = markets.createMarket(feedId, oracle, 0, BinaryMarket.Comparator.GreaterThan, far, 5e6);
+        vm.warp(block.timestamp + 7 days + 1);
+        vm.prank(oracle);
+        registry.withdrawBond(feedId); // the agent leaves the feed: the market can only void
+        vm.prank(owner);
+        vm.expectRevert(BinaryMarket.AgentInactive.selector);
+        markets.buy(m, BinaryMarket.Outcome.Yes, 1e6, 0, block.timestamp);
     }
 
     function test_aDelegateCannotTouchSomeoneElse() public {

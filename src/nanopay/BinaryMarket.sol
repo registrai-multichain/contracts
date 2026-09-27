@@ -175,6 +175,7 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
     error DeadlineExpired();
     error ClaimsOutstanding();
     error NothingToSweep();
+    error AgentInactive();
 
     constructor(
         NanoLedger ledger_,
@@ -415,6 +416,10 @@ abstract contract BinaryMarket is AccessControl, ReentrancyGuard, SettlementPoli
         if (m.createdAt == 0) revert MarketMissing();
         if (m.phase != Phase.Trading) revert NotTrading();
         if (block.timestamp >= m.expiry) revert MarketExpired();
+        // An agent no longer active on the feed (slashed, withdrawn) can never settle
+        // the market: it will void. Trading on a certain void is a free option
+        // against the LP (buy both legs, refund the losing one), so it stops.
+        if (!REGISTRY.isActiveAgent(m.feedId, m.agent)) revert AgentInactive();
     }
 
     /// @dev A sell burns `out` (the gross curve amount) of each side, so C falls by
