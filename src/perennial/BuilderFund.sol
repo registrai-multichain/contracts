@@ -14,11 +14,17 @@ import {SeasonPool} from "./SeasonPool.sol";
 /// builder the market is about, for the current epoch. Epochs are time-based
 /// (`(t - START) / EPOCH_LENGTH`); nothing closes them.
 ///
-/// Once an epoch has ended, anyone may `claimFor(epoch, builderId)`, once:
-///   gross = income of the builder in that epoch
-///   tax   = progressiveTax(gross, the schedule of that epoch)  -> SeasonPool
-///   fee   = 1% of (gross - tax)                                -> PROTOCOL_TREASURY
-///   net   = gross - tax - fee          -> CaretakerRegistry.payoutOf(builderId)
+/// Once an epoch has ended, anyone may `claimFor(epoch, builderId)`; it pays what
+/// of that epoch's income is still unpaid:
+///   unpaid = income of the builder in that epoch - what was already paid
+///   tax    = progressiveTax(income) - progressiveTax(paid)      -> SeasonPool
+///   fee    = 1% of (unpaid - tax)                               -> PROTOCOL_TREASURY
+///   net    = unpaid - tax - fee        -> CaretakerRegistry.payoutOf(builderId)
+/// Late income (LATE_ROLE: the WonderEscrow releasing a team's escrow) is credited
+/// to the ENDED epoch it was earned in, so it is taxed under that epoch's brackets
+/// together with the rest of that epoch's income, as if paid on time (audit
+/// 2026-09-27); an epoch already claimed is then claimable again for the rest,
+/// taxed at the margin.
 /// The payout resolves at claim time, so the owner-change fallback of the
 /// CaretakerRegistry applies (a recovered builder is never paid to an address
 /// the old key chose).
@@ -27,10 +33,11 @@ import {SeasonPool} from "./SeasonPool.sol";
 /// `sweepFrozen` that income to the SeasonPool, or reactivate the builder.
 ///
 /// Tax schedule: up to MAX_BRACKETS marginal brackets (upTo, rateBps) on a
-/// builder's income per epoch. A new schedule takes effect SCHEDULE_DELAY (2)
-/// epochs after the epoch it is set in. A schedule announced for epoch E is
-/// final once epoch E-1 has started: only a schedule still pending for
-/// currentEpoch + 2 can be replaced. Bounds: 1..8 brackets, `upTo` strictly
+/// builder's income per epoch. A new schedule takes effect in epoch
+/// currentEpoch + SCHEDULE_DELAY + 1, so it is always announced at least
+/// SCHEDULE_DELAY (2) FULL epochs ahead, whenever in an epoch it is set. Only a
+/// schedule pending for that same epoch can be replaced (the replacement gets the
+/// same full notice); one announced earlier is final. Bounds: 1..8 brackets, `upTo` strictly
 /// increasing with the last at type(uint128).max, rates non-decreasing and
 /// <= MAX_RATE_BPS (40%), the first bracket 0% up to at least MIN_FREE_UPTO.
 ///
@@ -39,6 +46,9 @@ import {SeasonPool} from "./SeasonPool.sol";
 contract BuilderFund is AccessControl {
     bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
     bytes32 public constant MARKETS_ROLE = keccak256("MARKETS_ROLE");
+    /// @notice May credit income to an ended epoch (the WonderEscrow, releasing a
+    /// team's escrow to the epochs it was earned in).
+    bytes32 public constant LATE_ROLE = keccak256("LATE_ROLE");
 
     /// @notice Registrai's 1% of every builder payout (of the after-tax income).
     uint256 public constant PROTOCOL_FEE_BPS = 100;
@@ -47,7 +57,7 @@ contract BuilderFund is AccessControl {
     uint256 public constant MAX_RATE_BPS = 4000;
     /// @notice The first bracket must be tax-free up to at least $100.
     uint256 public constant MIN_FREE_UPTO = 100e6;
-    /// @notice A schedule set in epoch e applies from epoch e + SCHEDULE_DELAY.
+    /// @notice Full epochs of notice for a new schedule (it applies from epoch e + SCHEDULE_DELAY + 1).
     uint256 public constant SCHEDULE_DELAY = 2;
 
     NanoLedger public immutable LEDGER;
@@ -65,8 +75,8 @@ contract BuilderFund is AccessControl {
 
     /// @notice epoch => builderId => income credited in that epoch.
     mapping(uint256 => mapping(uint256 => uint256)) public incomeOf;
-    /// @notice epoch => builderId => claimed (or swept).
-    mapping(uint256 => mapping(uint256 => bool)) public claimed;
+    /// @notice epoch => builderId => income already paid out (claimed or swept).
+    mapping(uint256 => mapping(uint256 => uint256)) public paidGross;
     /// @notice Income credited and not yet claimed or swept.
     uint256 public outstanding;
 
@@ -87,6 +97,8 @@ contract BuilderFund is AccessControl {
         address payout
     );
     event FrozenSwept(uint256 indexed epoch, uint256 indexed builderId, uint256 gross);
+    event LateIncomeCredited(uint256 indexed epoch, uint256 indexed builderId, uint256 amount);
+    event Skimmed(uint256 amount);
     event ScheduleSet(uint256 indexed effectiveEpoch);
 
     error ZeroAddress();
@@ -149,6 +161,18 @@ contract BuilderFund is AccessControl {
         emit IncomeCredited(epoch, builderId, amount);
     }
 
+    /// @notice Attribute `amount`, already moved to this contract's ledger account
+    /// by the caller, to `builderId`'s income for the ENDED epoch `epoch` (a team's
+    /// escrow released to the epochs it was earned in). LATE_ROLE only.
+    function creditLate(uint256 builderId, uint256 epoch, uint256 amount) external onlyRole(LATE_ROLE) {
+        if (amount == 0) return;
+        if (block.timestamp < epochEnd(epoch)) revert EpochNotEnded();
+        incomeOf[epoch][builderId] += amount;
+        outstanding += amount;
+        if (LEDGER.balanceOf(address(this)) < outstanding) revert Unfunded();
+        emit LateIncomeCredited(epoch, builderId, amount);
+    }
+
     /// @notice Forward `amount`, already moved to this contract's ledger account
     /// by the caller, to the SeasonPool (a voided market's unclaimed agent escrow).
     function creditSeason(uint256 amount) external onlyRole(MARKETS_ROLE) {
@@ -165,17 +189,19 @@ contract BuilderFund is AccessControl {
     /// Permissionless, once per (epoch, builder). Returns the net.
     function claimFor(uint256 epoch, uint256 builderId) external returns (uint256 net) {
         if (block.timestamp < epochEnd(epoch)) revert EpochNotEnded();
-        if (claimed[epoch][builderId]) revert AlreadyClaimed();
-        uint256 gross = incomeOf[epoch][builderId];
-        if (gross == 0) revert NoIncome();
+        uint256 income = incomeOf[epoch][builderId];
+        if (income == 0) revert NoIncome();
+        uint256 paid = paidGross[epoch][builderId];
+        if (paid == income) revert AlreadyClaimed();
         if (!BUILDERS.isActiveBuilderId(builderId)) revert BuilderInactive();
         address payout = CARETAKERS.payoutOf(builderId);
         if (payout == address(0)) revert BuilderInactive();
 
+        uint256 gross = income - paid;
         uint256 tax;
         uint256 fee;
-        (tax, fee, net) = _split(gross, epoch);
-        claimed[epoch][builderId] = true;
+        (tax, fee, net) = _splitIncrement(income, paid, epoch);
+        paidGross[epoch][builderId] = income;
         outstanding -= gross;
 
         if (net > 0) LEDGER.internalTransfer(payout, net);
@@ -189,13 +215,33 @@ contract BuilderFund is AccessControl {
     function sweepFrozen(uint256 epoch, uint256 builderId) external onlyRole(GOVERNOR_ROLE) {
         if (BUILDERS.isActiveBuilderId(builderId)) revert BuilderActive();
         if (block.timestamp < epochEnd(epoch)) revert EpochNotEnded();
-        if (claimed[epoch][builderId]) revert AlreadyClaimed();
-        uint256 gross = incomeOf[epoch][builderId];
-        if (gross == 0) revert NoIncome();
-        claimed[epoch][builderId] = true;
+        uint256 income = incomeOf[epoch][builderId];
+        if (income == 0) revert NoIncome();
+        uint256 paid = paidGross[epoch][builderId];
+        if (paid == income) revert AlreadyClaimed();
+        uint256 gross = income - paid;
+        paidGross[epoch][builderId] = income;
         outstanding -= gross;
         _toSeason(gross);
         emit FrozenSwept(epoch, builderId, gross);
+    }
+
+    /// @notice Send the fund's stray balance (anything above `outstanding`, which
+    /// no credit accounted for: a donation, a builder paying itself here) to the
+    /// SeasonPool. Permissionless; never touches owed income.
+    function skim() external returns (uint256 amount) {
+        uint256 bal = LEDGER.balanceOf(address(this));
+        if (bal <= outstanding) return 0;
+        amount = bal - outstanding;
+        _toSeason(amount);
+        emit Skimmed(amount);
+    }
+
+    /// @notice True when `builderId`'s income of `epoch` has been fully paid out
+    /// (claimed or swept) and nothing is unpaid; late income makes it false again.
+    function claimed(uint256 epoch, uint256 builderId) external view returns (bool) {
+        uint256 income = incomeOf[epoch][builderId];
+        return income > 0 && paidGross[epoch][builderId] == income;
     }
 
     function _toSeason(uint256 amount) internal {
@@ -204,20 +250,33 @@ contract BuilderFund is AccessControl {
     }
 
     function _split(uint256 gross, uint256 epoch) internal view returns (uint256 tax, uint256 fee, uint256 net) {
-        tax = progressiveTax(gross, _brackets[_scheduleIndex(epoch)]);
-        fee = ((gross - tax) * PROTOCOL_FEE_BPS) / BPS;
-        net = gross - tax - fee;
+        return _splitIncrement(gross, 0, epoch);
+    }
+
+    /// @dev The split of the unpaid part (income - paid) of an epoch's income: the
+    /// tax is the marginal tax of that slice on top of what was already paid.
+    function _splitIncrement(uint256 income, uint256 paid, uint256 epoch)
+        internal
+        view
+        returns (uint256 tax, uint256 fee, uint256 net)
+    {
+        Bracket[] memory b = _brackets[_scheduleIndex(epoch)];
+        uint256 unpaid = income - paid;
+        tax = progressiveTax(income, b) - progressiveTax(paid, b);
+        if (tax > unpaid) tax = unpaid; // per-slice flooring can never tax beyond the slice
+        fee = ((unpaid - tax) * PROTOCOL_FEE_BPS) / BPS;
+        net = unpaid - tax - fee;
     }
 
     // ───────────────────────────── schedule ─────────────────────────────
 
-    /// @notice Set the tax schedule for currentEpoch() + SCHEDULE_DELAY onward.
-    /// Replaces a schedule still pending for that same epoch; one pending for
-    /// currentEpoch() + 1 is already final and stays.
+    /// @notice Set the tax schedule for currentEpoch() + SCHEDULE_DELAY + 1 onward:
+    /// at least SCHEDULE_DELAY full epochs of notice. Replaces a schedule still
+    /// pending for that same epoch; one announced for an earlier epoch is final.
     function setSchedule(Bracket[] calldata brackets) external onlyRole(GOVERNOR_ROLE) {
         Bracket[] memory b = brackets;
         _validate(b);
-        uint256 effective = currentEpoch() + SCHEDULE_DELAY;
+        uint256 effective = currentEpoch() + SCHEDULE_DELAY + 1;
         uint256 last = _effectiveFrom.length - 1;
         if (_effectiveFrom[last] == effective) {
             delete _brackets[last];
@@ -297,14 +356,16 @@ contract BuilderFund is AccessControl {
         return (_effectiveFrom[index], _brackets[index]);
     }
 
-    /// @notice What claimFor(epoch, builderId) splits the builder's income of
-    /// `epoch` into (independent of whether it was claimed or can be yet).
+    /// @notice What claimFor(epoch, builderId) would split the builder's unpaid
+    /// income of `epoch` into (independent of whether the epoch has ended yet).
     function quote(uint256 epoch, uint256 builderId)
         external
         view
         returns (uint256 gross, uint256 tax, uint256 fee, uint256 net)
     {
-        gross = incomeOf[epoch][builderId];
-        (tax, fee, net) = _split(gross, epoch);
+        uint256 income = incomeOf[epoch][builderId];
+        uint256 paid = paidGross[epoch][builderId];
+        gross = income - paid;
+        (tax, fee, net) = _splitIncrement(income, paid, epoch);
     }
 }
