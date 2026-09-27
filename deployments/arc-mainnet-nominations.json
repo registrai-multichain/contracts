@@ -1,0 +1,20 @@
+{
+  "network": "arc-mainnet",
+  "chainId": 5042,
+  "ProjectNominations": {
+    "address": "0x6d87C64CD64e5c8b3204fCBFD28720b27C80F354",
+    "deployTx": "0x3ef9be99df6233d8eb3ab4bc9b714a5d4f12286109dbf3b859f14c7525c033c8",
+    "block": 23029754,
+    "source": "contracts cddcb90 (src/perennial/ProjectNominations.sol)",
+    "roles": {
+      "DEFAULT_ADMIN_ROLE": [
+        "0xFeE926e8Be2D1C6192213cf20f31D94Dad1e80Fb"
+      ],
+      "NOMINATOR_ROLE": [
+        "0xFeE926e8Be2D1C6192213cf20f31D94Dad1e80Fb",
+        "0x80e81588175558D565FFC1f63Fe0513a61316405"
+      ]
+    },
+    "verified": "3 RoleGranted events at deploy, deployer holds no role (checked on chain 2026-09-27)"
+  }
+}
