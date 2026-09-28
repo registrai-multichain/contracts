@@ -40,7 +40,7 @@ abstract contract BuilderStack is Test {
         caretakers = new CaretakerRegistry(builders, safe);
         badge = new VerifiedBuilderBadge(builders, safe, operator, "Arc", "img/", "ext/");
         pool = new SeasonPool(ledger, builders, caretakers, safe);
-        fund = new BuilderFund(ledger, builders, caretakers, pool, treasury, safe, EPOCH, LaunchSchedule.brackets());
+        fund = new BuilderFund(ledger, builders, caretakers, pool, treasury, safe, EPOCH, 0, LaunchSchedule.brackets());
         vm.startPrank(safe);
         pool.grantRole(pool.FUNDER_ROLE(), address(fund));
         fund.grantRole(fund.MARKETS_ROLE(), markets);

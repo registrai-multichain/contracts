@@ -182,14 +182,50 @@ contract BuilderFundTest is Test {
     function test_constructor_guards() public {
         BuilderFund.Bracket[] memory s = LaunchSchedule.brackets();
         vm.expectRevert(BuilderFund.ZeroEpochLength.selector);
-        new BuilderFund(ledger, builders, caretakers, pool, treasury, address(this), 0, s);
+        new BuilderFund(ledger, builders, caretakers, pool, treasury, address(this), 0, 0, s);
         vm.expectRevert(BuilderFund.ZeroAddress.selector);
-        new BuilderFund(ledger, builders, caretakers, pool, address(0), address(this), EPOCH, s);
+        new BuilderFund(ledger, builders, caretakers, pool, address(0), address(this), EPOCH, 0, s);
         vm.expectRevert(BuilderFund.ZeroAddress.selector);
-        new BuilderFund(ledger, builders, caretakers, SeasonPool(address(0)), treasury, address(this), EPOCH, s);
+        new BuilderFund(ledger, builders, caretakers, SeasonPool(address(0)), treasury, address(this), EPOCH, 0, s);
         s[0].rateBps = 1;
         vm.expectRevert(BuilderFund.BadFirstBracket.selector);
-        new BuilderFund(ledger, builders, caretakers, pool, treasury, address(this), EPOCH, s);
+        new BuilderFund(ledger, builders, caretakers, pool, treasury, address(this), EPOCH, 0, s);
+    }
+
+    // ───────────────────────────── start (season alignment) ─────────────────────────────
+
+    /// 2026-09-03 00:00 UTC: one 28-day epoch before Season 1 (2026-10-01 00:00 UTC,
+    /// frontend/src/lib/seasons.ts SEASON_ONE_START), so epoch n == season n.
+    uint256 constant SEASON_ONE_START = 1790812800;
+    uint256 constant SEASON = 28 days;
+
+    function test_start_explicit_past_anchors_the_epochs() public {
+        vm.warp(SEASON_ONE_START - 1 days); // deployed on 2026-09-30
+        BuilderFund f = new BuilderFund(
+            ledger, builders, caretakers, pool, treasury, address(this), SEASON, SEASON_ONE_START - SEASON, LaunchSchedule.brackets()
+        );
+        assertEq(f.START(), SEASON_ONE_START - SEASON);
+        assertEq(f.currentEpoch(), 0, "pre-season trades land in epoch 0");
+        assertEq(f.epochEnd(0), SEASON_ONE_START, "epoch 0 ends as Season 1 opens");
+        vm.warp(SEASON_ONE_START);
+        assertEq(f.currentEpoch(), 1, "Season 1 is epoch 1");
+        assertEq(f.epochEnd(1), SEASON_ONE_START + SEASON, "epoch 1 ends 2026-10-29 00:00 UTC");
+        vm.warp(SEASON_ONE_START + SEASON);
+        assertEq(f.currentEpoch(), 2, "Season 2 is epoch 2");
+    }
+
+    function test_start_zero_means_deploy_time() public {
+        vm.warp(1_800_000_000);
+        BuilderFund f = new BuilderFund(ledger, builders, caretakers, pool, treasury, address(this), EPOCH, 0, LaunchSchedule.brackets());
+        assertEq(f.START(), 1_800_000_000);
+        assertEq(f.currentEpoch(), 0);
+    }
+
+    function test_start_in_the_future_reverts() public {
+        vm.warp(1_800_000_000);
+        BuilderFund.Bracket[] memory s = LaunchSchedule.brackets();
+        vm.expectRevert(BuilderFund.StartInFuture.selector);
+        new BuilderFund(ledger, builders, caretakers, pool, treasury, address(this), EPOCH, 1_800_000_001, s);
     }
 
     // ───────────────────────────── tax ─────────────────────────────

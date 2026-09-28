@@ -670,7 +670,7 @@ contract FeeModelTest is Test {
     function test_builderFund_rejectsZeroProtocolTreasury() public {
         BuilderFund.Bracket[] memory s = fund.scheduleFor(0);
         vm.expectRevert(BuilderFund.ZeroAddress.selector);
-        new BuilderFund(ledger, builders, caretakers, pool, address(0), address(this), 1 days, s);
+        new BuilderFund(ledger, builders, caretakers, pool, address(0), address(this), 1 days, 0, s);
     }
 
     // ───────────────────────── solvency fuzz ─────────────────────────

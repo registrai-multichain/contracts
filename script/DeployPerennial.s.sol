@@ -33,7 +33,10 @@ import {WonderEscrow} from "../src/perennial/WonderEscrow.sol";
 /// @dev env (MAINNET = required on 5042, no default; else default in brackets):
 ///      REGISTRY, ATTESTATION, NANO_LEDGER      always required
 ///      EPOCH_LENGTH        MAINNET [1h]   BuilderFund epoch, seconds, > 0
-///                                         (mainnet: exactly 30 days); immutable
+///                                         (mainnet: exactly 28 days, the season); immutable
+///      EPOCH_START         MAINNET [0 = deploy time] BuilderFund START, unix seconds,
+///                                         not in the future (mainnet: exactly
+///                                         MAINNET_EPOCH_START, so epoch n = season n)
 ///      SETTLEMENT_WINDOW   MAINNET [24h]  immutable, 1h..7d
 ///      RESOLUTION_GRACE    MAINNET [7d]   immutable, 1d..30d
 ///      PROTOCOL_TREASURY   MAINNET [deployer] receives the fund's 1% of every
@@ -63,6 +66,7 @@ contract DeployPerennial is DeployBase {
         address attestation;
         address ledger;
         uint256 epochLength;
+        uint256 epochStart;
         uint256 settlementWindow;
         uint256 resolutionGrace;
         address protocolTreasury;
@@ -119,6 +123,8 @@ contract DeployPerennial is DeployBase {
     /// @notice The live phase-1 contracts on Arc mainnet (DeployBuilders, block
     /// 22642042). Where they have code (Arc mainnet and its forks) the env must name
     /// exactly these (audit 2026-09-27 L-4).
+    /// BuilderFund START on mainnet: 2026-09-03 00:00 UTC = Season 1 (2026-10-01) minus 28 days.
+    uint256 public constant MAINNET_EPOCH_START = 1788393600;
     address public constant MAINNET_BUILDER_REGISTRY = 0xBB6F4B18776Fd20Bb53a1205375273373DD1E5bA;
     address public constant MAINNET_CARETAKER_REGISTRY = 0x64725935d90F0aa6f3c8642Bb9cACF44CAA46224;
     address public constant MAINNET_VERIFIED_BADGE = 0xF229d2Ed13Cc35d46fa7676a579495E5C80CFEB2;
@@ -130,6 +136,7 @@ contract DeployPerennial is DeployBase {
         c.attestation = vm.envAddress("ATTESTATION");
         c.ledger = vm.envAddress("NANO_LEDGER");
         c.epochLength = _uintReq("EPOCH_LENGTH", 1 hours);
+        c.epochStart = _uintReq("EPOCH_START", 0);
         c.settlementWindow = _uintReq("SETTLEMENT_WINDOW", 24 hours);
         c.resolutionGrace = _uintReq("RESOLUTION_GRACE", 7 days);
         c.protocolTreasury = _addrReq("PROTOCOL_TREASURY", deployer);
@@ -162,7 +169,14 @@ contract DeployPerennial is DeployBase {
             // The tax brackets are per builder per epoch and the epoch is immutable:
             // shorter multiplies every tax-free allowance, longer (a typo) locks every
             // first claim for as long (audit L-3).
-            require(c.epochLength == 30 days, "mainnet: EPOCH_LENGTH must be 30 days");
+            // Epochs ARE the seasons (frontend/src/lib/seasons.ts: 28 days from Season 1,
+            // 2026-10-01 00:00 UTC), anchored one epoch early so epoch n = season n and
+            // anything traded before Season 1 lands in epoch 0.
+            require(c.epochLength == 28 days, "mainnet: EPOCH_LENGTH must be 28 days (the season)");
+            require(
+                c.epochStart == MAINNET_EPOCH_START,
+                "mainnet: EPOCH_START must be 2026-09-03 00:00 UTC (Season 1 minus one epoch)"
+            );
             // The 1% fee is immutable and paid on the ledger: the treasury must be a
             // contract that can use a balance on THIS ledger (the fee splitter), never an
             // EOA or a contract on another ledger (audit L-3).
@@ -231,7 +245,15 @@ contract DeployPerennial is DeployBase {
         NanoLedger ledger = NanoLedger(c.ledger);
         d.seasonPool = new SeasonPool(ledger, d.builders, d.caretakers, c.deployer);
         d.fund = new BuilderFund(
-            ledger, d.builders, d.caretakers, d.seasonPool, c.protocolTreasury, c.deployer, c.epochLength, LaunchSchedule.brackets()
+            ledger,
+            d.builders,
+            d.caretakers,
+            d.seasonPool,
+            c.protocolTreasury,
+            c.deployer,
+            c.epochLength,
+            c.epochStart,
+            LaunchSchedule.brackets()
         );
         d.badge = c.badge != address(0)
             ? VerifiedBuilderBadge(c.badge)

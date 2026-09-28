@@ -52,7 +52,7 @@ contract RehearseSettlement is Script {
         // protocol treasury: a fixed address no rehearsal key controls
         SeasonPool pool = new SeasonPool(ledger, builders, caretakers, deployer);
         BuilderFund fund = new BuilderFund(
-            ledger, builders, caretakers, pool, address(0x7EA5), deployer, 1 days, LaunchSchedule.brackets()
+            ledger, builders, caretakers, pool, address(0x7EA5), deployer, 1 days, 0, LaunchSchedule.brackets()
         );
         // builder markets need a live badge; their feeds are bound to builder #1 below
         VerifiedBuilderBadge badge = new VerifiedBuilderBadge(builders, deployer, deployer, "Anvil", "", "");

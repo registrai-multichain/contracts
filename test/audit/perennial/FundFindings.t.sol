@@ -43,7 +43,7 @@ contract FundFindingsTest is Test {
         builders = new BuilderRegistry(address(this));
         caretakers = new CaretakerRegistry(builders, address(this));
         pool = new SeasonPool(ledger, builders, caretakers, address(this));
-        fund = new BuilderFund(ledger, builders, caretakers, pool, treasury, address(this), EPOCH, LaunchSchedule.brackets());
+        fund = new BuilderFund(ledger, builders, caretakers, pool, treasury, address(this), EPOCH, 0, LaunchSchedule.brackets());
         pool.grantRole(pool.FUNDER_ROLE(), address(fund));
         fund.grantRole(fund.MARKETS_ROLE(), address(this));
         badge = new VerifiedBuilderBadge(builders, address(this), address(this), "Local", "", "");

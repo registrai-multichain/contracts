@@ -18,7 +18,7 @@ library FundKit {
     {
         pool = new SeasonPool(ledger, builders, caretakers, address(this));
         fund = new BuilderFund(
-            ledger, builders, caretakers, pool, treasury, address(this), epochLength, LaunchSchedule.brackets()
+            ledger, builders, caretakers, pool, treasury, address(this), epochLength, 0, LaunchSchedule.brackets()
         );
         pool.grantRole(pool.FUNDER_ROLE(), address(fund));
     }

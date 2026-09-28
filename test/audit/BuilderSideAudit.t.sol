@@ -600,7 +600,7 @@ contract BuilderSideAuditPhase2Test is Test {
         vm.prank(safe);
         caretakers.grantRole(gov, onboarder);
         pool = new SeasonPool(ledger, builders, caretakers, safe);
-        fund = new BuilderFund(ledger, builders, caretakers, pool, treasury, safe, EPOCH, LaunchSchedule.brackets());
+        fund = new BuilderFund(ledger, builders, caretakers, pool, treasury, safe, EPOCH, 0, LaunchSchedule.brackets());
         vm.startPrank(safe);
         pool.grantRole(pool.FUNDER_ROLE(), address(fund));
         fund.grantRole(fund.MARKETS_ROLE(), markets);
@@ -858,6 +858,12 @@ contract BuilderSideAuditDeployTest is Test {
         c.attestation = address(attestation);
         c.ledger = address(ledger);
         c.epochLength = 30 days;
+        if (block.chainid == 5042) {
+            // Mainnet epochs are the 28-day seasons, anchored one epoch before Season 1.
+            c.epochLength = 28 days;
+            c.epochStart = 1788393600; // 2026-09-03 00:00 UTC
+            if (block.timestamp < 1790726400) vm.warp(1790726400); // deployed 2026-09-30
+        }
         c.settlementWindow = 24 hours;
         c.resolutionGrace = 7 days;
         c.protocolTreasury = protocolTreasury;
@@ -937,7 +943,7 @@ contract BuilderSideAuditDeployTest is Test {
         CaretakerRegistry rogue = new CaretakerRegistry(builders, makeAddr("rogueGov"));
         vm.startPrank(deployer);
         pool = new SeasonPool(ledger, builders, rogue, deployer);
-        fund = new BuilderFund(ledger, builders, rogue, pool, protocolTreasury, deployer, 30 days, LaunchSchedule.brackets());
+        fund = new BuilderFund(ledger, builders, rogue, pool, protocolTreasury, deployer, 30 days, 0, LaunchSchedule.brackets());
         WonderEscrow escrow = new WonderEscrow(ledger, fund, badge, deployer, 180 days);
         perennial =
             new MarketsPerennial(ledger, registry, attestation, builders, deployer, fund, 24 hours, 7 days, badge, escrow);

@@ -140,7 +140,8 @@ contract FundDeployRoleTableTest is Test {
         c.registry = address(registry);
         c.attestation = address(attestation);
         c.ledger = address(ledger);
-        c.epochLength = 30 days;
+        c.epochLength = 28 days; // the season (DeployPerennial mainnet guard)
+        c.epochStart = 1788393600; // 2026-09-03 00:00 UTC: epoch 1 = Season 1
         c.settlementWindow = 24 hours;
         c.resolutionGrace = 7 days;
         c.protocolTreasury = address(splitter);
@@ -335,7 +336,8 @@ contract FundDeployRoleTableTest is Test {
         assertTrue(d.markets.approvedResolver(safe) && !d.markets.approvedResolver(deployer));
         assertEq(d.fund.PROTOCOL_TREASURY(), address(splitter));
         assertEq(address(d.fund.SEASON_POOL()), pool);
-        assertEq(d.fund.EPOCH_LENGTH(), 30 days);
+        assertEq(d.fund.EPOCH_LENGTH(), 28 days);
+        assertEq(d.fund.epochEnd(1), 1793232000, "epoch 1 = Season 1, ends 2026-10-29 00:00 UTC");
         assertEq(d.fund.scheduleCount(), 1);
         assertEq(d.fund.scheduleFor(0)[3].rateBps, 3000);
         assertEq(address(d.markets.FUND()), fund);
@@ -413,21 +415,26 @@ contract FundDeployRoleTableTest is Test {
         v.verifyExact(_stack(), safe, operator, onboarder, recorded);
     }
 
-    /// FIXED L-3: on mainnet the (immutable) epoch is exactly 30 days and the
-    /// (immutable) protocol treasury is a contract on this NanoLedger (the fee
-    /// splitter): no ten-year epoch, no EOA or other-ledger treasury.
-    function test_FIXED_L3_mainnetRequires30DayEpochAndALedgerTreasury() public {
+    /// FIXED L-3: on mainnet the (immutable) epoch is exactly the 28-day season,
+    /// anchored so epoch n = season n, and the (immutable) protocol treasury is a
+    /// contract on this NanoLedger (the fee splitter): no ten-year epoch, no EOA or
+    /// other-ledger treasury.
+    function test_FIXED_L3_mainnetRequiresSeasonEpochAndALedgerTreasury() public {
         _phase1();
         _oracleAndV4();
         DeployPerennial script = new DeployPerennial();
         DeployPerennial.Config memory c = _cfg();
         c.epochLength = 3650 days;
-        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 30 days"));
-        script.deploy(c);
-        c.epochLength = 29 days;
-        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 30 days"));
+        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 28 days (the season)"));
         script.deploy(c);
         c.epochLength = 30 days;
+        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 28 days (the season)"));
+        script.deploy(c);
+        c.epochLength = 28 days;
+        c.epochStart = 1788393600 + 1 days;
+        vm.expectRevert(bytes("mainnet: EPOCH_START must be 2026-09-03 00:00 UTC (Season 1 minus one epoch)"));
+        script.deploy(c);
+        c.epochStart = 1788393600;
         string memory treasuryErr = "mainnet: PROTOCOL_TREASURY must be a contract on this NanoLedger (the fee splitter)";
         c.protocolTreasury = makeAddr("someEOA");
         vm.expectRevert(bytes(treasuryErr));
@@ -441,7 +448,8 @@ contract FundDeployRoleTableTest is Test {
         script.deploy(c);
         c.protocolTreasury = address(splitter);
         d = script.deploy(c);
-        assertEq(d.fund.EPOCH_LENGTH(), 30 days);
+        assertEq(d.fund.EPOCH_LENGTH(), 28 days);
+        assertEq(d.fund.epochEnd(1), 1793232000, "epoch 1 = Season 1, ends 2026-10-29 00:00 UTC");
         assertEq(d.fund.PROTOCOL_TREASURY(), address(splitter));
     }
 

@@ -134,6 +134,12 @@ contract DeployScriptsTest is Test {
         c.attestation = address(attestation);
         c.ledger = address(ledger);
         c.epochLength = 30 days;
+        if (block.chainid == 5042) {
+            // Mainnet epochs are the 28-day seasons, anchored one epoch before Season 1.
+            c.epochLength = 28 days;
+            c.epochStart = 1788393600; // 2026-09-03 00:00 UTC
+            if (block.timestamp < 1790726400) vm.warp(1790726400); // deployed 2026-09-30
+        }
         c.settlementWindow = 24 hours;
         c.resolutionGrace = 7 days;
         c.protocolTreasury = protocolTreasury;
@@ -502,6 +508,11 @@ contract DeployScriptsTest is Test {
         new Handoff().handoff(_stack(), admin, deployer);
         _assertDeployerHoldsNothing();
         new VerifyRoles().verify(_stack(), admin, deployer);
+        // The fund's epochs are the seasons: epoch 1 = Season 1, 2026-10-01 .. 10-29 00:00 UTC.
+        assertEq(fund.EPOCH_LENGTH(), 28 days);
+        assertEq(fund.START(), 1788393600);
+        assertEq(fund.epochEnd(0), 1790812800, "epoch 0 ends as Season 1 opens");
+        assertEq(fund.epochEnd(1), 1793232000, "epoch 1 ends 2026-10-29 00:00 UTC");
     }
 
     function test_verifyRoles_failsBeforeHandoff() public {
@@ -674,7 +685,7 @@ contract DeployScriptsTest is Test {
 
         // a second fund the markets do not credit
         BuilderFund otherFund =
-            new BuilderFund(ledger, builders, caretakers, pool, protocolTreasury, admin, 30 days, LaunchSchedule.brackets());
+            new BuilderFund(ledger, builders, caretakers, pool, protocolTreasury, admin, 30 days, 0, LaunchSchedule.brackets());
         vm.startPrank(admin);
         otherFund.grantRole(MARKETS, address(perennial));
         otherFund.grantRole(MARKETS, address(perennial.ESCROW()));
@@ -702,7 +713,7 @@ contract DeployScriptsTest is Test {
         // hand-built fund paying the deployer (the script refuses this on mainnet)
         vm.startPrank(deployer);
         pool = new SeasonPool(ledger, builders, caretakers, deployer);
-        fund = new BuilderFund(ledger, builders, caretakers, pool, deployer, deployer, 30 days, LaunchSchedule.brackets());
+        fund = new BuilderFund(ledger, builders, caretakers, pool, deployer, deployer, 30 days, 0, LaunchSchedule.brackets());
         VerifiedBuilderBadge bdg = new VerifiedBuilderBadge(builders, deployer, deployer, "t", "", "");
         WonderEscrow escrow = new WonderEscrow(ledger, fund, bdg, deployer, 180 days);
         perennial =
@@ -805,10 +816,17 @@ contract DeployScriptsTest is Test {
         p.deploy(c);
         c = _perennialCfg();
         c.epochLength = 1 days;
-        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 30 days"));
+        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 28 days (the season)"));
         p.deploy(c);
-        c.epochLength = 31 days;
-        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 30 days"));
+        c.epochLength = 30 days;
+        vm.expectRevert(bytes("mainnet: EPOCH_LENGTH must be 28 days (the season)"));
+        p.deploy(c);
+        c = _perennialCfg();
+        c.epochStart = 0;
+        vm.expectRevert(bytes("mainnet: EPOCH_START must be 2026-09-03 00:00 UTC (Season 1 minus one epoch)"));
+        p.deploy(c);
+        c.epochStart = 1790812800; // Season 1 itself: epoch 0 would be Season 1, off by one
+        vm.expectRevert(bytes("mainnet: EPOCH_START must be 2026-09-03 00:00 UTC (Season 1 minus one epoch)"));
         p.deploy(c);
         DeployNanoStack n = new DeployNanoStack();
         DeployNanoStack.Config memory nc = _v4Cfg();

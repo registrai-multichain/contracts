@@ -12,7 +12,10 @@ import {SeasonPool} from "./SeasonPool.sol";
 /// @notice MarketsPerennial (MARKETS_ROLE) pays the 50% builder leg of every
 /// trading fee into this contract's NanoLedger account and `credit`s it to the
 /// builder the market is about, for the current epoch. Epochs are time-based
-/// (`(t - START) / EPOCH_LENGTH`); nothing closes them.
+/// (`(t - START) / EPOCH_LENGTH`); nothing closes them. START is set at deploy:
+/// 0 = the deploy time, or a past anchor so epochs line up with the season
+/// calendar (mainnet: 2026-09-03 00:00 UTC with 28-day epochs, so epoch n is
+/// season n and anything traded before Season 1 lands in epoch 0).
 ///
 /// Once an epoch has ended, anyone may `claimFor(epoch, builderId)`; it pays what
 /// of that epoch's income is still unpaid:
@@ -121,6 +124,7 @@ contract BuilderFund is AccessControl {
     error RatesDecreasing();
     error RateTooHigh();
     error BadFirstBracket();
+    error StartInFuture();
 
     constructor(
         NanoLedger ledger_,
@@ -130,6 +134,7 @@ contract BuilderFund is AccessControl {
         address protocolTreasury_,
         address admin,
         uint256 epochLength_,
+        uint256 start_,
         Bracket[] memory launchSchedule
     ) {
         if (
@@ -137,12 +142,14 @@ contract BuilderFund is AccessControl {
                 || address(seasonPool_) == address(0) || protocolTreasury_ == address(0) || admin == address(0)
         ) revert ZeroAddress();
         if (epochLength_ == 0) revert ZeroEpochLength();
+        // In the future, currentEpoch() would underflow and every credit revert.
+        if (start_ > block.timestamp) revert StartInFuture();
         LEDGER = ledger_;
         BUILDERS = builders_;
         CARETAKERS = caretakers_;
         SEASON_POOL = seasonPool_;
         PROTOCOL_TREASURY = protocolTreasury_;
-        START = block.timestamp;
+        START = start_ == 0 ? block.timestamp : start_;
         EPOCH_LENGTH = epochLength_;
         _validate(launchSchedule);
         _effectiveFrom.push(0);
